@@ -13,6 +13,10 @@
 
 这样工具既不需要知道 Agent 在哪，也不需要被 Agent 静态导入——注册中心
 把目录广播给所有 Agent，Agent 按名字发起调用。
+
+登记与续约的逻辑收敛在 :class:`ToolRegistrar`：它按「租约」工作，
+一个进程可以持有任意条租约，因此一个进程承载多个工具（如 MCP 桥）无需
+复制心跳代码。
 """
 
 from __future__ import annotations
@@ -21,8 +25,9 @@ import asyncio
 import json
 import logging
 import uuid
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from contextlib import suppress
+from dataclasses import dataclass
 from typing import Any, cast
 
 from blue_contracts_tool import (
@@ -50,7 +55,135 @@ from blue.transport import BusRuntime
 
 logger = logging.getLogger(__name__)
 
-__all__ = ["ToolWorker"]
+__all__ = ["ToolLease", "ToolRegistrar", "ToolWorker"]
+
+
+@dataclass(frozen=True)
+class ToolLease:
+    """一条工具租约：承载者标识 + 它对外提供的工具定义。
+
+    租约以 ``worker_id`` 为键，因此同一工具由新进程接管时，注册中心会移除旧记录。
+    一个进程可以持有任意条租约。
+    """
+
+    worker_id: str
+    definition: ToolDefinition
+
+    @property
+    def tool_name(self) -> str:
+        """本租约提供的工具名。"""
+        return self.definition.function.name
+
+
+class ToolRegistrar:
+    """把一组工具租约登记到注册中心，并周期性补发注册与续约。
+
+    只负责「让目录看到这些工具」，不关心工具如何执行；:class:`ToolWorker`
+    与多工具进程（如 MCP 桥）共用同一套登记语义。
+    """
+
+    def __init__(
+        self,
+        *,
+        runtime: BusRuntime,
+        leases: Iterable[ToolLease],
+        ttl: float = 15.0,
+    ) -> None:
+        """构造登记器。
+
+        :param runtime: 已装配好的总线运行时（须先 :meth:`~BusRuntime.start`）。
+        :param leases: 要登记的租约集合。
+        :param ttl: 租约时长（秒），心跳间隔为其三分之一。
+        """
+        if ttl <= 0:
+            raise ValueError("ttl 必须 > 0")
+        self._runtime = runtime
+        self._leases: tuple[ToolLease, ...] = tuple(leases)
+        for lease in self._leases:
+            if not lease.worker_id.strip():
+                raise ValueError("worker_id 不能为空")
+        self._ttl = ttl
+        self._heartbeat_task: asyncio.Task[None] | None = None
+        self._withdrawn = False
+
+    @property
+    def leases(self) -> tuple[ToolLease, ...]:
+        """本登记器负责的全部租约。"""
+        return self._leases
+
+    @property
+    def ttl(self) -> float:
+        """租约时长（秒）。"""
+        return self._ttl
+
+    async def announce(self) -> None:
+        """登记全部租约并启动续约循环（重复调用幂等）。"""
+        self._withdrawn = False
+        await self._publish_register()
+        if self._heartbeat_task is None:
+            self._heartbeat_task = asyncio.create_task(
+                self._heartbeat_loop(), name="tool-registrar.heartbeat"
+            )
+
+    async def withdraw(self) -> None:
+        """停止续约并注销全部租约（幂等，重复调用不再发事件）。"""
+        if self._withdrawn:
+            return
+        self._withdrawn = True
+        heartbeat, self._heartbeat_task = self._heartbeat_task, None
+        if heartbeat is not None:
+            heartbeat.cancel()
+            with suppress(asyncio.CancelledError):
+                await heartbeat
+        if not self._runtime.is_running:
+            return
+        proxy = self._runtime.proxy()
+        for lease in self._leases:
+            with suppress(Exception):
+                await proxy.publish(
+                    ToolUnregisterEvent.name,
+                    ToolUnregisterPayload(worker_id=lease.worker_id),
+                )
+
+    async def _publish_register(self) -> None:
+        """逐条登记租约。"""
+        proxy = self._runtime.proxy()
+        for lease in self._leases:
+            await proxy.publish(
+                ToolRegisterEvent.name,
+                ToolRegisterPayload(
+                    worker_id=lease.worker_id,
+                    tool=lease.definition,
+                    ttl=self._ttl,
+                ),
+            )
+
+    async def _heartbeat_loop(self) -> None:
+        """周期性补发注册并续约；单次失败不影响后续。"""
+        interval = max(self._ttl / 3.0, 0.1)
+        while True:
+            await asyncio.sleep(interval)
+            try:
+                proxy = self._runtime.proxy()
+                for lease in self._leases:
+                    await proxy.publish(
+                        ToolRegisterEvent.name,
+                        ToolRegisterPayload(
+                            worker_id=lease.worker_id,
+                            tool=lease.definition,
+                            ttl=self._ttl,
+                        ),
+                    )
+                    await proxy.publish(
+                        ToolHeartbeatEvent.name,
+                        ToolHeartbeatPayload(worker_id=lease.worker_id),
+                    )
+            except Exception:
+                logger.debug(
+                    "心跳发送失败：%s",
+                    ", ".join(lease.worker_id for lease in self._leases),
+                    exc_info=True,
+                )
 
 
 class ToolWorker:
@@ -86,7 +219,11 @@ class ToolWorker:
             f"tool.{self._definition.function.name}.{uuid.uuid4().hex[:8]}"
         )
         self._ttl = ttl
-        self._heartbeat_task: asyncio.Task[None] | None = None
+        self._registrar = ToolRegistrar(
+            runtime=runtime,
+            leases=[ToolLease(worker_id=self._worker_id, definition=self._definition)],
+            ttl=ttl,
+        )
 
     @property
     def worker_id(self) -> str:
@@ -103,33 +240,25 @@ class ToolWorker:
         """工具定义（可直接作为 LLM 的 tools 参数）。"""
         return self._definition
 
+    @property
+    def registrar(self) -> ToolRegistrar:
+        """承载本工具的登记器。"""
+        return self._registrar
+
     async def start(self) -> None:
         """启动总线、注册调用处理器并登记到注册中心。"""
         await self._runtime.start()
         try:
             await self._runtime.register(ToolCallHandler(self))
-            await self._publish_register()
+            await self._registrar.announce()
         except Exception:
             await self._runtime.stop()
             raise
-        self._heartbeat_task = asyncio.create_task(
-            self._heartbeat_loop(), name=f"worker.{self.tool_name}.heartbeat"
-        )
         logger.info("工具进程已上线：%s（%s）", self.tool_name, self._worker_id)
 
     async def stop(self) -> None:
         """下线：停止心跳 → 注销 → 关闭总线。"""
-        heartbeat, self._heartbeat_task = self._heartbeat_task, None
-        if heartbeat is not None:
-            heartbeat.cancel()
-            with suppress(asyncio.CancelledError):
-                await heartbeat
-        if self._runtime.is_running:
-            with suppress(Exception):
-                await self._runtime.proxy().publish(
-                    ToolUnregisterEvent.name,
-                    ToolUnregisterPayload(worker_id=self._worker_id),
-                )
+        await self._registrar.withdraw()
         await self._runtime.stop()
         logger.info("工具进程已下线：%s", self.tool_name)
 
@@ -158,37 +287,6 @@ class ToolWorker:
                 content=text,
             ),
         )
-
-    async def _publish_register(self) -> None:
-        """向注册中心登记自己。"""
-        await self._runtime.proxy().publish(
-            ToolRegisterEvent.name,
-            ToolRegisterPayload(
-                worker_id=self._worker_id, tool=self._definition, ttl=self._ttl
-            ),
-        )
-
-    async def _heartbeat_loop(self) -> None:
-        """周期性补发注册并续约；单次失败不影响后续。"""
-        interval = max(self._ttl / 3.0, 0.1)
-        while True:
-            await asyncio.sleep(interval)
-            try:
-                proxy = self._runtime.proxy()
-                await proxy.publish(
-                    ToolRegisterEvent.name,
-                    ToolRegisterPayload(
-                        worker_id=self._worker_id,
-                        tool=self._definition,
-                        ttl=self._ttl,
-                    ),
-                )
-                await proxy.publish(
-                    ToolHeartbeatEvent.name,
-                    ToolHeartbeatPayload(worker_id=self._worker_id),
-                )
-            except Exception:
-                logger.debug("心跳发送失败：%s", self._worker_id, exc_info=True)
 
 
 def _unpack(content: MessageContent | None) -> tuple[str, bool]:

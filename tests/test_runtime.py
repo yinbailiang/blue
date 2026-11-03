@@ -7,6 +7,8 @@ from pathlib import Path
 import pytest
 from pydantic import BaseModel
 
+import blue.runtime as runtime
+
 from blue.errors import RuntimeConfigError
 from blue.runtime import (
     DEFAULT_RUNTIME_CONFIG,
@@ -63,3 +65,28 @@ def test_load_runtime_config_invalid_json(tmp_path: Path) -> None:
 
     with pytest.raises(RuntimeConfigError, match="校验失败"):
         load_runtime_config(DemoConfig, path)
+
+
+def test_registry_ttl_reads_injected_value(monkeypatch: pytest.MonkeyPatch) -> None:
+    """supervisor 注入 ``BLUE_REGISTRY_TTL`` 时以其为准。"""
+    monkeypatch.setenv("BLUE_REGISTRY_TTL", "7.5")
+
+    assert runtime.registry_ttl() == 7.5
+
+
+def test_registry_ttl_defaults_when_missing(monkeypatch: pytest.MonkeyPatch) -> None:
+    """缺失时回退缺省租约（15 秒）。"""
+    monkeypatch.delenv("BLUE_REGISTRY_TTL", raising=False)
+
+    assert runtime.registry_ttl() == 15.0
+    assert runtime.registry_ttl(default=3.0) == 3.0
+
+
+@pytest.mark.parametrize("raw", ["", "abc", "0", "-2"])
+def test_registry_ttl_rejects_bad_values(
+    monkeypatch: pytest.MonkeyPatch, raw: str
+) -> None:
+    """坏值不能变成「立刻过期」的租约。"""
+    monkeypatch.setenv("BLUE_REGISTRY_TTL", raw)
+
+    assert runtime.registry_ttl() == 15.0

@@ -12,6 +12,7 @@ from blue.errors import BlueError, RuntimeConfigError, SupervisorError
 from blue.runtime import (
     build_runtime,
     load_runtime_config,
+    registry_ttl,
     run_service,
     run_tool,
 )
@@ -21,7 +22,7 @@ from blue.transport import (
     MemoryRuntime,
     RabbitRuntime,
 )
-from blue.worker import ToolWorker
+from blue.worker import ToolLease, ToolRegistrar, ToolWorker
 
 __all__ = [
     "DEFAULT_CONFIG_PATH",
@@ -36,10 +37,13 @@ __all__ = [
     "Supervisor",
     "SupervisorError",
     "SupervisorSettings",
+    "ToolLease",
+    "ToolRegistrar",
     "ToolWorker",
     "build_runtime",
     "load_desired",
     "load_runtime_config",
+    "registry_ttl",
     "render_state",
     "run_service",
     "run_tool",

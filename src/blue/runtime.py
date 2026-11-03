@@ -29,6 +29,7 @@ __all__ = [
     "build_runtime",
     "bus_url",
     "load_runtime_config",
+    "registry_ttl",
     "run_service",
     "run_tool",
     "runtime_config_path",
@@ -84,6 +85,22 @@ def service_name(default: str = "service") -> str:
     return os.environ.get("BLUE_SERVICE_NAME", default)
 
 
+def registry_ttl(default: float = 15.0) -> float:
+    """工具租约时长（秒）：读 supervisor 注入的 ``BLUE_REGISTRY_TTL``。
+
+    环境变量缺失、无法解析或非正数时回退 ``default``，避免把一个坏值变成
+    「立刻过期」的租约。
+    """
+    raw = os.environ.get("BLUE_REGISTRY_TTL")
+    if raw is None:
+        return default
+    try:
+        value = float(raw)
+    except ValueError:
+        return default
+    return value if value > 0 else default
+
+
 def build_runtime(
     role: str,
     events: Iterable[type[EventDeclaration]],
@@ -122,7 +139,7 @@ def run_tool(
     :param name: 工具名（用于成员命名与日志）。
     :param ttl: 注册租约；缺省读 ``BLUE_REGISTRY_TTL``，再缺省 15 秒。
     """
-    lease = ttl if ttl is not None else float(os.environ.get("BLUE_REGISTRY_TTL", "15"))
+    lease = ttl if ttl is not None else registry_ttl()
     worker = ToolWorker(
         runtime=build_runtime(f"tool.{name}", TOOL_EVENTS),
         tool=tool,
