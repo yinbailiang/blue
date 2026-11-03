@@ -57,6 +57,7 @@ extraPaths = [
     "contracts/tool/src",
     "contracts/session/src",
     "services/agent/src",
+    "services/browser/src",
     "services/bus/src",
     "services/chat/src",
     "services/clock/src",

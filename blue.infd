@@ -9,6 +9,7 @@
 
 !file p"secrets.toml" as toml import .agent.api_key as agent_api_key, .bus.password as bus_password
 
+!from p"services/browser/service.infd" import ServiceTemplate as BrowserService
 !from p"services/bus/service.infd" import ServiceTemplate as BusService
 !from p"services/registry/service.infd" import ServiceTemplate as RegistryService
 !from p"services/session/service.infd" import ServiceTemplate as SessionService
@@ -73,6 +74,9 @@ shell = ShellService()
 
 # 天气查询：默认走 wttr.in，可改 base_url / timeout
 weather = WeatherService()
+
+# 无头 Firefox 截图：截图以图片附件回到模型（agent 真的能「看见」页面）
+browser = BrowserService()
 
 # MCP 客户端桥：把外部 MCP server（stdio）的工具接进目录。
 # 工具集是声明式的：只有 tools 里列出的 <server>__<tool> 会注册；声明的工具在

@@ -98,12 +98,14 @@ agent 再转成内容寻址的会话附件、以**多模态 tool 消息**回灌�
 ```python
 from blue.runtime import tool_attachment
 
+
 class Screenshot(BaseModel):
     text: str
     attachments: list[dict[str, str | None]]
 
+
 def screenshot(url: str) -> Screenshot:
-    png = render(url)                      # 你自己产出的图片字节
+    png = render(url)  # 你自己产出的图片字节
     return Screenshot(text="截图如下", attachments=[tool_attachment(png)])
 ```
 

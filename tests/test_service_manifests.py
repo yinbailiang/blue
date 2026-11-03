@@ -15,6 +15,7 @@ from blue.config import load_desired
 ROOT = Path(__file__).resolve().parents[1]
 SERVICES = (
     "agent",
+    "browser",
     "bus",
     "chat",
     "clock",
@@ -34,6 +35,7 @@ SERVICES = (
 )
 MANAGED = {
     "agent",
+    "browser",
     "bus",
     "clock",
     "edit_file",
@@ -49,6 +51,7 @@ MANAGED = {
 CONTRACTS = ("session", "tool")
 EXPECTED_CONTRACTS: dict[str, set[str]] = {
     "agent": {"tool", "session"},
+    "browser": {"tool"},
     "bus": set(),
     "chat": {"session"},
     "clock": {"tool"},
@@ -105,6 +108,7 @@ def test_blue_infd_compiles_and_matches_service_packages() -> None:
         module = importlib.import_module(f"blue_service_{name}")
         if name in {
             "agent",
+            "browser",
             "bus",
             "edit_file",
             "read_file",

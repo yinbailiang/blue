@@ -460,6 +460,7 @@ Ready / Running → Stopping → Stopped
 | `read_file` / `write_file` / `edit_file` | 文件读写与精确替换；相对路径默认锚定项目根 |
 | `shell` | 异步 shell 命令，超时进程组强杀、输出截断；默认工作目录为项目根 |
 | `weather` | 天气查询（wttr.in，免密钥）：实时实况 + 最多 3 天预报，天气码本地译中文 |
+| `browser` | 无头 Firefox 截图：把网页截成图片**作为附件**回到 agent（Pillow 归一化到会话体积上限内） |
 | `mcp_bridge` | MCP 客户端桥：把外部 MCP server（stdio）的工具接入工具目录；工具集声明式、schema 自动降级并留痕 |
 | `mcp_server` | MCP 服务端桥：把 blue 工具目录暴露给外部 MCP 客户端（stdio，手工运行，白名单 + 危险工具门禁） |
 | `chat` / `inspect` | 手工 UI 客户端，不纳入 supervisor 调谐 |
@@ -584,6 +585,8 @@ WebUI 支持**粘贴 / 拖入 / 选择**图片（PNG、JPEG、GIF、WebP），�
 - 预算：单张 ≤2 MiB（前端先降采样到长边 1568）、每轮 ≤4 张，超限报错而不是静默丢图；
 - **工具也能返回图片**：工具把 `blue.runtime.tool_attachment(...)` 放进返回对象的
   `attachments` 字段即可，正文里不会出现 base64；MCP 桥的 `image` 块同样走这条路。
+- `browser` 工具即是示例：`browser_screenshot(url, width, height)` 用无头 Firefox 抓图，
+  经 Pillow 缩到长边 ≤1568、必要时转 JPEG（会话单附件上限 2 MiB），agent 直接「看见」页面。
 
 细节（表结构、迁移、失败语义、界面链路）见 [`docs/multimodal.md`](docs/multimodal.md)。
 
