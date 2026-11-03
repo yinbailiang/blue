@@ -32,6 +32,7 @@ from blue.errors import ConfigError
 __all__ = [
     "DEFAULT_BUS_URL",
     "DEFAULT_CONFIG_PATH",
+    "SECRET_FILES",
     "digest_package",
     "load_desired",
     "read_package_version",
@@ -391,9 +392,21 @@ def _load_with_env(path: Path, workspace_root: Path) -> CompilationResult:
     )
 
 
+SECRET_FILES = ("secrets.toml", "secrets.json")
+"""允许被 ``!file`` 导入的密钥文件名。
+
+只授权这两个具体文件，而不是整个项目根目录——密钥文件是配置里唯一需要
+从工作区读取的外部数据。
+"""
+
+
 def _sandbox_patterns(workspace_root: Path) -> list[str]:
     services = (workspace_root / "services").resolve()
-    return [str(services / "**"), "services/**"]
+    patterns = [str(services / "**"), "services/**"]
+    for name in SECRET_FILES:
+        patterns.append(str(workspace_root / name))
+        patterns.append(name)
+    return patterns
 
 
 def _requested_env_names(diagnostics: list[Any]) -> list[str]:

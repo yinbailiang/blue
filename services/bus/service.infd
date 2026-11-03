@@ -9,7 +9,7 @@
   data_dir: str = "rabbitmq"
   vhost: str = "blue"
   user: str = "guest"
-  password_env: str = "RABBITMQ_PASSWORD"
+  password: <str?> = null
   configure: bool = true
   proxy: bool = false
   proxy_listen: str = "amqp://127.0.0.1:5673/blue"

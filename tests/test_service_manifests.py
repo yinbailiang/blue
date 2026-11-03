@@ -71,11 +71,8 @@ def test_service_directory_is_complete(name: str) -> None:
     assert meta["package"] == project["project"]["name"]
 
 
-def test_blue_infd_compiles_and_matches_service_packages(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+def test_blue_infd_compiles_and_matches_service_packages() -> None:
     """核心配置能编译，且每个服务的配置实例能通过其运行时模型。"""
-    monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-test")
     desired = load_desired(ROOT / "blue.infd")
 
     assert set(desired.services) == MANAGED

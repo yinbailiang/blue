@@ -23,7 +23,7 @@ class BusConfig(BaseModel):
     data_dir: Path = Path("rabbitmq")
     vhost: str = "blue"
     user: str = "guest"
-    password_env: str = "RABBITMQ_PASSWORD"
+    password: str | None = None
     configure: bool = True
     proxy: bool = False
     proxy_listen: str = "amqp://127.0.0.1:5673/blue"

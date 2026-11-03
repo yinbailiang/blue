@@ -100,8 +100,8 @@ services/echo/
 实例化。
 
 ```infd
-#env: DEEPSEEK_API_KEY "sk-xxx"
-!env import DEEPSEEK_API_KEY as ds_key
+# 密钥来自 secrets.toml（已 gitignore），见「密钥管理」一节
+!file p"secrets.toml" as toml import .agent.api_key as agent_api_key, .bus.password as bus_password
 
 !from p"services/bus/service.infd" import ServiceTemplate as BusService
 !from p"services/session/service.infd" import ServiceTemplate as SessionService
@@ -118,9 +118,9 @@ supervisor {
   registry_ttl: <float, positive> = 15.0
 }
 
-bus = BusService(mode = "managed", vhost = "blue")
+bus = BusService(mode = "managed", vhost = "blue", password = $bus_password)
 session = SessionService()
-agent = AgentService(api_key = $ds_key, max_steps = 8)
+agent = AgentService(api_key = $agent_api_key, max_steps = 8)
 webui = WebUIService()
 echo = EchoService()
 ```
@@ -128,6 +128,8 @@ echo = EchoService()
 - 键存在即启用；删除键即停止并从状态中清理。
 - `!from` 只导入模板，不导入数据；`service.infd` 里的 `service` 数据块不会污染
   核心配置。
+- `!file` 从工作区文件导入数据，沙盒只授权 `secrets.toml` / `secrets.json`
+  两个具体文件；导入其它文件会直接报错。
 - 顶层值必须满足对应模板（编译期由 infinity-data 校验）。
 
 ### `service.infd`：服务模板 + 通用系统元数据
@@ -156,6 +158,40 @@ service {
 - `service`：**通用系统元数据**，由控制面的 `ServiceMeta` 校验；不是服务配置。
 - 所有配置实例只存在于 `blue.infd`，`service.infd` 不保存配置实例。
 
+### 密钥管理
+
+所有密钥集中在项目根的 `secrets.toml`（或 `secrets.json`）。该文件已被
+`.gitignore` 忽略，模板见 `secrets.example.toml`：
+
+```toml
+[agent]
+api_key = "sk-..."
+
+[bus]
+password = ""
+```
+
+`blue.infd` 通过 `!file` 显式导入所需字段：
+
+```infd
+!file p"secrets.toml" as toml import .agent.api_key as agent_api_key, .bus.password as bus_password
+```
+
+约定：
+
+- **文件或键缺失 → 取值为 `null`（noexist）**。编译只产生 warning、不失败；
+  需要密钥的服务在启动时给出明确错误，而不是静默退化成空字符串。
+- **越权导入直接报错**：沙盒 `allow_files` 只授权 `secrets.toml` /
+  `secrets.json` 两个具体文件，从工作区其它文件 `!file` 导入会以
+  `sandbox.access_denied` 失败（fail loud）。
+- **不再读环境变量**：`agent` 的 `api_key`、`bus` 的 `password` 都只认配置值。
+  `bus` 的 `user = "guest"` 且密码留空时回退到 RabbitMQ 默认密码 `guest`，
+  其它用户留空即报错。
+- 想改用 JSON：把导入语句换成
+  `!file p"secrets.json" as json import ...` 即可，其余不变。
+- 密钥只在 supervisor 编译期读取，随后写进 `service_runtime_config.json`
+  （`0600`，已 gitignore），服务进程只读该文件。
+
 ### 运行时配置投影
 
 supervisor 编译 `blue.infd` 后，把每个服务的配置实例写入：
@@ -175,7 +211,6 @@ services/<name>/service_runtime_config.json
 ```json
 {
   "api_key": "sk-...",
-  "api_key_env": "DEEPSEEK_API_KEY",
   "base_url": null,
   "max_steps": 8,
   "model": "deepseek-v4-flash",
@@ -271,9 +306,10 @@ uv run blue doctor              # 检查 uv / RabbitMQ / 状态目录
 ## 快速开始
 
 ```bash
-uv sync --all-packages          # 安装根包与全部服务
-set -a; . ./.env; set +a        # DEEPSEEK_API_KEY 等
-uv run blue config-check        # 编译校验
+uv sync --all-packages               # 安装根包与全部服务
+cp secrets.example.toml secrets.toml # 填入密钥
+chmod 600 secrets.toml
+uv run blue config-check             # 编译校验
 
 # 终端 1：控制面（前台；生产交给 systemd / Docker）
 uv run blue up

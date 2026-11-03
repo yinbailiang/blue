@@ -69,7 +69,7 @@ async def _scenario() -> None:
     hub = MemoryFanout()
     aggregate = AgentAggregate(
         runtime=make_runtime(hub, "core"),
-        agent=AgentConfig(api_key_env="BLUE_UNUSED_KEY", max_steps=2),
+        agent=AgentConfig(api_key="sk-test", max_steps=2),
         registry=RegistryConfig(ttl=5.0, sweep_interval=0.05),
         client=ScriptedClient([Message.assistant(content="聚合可用")]),
         session_gateway=_MemorySessionGateway(),

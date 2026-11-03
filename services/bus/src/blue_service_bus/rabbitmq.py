@@ -20,7 +20,30 @@ from blue_service_bus.config import BusConfig
 
 logger = logging.getLogger(__name__)
 
-__all__ = ["AmqpEndpoint", "RabbitMQManager", "parse_amqp_url"]
+__all__ = [
+    "AmqpEndpoint",
+    "RabbitMQManager",
+    "parse_amqp_url",
+    "resolve_password",
+]
+
+
+def resolve_password(config: BusConfig) -> str:
+    """解析 RabbitMQ 密码。
+
+    取自 ``secrets.toml`` 的 ``[bus].password``（经 supervisor 写入运行时
+    配置），**不读环境变量**。留空且 ``user = "guest"`` 时回退到 RabbitMQ
+    默认密码；其它用户留空视为配置缺失。
+
+    :raises RuntimeConfigError: 非 guest 用户未配置密码。
+    """
+    if config.password:
+        return config.password
+    if config.user == "guest":
+        return "guest"
+    raise RuntimeConfigError(
+        "未设置 RabbitMQ 密码：请在 secrets.toml 的 [bus].password 中配置"
+    )
 
 
 @dataclass(frozen=True)
@@ -224,14 +247,8 @@ class RabbitMQManager:
         )
 
     def _password(self) -> str:
-        password = os.environ.get(self._config.password_env)
-        if password:
-            return password
-        if self._config.user == "guest":
-            return "guest"
-        raise RuntimeConfigError(
-            f"未设置 RabbitMQ 密码环境变量：{self._config.password_env}"
-        )
+        """RabbitMQ 密码（供 rabbitmqctl 与 broker 环境使用）。"""
+        return resolve_password(self._config)
 
 
 def _signal_group(pid: int, sig: signal.Signals) -> None:

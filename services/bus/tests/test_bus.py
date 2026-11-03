@@ -9,7 +9,11 @@ from pathlib import Path
 import pytest
 from blue_service_bus.config import BusConfig
 from blue_service_bus.proxy import TcpProxy
-from blue_service_bus.rabbitmq import RabbitMQManager, parse_amqp_url
+from blue_service_bus.rabbitmq import (
+    RabbitMQManager,
+    parse_amqp_url,
+    resolve_password,
+)
 
 from blue.errors import RuntimeConfigError
 
@@ -35,6 +39,32 @@ def test_parse_amqp_url_rejects_invalid() -> None:
         parse_amqp_url("http://localhost")
     with pytest.raises(RuntimeConfigError):
         parse_amqp_url("amqp:///vhost")
+
+
+def test_resolve_password_prefers_configured_value(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """配置了密码就用配置值。"""
+    monkeypatch.setenv("RABBITMQ_PASSWORD", "from-env")
+    config = BusConfig(user="blue", password="from-secrets")
+
+    assert resolve_password(config) == "from-secrets"
+
+
+def test_resolve_password_ignores_environment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """不再读环境变量：非 guest 用户未配置时报错。"""
+    monkeypatch.setenv("RABBITMQ_PASSWORD", "from-env")
+
+    with pytest.raises(RuntimeConfigError, match=r"secrets\.toml"):
+        resolve_password(BusConfig(user="blue"))
+
+
+def test_resolve_password_falls_back_for_guest() -> None:
+    """guest 用户留空时使用 RabbitMQ 默认密码。"""
+    assert resolve_password(BusConfig()) == "guest"
+    assert resolve_password(BusConfig(password="")) == "guest"
 
 
 def test_bus_config_defaults() -> None:

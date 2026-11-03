@@ -452,6 +452,66 @@ def test_digest_package_tracks_content_not_mtime(tmp_path: Path) -> None:
     assert digest_package(service_dir) != changed, "新增文件应改变指纹"
 
 
+NULLABLE_TEMPLATE = "~ServiceTemplate {\n  value: <str?> = null\n}\n"
+
+
+def _secret_workspace(tmp_path: Path) -> None:
+    """bus + 使用可空 value 的 demo 服务，便于验证 !file 导入。"""
+    _service(tmp_path, "bus", metadata=BUS_META)
+    _service(tmp_path, "demo", template=NULLABLE_TEMPLATE)
+
+
+SECRET_CONFIG = """
+!file p"secrets.toml" as toml import .demo.api_key as demo_key
+
+!from p"services/bus/service.infd" import ServiceTemplate as BusService
+!from p"services/demo/service.infd" import ServiceTemplate as DemoService
+bus = BusService()
+demo = DemoService(value = $demo_key)
+"""
+
+
+def test_load_desired_imports_secrets_file(tmp_path: Path) -> None:
+    """secrets.toml 中的值经 !file 进入服务配置。"""
+    _secret_workspace(tmp_path)
+    (tmp_path / "secrets.toml").write_text(
+        '[demo]\napi_key = "sk-secret"\n', encoding="utf-8"
+    )
+    config = _config(tmp_path, SECRET_CONFIG)
+
+    desired = load_desired(config)
+
+    assert desired.services["demo"].config["value"] == "sk-secret"
+
+
+def test_load_desired_tolerates_missing_secrets_file(tmp_path: Path) -> None:
+    """secrets.toml 缺失时取值为 null（noexist），编译仍成功。"""
+    _secret_workspace(tmp_path)
+    config = _config(tmp_path, SECRET_CONFIG)
+
+    desired = load_desired(config)
+
+    assert desired.services["demo"].config["value"] is None
+
+
+def test_load_desired_denies_non_secret_file_import(tmp_path: Path) -> None:
+    """沙盒只授权密钥文件，其它工作区文件的 !file 导入直接报错。
+
+    与「密钥文件缺失」不同：越权导入是错误（fail loud），缺失只是 warning。
+    """
+    _secret_workspace(tmp_path)
+    (tmp_path / "other.toml").write_text(
+        '[demo]\napi_key = "leaked"\n', encoding="utf-8"
+    )
+    config = _config(
+        tmp_path,
+        SECRET_CONFIG.replace('p"secrets.toml"', 'p"other.toml"'),
+    )
+
+    with pytest.raises(ConfigError, match="access_denied"):
+        load_desired(config)
+
+
 def test_env_var_without_value_is_reported(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

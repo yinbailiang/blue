@@ -18,6 +18,9 @@ result-*
 # 本地密钥
 .env
 .env.*
+secrets.toml
+secrets.json
+!secrets.example.toml
 
 # Agent runtime data
 .agents/MEMORY/memorys/*

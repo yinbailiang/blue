@@ -1,8 +1,7 @@
 ~ServiceTemplate {
   provider: in("deepseek", "openai") = "deepseek"
   model: str = "deepseek-v4-flash"
-  api_key: str = ""
-  api_key_env: str = "DEEPSEEK_API_KEY"
+  api_key: <str?> = null
   base_url: <str?> = null
   system_prompt: str = "你是 blue，一个通过工具完成任务的智能体。需要外部能力时调用工具，不要臆测结果。"
   max_steps: <int, range(32, )> = 512

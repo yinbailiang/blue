@@ -6,10 +6,11 @@ Agent 不直接读取核心 ``blue.infd``。
 
 from __future__ import annotations
 
-import os
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
+
+from blue.errors import RuntimeConfigError
 
 __all__ = ["AgentConfig", "RegistryConfig"]
 
@@ -21,8 +22,7 @@ class AgentConfig(BaseModel):
 
     provider: Literal["deepseek", "openai"] = "deepseek"
     model: str = "deepseek-chat"
-    api_key: str = ""
-    api_key_env: str = "DEEPSEEK_API_KEY"
+    api_key: str | None = None
     base_url: str | None = None
     system_prompt: str = "你是 blue，一个通过工具完成任务的智能体。"
     max_steps: int = Field(default=8, ge=1)
@@ -30,21 +30,19 @@ class AgentConfig(BaseModel):
     session_timeout: float = Field(default=10.0, gt=0)
 
     def resolve_api_key(self) -> str:
-        """取访问密钥：优先配置内注入值，否则读取环境变量。
+        """取模型访问密钥。
 
-        :raises RuntimeConfigError: 两者都没有可用值。
+        密钥来自 ``secrets.toml`` 的 ``[agent].api_key``，由 supervisor 写进
+        运行时配置；服务不再回退到环境变量。
+
+        :raises RuntimeConfigError: 未配置密钥。
         """
         if self.api_key:
             return self.api_key
-        api_key = os.environ.get(self.api_key_env, "")
-        if not api_key:
-            from blue.errors import RuntimeConfigError
-
-            raise RuntimeConfigError(
-                f"未提供访问凭证：请在配置中填写 api_key，"
-                f"或设置环境变量 {self.api_key_env!r}"
-            )
-        return api_key
+        raise RuntimeConfigError(
+            "未提供模型访问密钥：请在 secrets.toml 的 [agent].api_key 中配置"
+            "（模板见 secrets.example.toml）"
+        )
 
 
 class RegistryConfig(BaseModel):

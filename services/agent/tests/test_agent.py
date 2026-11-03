@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 
+import pytest
 from blue_service_agent.agent import AgentCore
 from blue_service_agent.catalog import ToolRegistryService
 from blue_service_agent.config import AgentConfig
@@ -14,6 +15,7 @@ from infinity_bus.templates.request import request
 from pydantic import BaseModel
 from tests.support import ScriptedClient, make_runtime, wait_until
 
+from blue.errors import RuntimeConfigError
 from blue.messages import encode_messages
 from blue.protocol import (
     SessionPromptEvent,
@@ -114,7 +116,7 @@ async def _agent_calls_tool() -> None:
     gateway = MemorySessionGateway()
     core = AgentCore(
         runtime=make_runtime(hub, "agent"),
-        settings=AgentConfig(api_key_env="BLUE_UNUSED_KEY", max_steps=4),
+        settings=AgentConfig(api_key="sk-test", max_steps=4),
         client=client,
         session_gateway=gateway,
     )
@@ -191,7 +193,7 @@ async def _agent_stops_at_max_steps() -> None:
     )
     core = AgentCore(
         runtime=make_runtime(hub, "agent"),
-        settings=AgentConfig(api_key_env="BLUE_UNUSED_KEY", max_steps=2),
+        settings=AgentConfig(api_key="sk-test", max_steps=2),
         client=client,
         session_gateway=MemorySessionGateway(),
     )
@@ -220,3 +222,16 @@ async def _agent_stops_at_max_steps() -> None:
         await core.stop()
         await worker.stop()
         await registry.stop()
+
+
+def test_resolve_api_key_requires_secret(monkeypatch: pytest.MonkeyPatch) -> None:
+    """未配置密钥时报错，且不再回退到环境变量。"""
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "from-env")
+
+    with pytest.raises(RuntimeConfigError, match=r"secrets\.toml"):
+        AgentConfig().resolve_api_key()
+
+
+def test_resolve_api_key_uses_configured_value() -> None:
+    """配置了密钥就使用配置值。"""
+    assert AgentConfig(api_key="sk-test").resolve_api_key() == "sk-test"

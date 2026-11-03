@@ -89,11 +89,8 @@ def test_logs_missing_returns_error(tmp_path: Path) -> None:
     assert main(["--config", str(_config(tmp_path)), "logs", "demo"]) == 1
 
 
-def test_real_config_check(
-    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
-) -> None:
+def test_real_config_check(capsys: pytest.CaptureFixture[str]) -> None:
     """仓库自带的 blue.infd 可编译。"""
-    monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-test")
     code = main(["--config", str(ROOT / "blue.infd"), "config-check"])
     output = capsys.readouterr().out
     assert code == 0
