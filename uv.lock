@@ -22,6 +22,7 @@ members = [
     "blue-service-session",
     "blue-service-shell",
     "blue-service-text-stats",
+    "blue-service-view-image",
     "blue-service-weather",
     "blue-service-webui",
     "blue-service-write-file",
@@ -571,6 +572,23 @@ dependencies = [
 [package.metadata]
 requires-dist = [
     { name = "blue", editable = "." },
+    { name = "pydantic", specifier = ">=2" },
+]
+
+[[package]]
+name = "blue-service-view-image"
+version = "0.1.0"
+source = { editable = "services/view_image" }
+dependencies = [
+    { name = "blue" },
+    { name = "pillow" },
+    { name = "pydantic" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "blue", editable = "." },
+    { name = "pillow", specifier = ">=11" },
     { name = "pydantic", specifier = ">=2" },
 ]
 

@@ -13,17 +13,16 @@ from __future__ import annotations
 import asyncio
 import base64
 import contextlib
-import io
 import os
 import signal
 import tempfile
 from pathlib import Path
 from typing import Annotated
 
-from PIL import Image
 from pydantic import BaseModel, ConfigDict, Field
 
 from blue.errors import BlueError
+from blue.images import normalize_image
 from blue.runtime import load_runtime_config, run_tool
 
 __all__ = [
@@ -32,12 +31,6 @@ __all__ = [
     "BrowserShot",
     "capture",
 ]
-
-JPEG_QUALITY = 85
-"""超过体积上限时转 JPEG 的质量。"""
-
-PNG_BUDGET = 1_500_000
-"""PNG 超过这个字节数就转 JPEG（会话端的单附件上限是 2 MiB）。"""
 
 
 class BrowserConfig(BaseModel):
@@ -100,14 +93,19 @@ async def capture(
     viewport_h = height or _config.default_height
 
     png = await _firefox_screenshot(target, viewport_w, viewport_h)
-    data, mime, out_w, out_h = _normalize(png, max_edge=_config.max_edge)
+    payload = normalize_image(png, max_edge=_config.max_edge)
     return BrowserShot(
         url=target,
-        width=out_w,
-        height=out_h,
-        size=len(data),
-        mime=mime,
-        attachments=[{"mime": mime, "data": base64.b64encode(data).decode("ascii")}],
+        width=payload.width,
+        height=payload.height,
+        size=len(payload.data),
+        mime=payload.mime,
+        attachments=[
+            {
+                "mime": payload.mime,
+                "data": base64.b64encode(payload.data).decode("ascii"),
+            }
+        ],
     )
 
 
@@ -153,23 +151,6 @@ async def _firefox_screenshot(url: str, width: int, height: int) -> bytes:
             hint = detail[-1] if detail else f"退出码 {process.returncode}"
             raise ValueError(f"Firefox 截图失败：{hint}")
         return shot.read_bytes()
-
-
-def _normalize(png: bytes, *, max_edge: int) -> tuple[bytes, str, int, int]:
-    """把截图裁剪到体积预算内：等比缩放，必要时转 JPEG。"""
-    with Image.open(io.BytesIO(png)) as raw:
-        image = raw.convert("RGB")
-        if max(image.width, image.height) > max_edge:
-            # thumbnail 原地等比缩放，避免依赖 Pillow 的 resize 返回类型标注
-            image.thumbnail((max_edge, max_edge), Image.Resampling.LANCZOS)
-        buffer = io.BytesIO()
-        if len(png) <= PNG_BUDGET:
-            image.save(buffer, format="PNG", optimize=True)
-            mime = "image/png"
-        else:
-            image.save(buffer, format="JPEG", quality=JPEG_QUALITY, optimize=True)
-            mime = "image/jpeg"
-        return buffer.getvalue(), mime, image.width, image.height
 
 
 def _kill(process: asyncio.subprocess.Process) -> None:

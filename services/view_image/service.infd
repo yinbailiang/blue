@@ -1,0 +1,18 @@
+~ServiceTemplate {
+  workdir: <str?> = null
+  max_edge: <int, range(320, 4096)> = 1568
+  max_bytes: <int, range(1024, 134217728)> = 33554432
+}
+
+service {
+  name = "view_image"
+  kind = "tool"
+  package = "blue-service-view-image"
+  module = "blue_service_view_image"
+  depends_on = ["bus"]
+  depends_contracts = ["tool"]
+  restart = "always"
+  stop_timeout = 5.0
+  startup_timeout = 30.0
+  readiness = "process"
+}

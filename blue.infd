@@ -22,6 +22,7 @@
 !from p"services/write_file/service.infd" import ServiceTemplate as WriteFileService
 !from p"services/edit_file/service.infd" import ServiceTemplate as EditFileService
 !from p"services/shell/service.infd" import ServiceTemplate as ShellService
+!from p"services/view_image/service.infd" import ServiceTemplate as ViewImageService
 !from p"services/weather/service.infd" import ServiceTemplate as WeatherService
 !from p"services/mcp_bridge/service.infd" import ServiceTemplate as McpBridgeService
 
@@ -77,6 +78,9 @@ weather = WeatherService()
 
 # 无头 Firefox 截图：截图以图片附件回到模型（agent 真的能「看见」页面）
 browser = BrowserService()
+
+# 查看本地图片：把磁盘上的图（截图/图表/下载的图片）作为附件交给模型
+view_image = ViewImageService()
 
 # MCP 客户端桥：把外部 MCP server（stdio）的工具接进目录。
 # 工具集是声明式的：只有 tools 里列出的 <server>__<tool> 会注册；声明的工具在

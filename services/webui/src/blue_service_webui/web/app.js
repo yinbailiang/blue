@@ -653,6 +653,21 @@
     return wrapper;
   }
 
+  function imageLink(url, className, alt) {
+    const link = document.createElement("a");
+    link.href = url;
+    link.target = "_blank";
+    link.rel = "noopener noreferrer";
+    link.className = "image-link";
+    const image = document.createElement("img");
+    image.className = className;
+    image.src = url;
+    image.alt = alt;
+    image.loading = "lazy";
+    link.appendChild(image);
+    return link;
+  }
+
   function updateToolNode(parts, message, name) {
     parts.label.textContent = `TOOL · ${name}`;
     parts.name.textContent = name;
@@ -666,14 +681,14 @@
     parts.text = text;
     parts.body.textContent = text || "（无输出）";
     parts.brief.textContent = toolBrief(text);
+    parts.thumbs.replaceChildren();
+    parts.images.replaceChildren();
     for (const part of images) {
-      const image = document.createElement("img");
-      image.className = "bubble-image";
-      image.src = part.url;
-      image.alt = "工具返回的图片";
-      image.loading = "lazy";
-      parts.body.appendChild(image);
+      parts.thumbs.appendChild(imageLink(part.url, "tool-thumb", "工具返回的图片"));
+      parts.images.appendChild(imageLink(part.url, "bubble-image", "工具返回的图片"));
     }
+    // 有图就默认展开，省得用户不知道里面还有内容
+    if (images.length && parts.details) parts.details.open = true;
   }
 
   function createToolNode(message, name) {
@@ -688,9 +703,13 @@
             <span class="status-dot ok"></span>
             <span class="tool-result-name"></span>
             <span class="tool-result-brief"></span>
+            <span class="tool-result-thumbs"></span>
             ${CHEVRON}
           </summary>
-          <pre></pre>
+          <div class="tool-body">
+            <pre></pre>
+            <div class="tool-images"></div>
+          </div>
         </details>
       </div>`;
     const parts = {
@@ -698,6 +717,9 @@
       name: wrapper.querySelector(".tool-result-name"),
       brief: wrapper.querySelector(".tool-result-brief"),
       body: wrapper.querySelector(".tool-result pre"),
+      thumbs: wrapper.querySelector(".tool-result-thumbs"),
+      images: wrapper.querySelector(".tool-images"),
+      details: wrapper.querySelector(".tool-result"),
       text: null,
     };
     view.parts.set(wrapper, parts);
@@ -717,12 +739,7 @@
     parts.content.textContent = "";
     if (text) parts.content.appendChild(document.createTextNode(text));
     for (const part of images) {
-      const image = document.createElement("img");
-      image.className = "bubble-image";
-      image.src = part.url;
-      image.alt = "附件图片";
-      image.loading = "lazy";
-      parts.content.appendChild(image);
+      parts.content.appendChild(imageLink(part.url, "bubble-image", "附件图片"));
     }
   }
 

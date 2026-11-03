@@ -114,7 +114,12 @@ def screenshot(url: str) -> Screenshot:
 - `session.stream` 的 `tool_result` 帧带 `attachments: [hash]`，前端在工具卡片里直接
   用 `/api/attachments/<hash>` 渲染；
 - **MCP 桥**：`image` 内容块不再降级成 `[image: …]` 占位，而是转成同样的结构化附件，
-  因此「MCP 工具返回截图 → 模型真的看见」这条链路已经通了。
+  因此「MCP 工具返回截图 → 模型真的看见」这条链路已经通了；
+- 现成两个「看图」工具：`browser`（无头 Firefox 抓网页）与 `view_image`（读磁盘上的图，
+  相对路径锚定项目根）。两者都经 `blue.images.normalize_image` 归一化：长边 ≤1568、
+  PNG >1.5 MB 转 JPEG，保证不顶到会话层的 2 MiB 附件上限；
+- WebUI 的展示：工具卡片**摘要行显示缩略图**（所以收起时也看得见有图），展开后是大图，
+  点击在新窗口打开原图；用户消息里的图片同样可点击。
 
 ## 8. 已知边界
 

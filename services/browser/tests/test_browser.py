@@ -1,62 +1,20 @@
-"""browser 工具测试：图片归一化、参数校验与失败路径。"""
+"""browser 工具测试：参数校验、真实截图（本机 Firefox）与失败路径。"""
 
 from __future__ import annotations
 
 import asyncio
-import io
-import os
-import random
+import base64
 import shutil
 
 import pytest
 from blue_service_browser import BrowserConfig, capture, configure
-from blue_service_browser import _normalize as normalize  # pyright: ignore[reportPrivateUsage]
-from PIL import Image
 
+FIREFOX = shutil.which("firefox") or "/run/current-system/sw/bin/firefox"
+HAS_FIREFOX = shutil.which("firefox") is not None
 
-def _noisy_png(width: int, height: int) -> bytes:
-    """生成一张「噪声图」，PNG 压缩率低，便于造出大文件。"""
-    image = Image.new("RGB", (width, height))
-    pixels = image.load()
-    assert pixels is not None
-    rng = random.Random(7)
-    for y in range(height):
-        for x in range(width):
-            pixels[x, y] = (rng.randrange(256), rng.randrange(256), rng.randrange(256))
-    buffer = io.BytesIO()
-    image.save(buffer, format="PNG")
-    return buffer.getvalue()
-
-
-def _flat_png(width: int, height: int) -> bytes:
-    """生成一张纯色图（PNG 很小）。"""
-    buffer = io.BytesIO()
-    Image.new("RGB", (width, height), (20, 30, 40)).save(buffer, format="PNG")
-    return buffer.getvalue()
-
-
-def test_normalize_keeps_small_png() -> None:
-    """小图保持 PNG 且不缩放。"""
-    data, mime, width, height = normalize(_flat_png(400, 300), max_edge=1568)
-    assert mime == "image/png"
-    assert (width, height) == (400, 300)
-    assert data[:8] == b"\x89PNG\r\n\x1a\n"
-
-
-def test_normalize_downscales_to_max_edge() -> None:
-    """超长边时等比缩小。"""
-    _data, mime, width, height = normalize(_flat_png(2000, 1000), max_edge=800)
-    assert max(width, height) == 800
-    assert (width, height) == (800, 400)
-    assert mime == "image/png"
-
-
-def test_normalize_switches_to_jpeg_when_png_too_big() -> None:
-    """PNG 超出体积预算时转 JPEG。"""
-    data, mime, _, _ = normalize(_noisy_png(900, 900), max_edge=1568)
-    assert mime == "image/jpeg"
-    assert data[:2] == b"\xff\xd8"  # JPEG SOI
-    assert len(data) < 2_000_000
+PAGE = b"""<!doctype html><html><head><title>t</title></head>
+<body style="background:#123;color:#eee;font:20px sans-serif">
+<h1>browser tool</h1></body></html>"""
 
 
 def test_capture_rejects_bad_url() -> None:
@@ -68,13 +26,47 @@ def test_capture_rejects_bad_url() -> None:
         asyncio.run(capture("   "))
 
 
-@pytest.mark.skipif(
-    shutil.which("firefox") is None
-    and not os.path.exists("/run/current-system/sw/bin/firefox"),
-    reason="环境里没有 firefox",
-)
+@pytest.mark.skipif(not HAS_FIREFOX, reason="环境里没有 firefox")
+def test_capture_returns_image_attachment() -> None:
+    """对本地 HTTP 服务截图，返回图片附件。"""
+    asyncio.run(_capture_local())
+
+
+async def _capture_local() -> None:
+    """起一个临时 HTTP 服务并截图。"""
+    server = await asyncio.start_server(_serve, "127.0.0.1", 0)
+    port = server.sockets[0].getsockname()[1]
+    configure(BrowserConfig(firefox_bin=FIREFOX, timeout=45.0))
+    try:
+        shot = await capture(f"http://127.0.0.1:{port}/", 640, 480)
+        assert shot.url.endswith(f":{port}/")
+        assert (shot.width, shot.height) == (640, 480)
+        assert shot.mime in ("image/png", "image/jpeg")
+        assert len(shot.attachments) == 1
+        blob = shot.attachments[0]
+        data = base64.b64decode(blob["data"])
+        assert len(data) == shot.size
+        assert data[:2] in (b"\xff\xd8", b"\x89P")
+    finally:
+        server.close()
+        await server.wait_closed()
+
+
+async def _serve(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+    """最小 HTTP 处理器：任何路径都返回同一张页面。"""
+    await reader.read(1024)
+    writer.write(
+        b"HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\n"
+        + f"Content-Length: {len(PAGE)}\r\nConnection: close\r\n\r\n".encode()
+        + PAGE
+    )
+    await writer.drain()
+    writer.close()
+
+
+@pytest.mark.skipif(not HAS_FIREFOX, reason="环境里没有 firefox")
 def test_capture_reports_unreachable_url() -> None:
     """连不上时给出明确错误，而不是抛底层异常。"""
-    configure(BrowserConfig(timeout=8.0))
+    configure(BrowserConfig(firefox_bin=FIREFOX, timeout=8.0))
     with pytest.raises(ValueError, match=r"Firefox 截图失败|超时"):
         asyncio.run(capture("http://127.0.0.1:9/", 320, 240))

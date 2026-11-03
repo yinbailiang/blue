@@ -1370,6 +1370,46 @@ details[open] > summary > .chevron {
 }
 
 /* 工具结果：默认折叠，摘要显示状态、工具名与首行输出 */
+.tool-result-thumbs {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  margin-left: 6px;
+}
+
+.tool-thumb {
+  width: 20px;
+  height: 20px;
+  object-fit: cover;
+  border-radius: 5px;
+  border: 1px solid rgba(148, 163, 184, 0.45);
+  display: block;
+}
+
+.tool-body {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 0 11px 11px;
+}
+
+.tool-body > pre {
+  margin: 0;
+}
+
+.tool-images {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.image-link {
+  display: inline-block;
+  line-height: 0;
+  border-radius: 10px;
+  outline-offset: 2px;
+}
+
 .tool-result {
   overflow: hidden;
   border: 1px solid var(--border);
