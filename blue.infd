@@ -1,0 +1,29 @@
+# blue —— 分布式 Agent 核心配置
+#
+# 由 infinity-data 编译（`.infd` 是源码，字段约束即校验规则）。
+# 校验命令：uv run blue config-check
+
+#env: DEEPSEEK_API_KEY "sk-xxx"
+!env import DEEPSEEK_API_KEY as ds_key
+
+agent {
+  provider: in("deepseek", "openai") = "deepseek"
+  model: str = "deepseek-v4-flash"
+  api_key: str = $ds_key
+  api_key_env: str = "DEEPSEEK_API_KEY"
+  base_url: str = "https://api.deepseek.com"
+  system_prompt: str = "你是 blue，一个通过工具完成任务的智能体。需要外部能力时调用工具，不要臆测结果。"
+  max_steps: <int, range(1, 32)> = 8
+  tool_timeout: <float, positive> = 30.0
+}
+
+bus {
+  transport: in("rabbit", "memory") = "rabbit"
+  url: str = "amqp://guest:guest@127.0.0.1:5672/"
+  namespace: str = "blue"
+}
+
+registry {
+  ttl: <float, positive> = 15.0
+  sweep_interval: <float, positive> = 2.0
+}

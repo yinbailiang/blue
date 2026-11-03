@@ -1,0 +1,22 @@
+# agent_kit 项目配置（由 agent-kit 生成；可手工微调，改动在下次 update 时生效）
+kit_version = 1
+
+[project]
+name = "blue"
+summary = "Add your description here"
+package = "blue"
+src_dir = "src/blue"
+repo_url = ""
+pypi_name = ""
+extra_sources = []
+
+[toolchain]
+setup = "uv sync --group dev"
+lint = "uv run ruff check ."
+format = "uv run ruff format ."
+typecheck = "uv run pyright"
+test = "uv run pytest -q"
+extras = []
+
+[skills]
+enabled = ["modify-core-api", "pre-commit-check", "write-tests", "write-docs", "write-skill", "init-project", "setup-cicd"]

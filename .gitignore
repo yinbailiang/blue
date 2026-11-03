@@ -1,0 +1,26 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+
+# Virtual environments
+.venv
+
+# Nix
+result
+result-*
+.direnv/
+.rabbitmq/
+
+# 本地密钥
+.env
+.env.*
+
+# Agent runtime data
+.agents/MEMORY/memorys/*
+.agents/TEMP_FILES/tmps/*
+!.agents/MEMORY/memorys/.gitkeep
+!.agents/TEMP_FILES/tmps/.gitkeep

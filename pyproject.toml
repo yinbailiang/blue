@@ -1,0 +1,48 @@
+[project]
+name = "blue"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.14"
+dependencies = [
+    "infinity-agent>=0.2.1",
+    "infinity-agent-kit>=1.0.0",
+    "infinity-bus[templates]>=6.0.0",
+    "infinity-data[tool]>=3.3.0",
+]
+
+[project.scripts]
+blue = "blue.cli:main"
+
+[build-system]
+requires = ["uv_build>=0.9.0,<0.14"]
+build-backend = "uv_build"
+
+[tool.uv.build-backend]
+module-name = "blue"
+module-root = "src"
+
+[dependency-groups]
+dev = [
+    "pyright>=1.1.414",
+    "pytest>=9.2.0",
+    "ruff>=0.17.3",
+]
+
+[tool.ruff]
+target-version = "py314"
+line-length = 88
+src = ["src", "handlers", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM", "RUF"]
+# 源码注释与 docstring 使用中文全角标点，关闭易混淆字符告警
+ignore = ["RUF001", "RUF002", "RUF003"]
+
+[tool.pyright]
+include = ["src", "handlers", "tests"]
+typeCheckingMode = "strict"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src", "."]
