@@ -91,8 +91,18 @@ def _placeholder(call: ToolCall) -> str:
 
 
 def _has_content(message: Message) -> bool:
-    """assistant 消息是否带有可发送的文本内容。"""
-    return isinstance(message.content, str) and bool(message.content.strip())
+    """消息是否带有可发送的内容（纯文本，或多模态数组里的任一块）。"""
+    content = message.content
+    if isinstance(content, str):
+        return bool(content.strip())
+    if isinstance(content, list):
+        return any(
+            (part.text or "").strip()
+            or part.image_url is not None
+            or part.file is not None
+            for part in content
+        )
+    return False
 
 
 def sanitize_history(messages: Iterable[Message]) -> list[Message]:

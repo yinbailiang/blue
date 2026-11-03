@@ -20,6 +20,9 @@ class SessionConfig(BaseModel):
     idle_ttl: float = Field(default=7200.0, gt=0)
     prune_interval: float = Field(default=60.0, gt=0)
     busy_timeout_ms: int = Field(default=5000, ge=100)
+    max_attachment_bytes: int = Field(default=2_097_152, ge=1024)
+    max_attachments_per_message: int = Field(default=4, ge=1)
+    attachment_grace: float = Field(default=3600.0, gt=0)
 
     def resolve_database_path(self) -> Path:
         """相对路径解析到 ``BLUE_STATE_DIR``（缺省 cwd/.blue）。"""

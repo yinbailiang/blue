@@ -31,6 +31,11 @@
         <circle cx="12" cy="12" r="2.6" />
         <path d="M12 2.2v3.4M12 18.4v3.4M2.2 12h3.4M18.4 12h3.4" />
       </symbol>
+      <symbol id="i-image" viewBox="0 0 24 24">
+        <path d="M4 5h16v14H4z" fill="none" stroke="currentColor" stroke-width="1.6" />
+        <circle cx="9" cy="10" r="1.6" fill="currentColor" />
+        <path d="M5.5 17.5 10 13l3 3 2.5-2.5L19 17" fill="none" stroke="currentColor" stroke-width="1.6" />
+      </symbol>
       <symbol id="i-menu" viewBox="0 0 24 24">
         <path d="M4 7h16M4 12h16M4 17h16" />
       </symbol>
@@ -212,6 +217,7 @@
 
         <footer class="composer-wrap">
           <form class="composer" id="composer">
+            <div class="composer-attachments" id="composer-attachments" hidden></div>
             <textarea
               id="prompt"
               rows="1"
@@ -222,8 +228,18 @@
             <div class="composer-bottom">
               <span class="composer-hint" id="composer-hint">
                 <span class="hint-dot"></span>
-                Enter 发送 · Shift + Enter 换行
+                Enter 发送 · Shift + Enter 换行 · 可粘贴或拖入图片
               </span>
+              <input
+                type="file"
+                id="attachment-input"
+                accept="image/png,image/jpeg,image/gif,image/webp"
+                multiple
+                hidden
+              />
+              <button class="attach-button" id="attach" type="button" aria-label="添加图片">
+                <svg><use href="#i-image"></use></svg>
+              </button>
               <button class="send-button" id="send" type="submit" aria-label="发送消息">
                 <svg><use href="#i-send" id="send-icon"></use></svg>
                 <span id="send-label">发送</span>

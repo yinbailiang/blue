@@ -1,11 +1,25 @@
-"""会话领域的事件契约。"""
+"""会话领域的事件契约与附件引用工具。"""
 
+from blue_contracts_session.attachments import (
+    ATTACHMENT_URL_PREFIX,
+    attachment_url,
+    collect_attachment_hashes,
+    normalize_base64,
+    parse_attachment_url,
+    sha256_hex,
+)
 from blue_contracts_session.events import (
     EVENTS,
     SessionAppendEvent,
     SessionAppendReplyEvent,
     SessionAppendRequest,
     SessionAppendResponse,
+    SessionAttachment,
+    SessionAttachmentBlob,
+    SessionAttachmentGetEvent,
+    SessionAttachmentGetRequest,
+    SessionAttachmentReplyEvent,
+    SessionAttachmentResponse,
     SessionCancelEvent,
     SessionCancelReplyEvent,
     SessionCancelRequest,
@@ -38,11 +52,18 @@ from blue_contracts_session.events import (
 )
 
 __all__ = [
+    "ATTACHMENT_URL_PREFIX",
     "EVENTS",
     "SessionAppendEvent",
     "SessionAppendReplyEvent",
     "SessionAppendRequest",
     "SessionAppendResponse",
+    "SessionAttachment",
+    "SessionAttachmentBlob",
+    "SessionAttachmentGetEvent",
+    "SessionAttachmentGetRequest",
+    "SessionAttachmentReplyEvent",
+    "SessionAttachmentResponse",
     "SessionCancelEvent",
     "SessionCancelReplyEvent",
     "SessionCancelRequest",
@@ -72,4 +93,9 @@ __all__ = [
     "SessionUpdateRequest",
     "SessionUpdateResponse",
     "StreamToolCall",
+    "attachment_url",
+    "collect_attachment_hashes",
+    "normalize_base64",
+    "parse_attachment_url",
+    "sha256_hex",
 ]

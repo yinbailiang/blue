@@ -1934,3 +1934,71 @@ details[open] > summary > .chevron {
     transition-duration: 0.01ms !important;
   }
 }
+
+/* 附件：待发送缩略图与消息内图片 */
+.composer-attachments {
+  display: flex;
+  gap: 8px;
+  padding: 8px 12px 0;
+  flex-wrap: wrap;
+}
+
+.attachment-chip {
+  position: relative;
+  width: 64px;
+  height: 64px;
+  border-radius: 10px;
+  overflow: hidden;
+  border: 1px solid var(--border, #d8dee9);
+  background: var(--surface, #fff);
+}
+
+.attachment-chip img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+
+.attachment-remove {
+  position: absolute;
+  top: 2px;
+  right: 2px;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  border: none;
+  cursor: pointer;
+  font-size: 12px;
+  line-height: 1;
+  color: #fff;
+  background: rgba(0, 0, 0, 0.55);
+}
+
+.attach-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 34px;
+  height: 34px;
+  margin-right: 8px;
+  border: 1px solid var(--border, #d8dee9);
+  border-radius: 10px;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+}
+
+.attach-button svg {
+  width: 16px;
+  height: 16px;
+}
+
+.bubble-image {
+  display: block;
+  max-width: min(320px, 100%);
+  max-height: 320px;
+  margin-top: 8px;
+  border-radius: 10px;
+  border: 1px solid var(--border, #d8dee9);
+}

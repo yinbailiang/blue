@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Iterable
 
 from blue_contracts_session import (
+    SessionAttachmentBlob,
     SessionPromptEvent,
     SessionReplyEvent,
     SessionReplyResponse,
@@ -17,6 +19,7 @@ from blue_contracts_tool import (
 )
 from blue_service_agent.aggregate import AgentAggregate
 from blue_service_agent.config import AgentConfig
+from blue_service_agent.session_gateway import AttachmentPayload
 from blue_service_echo import echo
 from blue_service_registry import ToolRegistryService
 from infinity_agent import Message
@@ -53,9 +56,16 @@ class _MemorySessionGateway:
         bus_proxy: EventBus.Proxy,
         session_id: str,
         messages: list[Message],
+        attachments: Iterable[SessionAttachmentBlob] = (),
     ) -> None:
-        del bus_proxy
+        del bus_proxy, attachments
         self._messages.setdefault(session_id, []).extend(messages)
+
+    async def get_attachment(
+        self, bus_proxy: EventBus.Proxy, digest: str
+    ) -> AttachmentPayload | None:
+        del bus_proxy, digest
+        return None
 
     async def update(
         self, bus_proxy: EventBus.Proxy, session_id: str, steps: int

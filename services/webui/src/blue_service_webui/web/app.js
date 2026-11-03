@@ -24,6 +24,9 @@
     typing: document.getElementById("typing"),
     typingLabel: document.getElementById("typing-label"),
     composer: document.getElementById("composer"),
+    attachments: document.getElementById("composer-attachments"),
+    attach: document.getElementById("attach"),
+    attachmentInput: document.getElementById("attachment-input"),
     prompt: document.getElementById("prompt"),
     send: document.getElementById("send"),
     sendIcon: document.getElementById("send-icon"),
@@ -44,7 +47,12 @@
     stickToBottom: true,
     liveMessage: null,
     streamRenderTimer: null,
+    pendingAttachments: [],
   };
+
+  const MAX_ATTACHMENTS = 4;
+  const MAX_ATTACHMENT_EDGE = 1568;
+  const ATTACHMENT_TYPES = ["image/png", "image/jpeg", "image/gif", "image/webp"];
 
   /*
    * 增量渲染缓存：state.messages 的每一项对应一个已挂载节点。
@@ -180,7 +188,8 @@
 
   function updateSendState() {
     // 生成中按钮用于中断，此时即使输入框为空也应可点
-    els.send.disabled = state.busy ? false : !els.prompt.value.trim();
+    const hasContent = Boolean(els.prompt.value.trim()) || state.pendingAttachments.length > 0;
+    els.send.disabled = state.busy ? false : !hasContent;
   }
 
   function setSocketOnline(online, label) {
@@ -686,9 +695,22 @@
 
   function updateUserNode(parts, message) {
     const text = String(message.content || "");
-    if (text !== parts.text) {
-      parts.text = text;
-      parts.content.textContent = text;
+    const images = (message.parts || []).filter(
+      (part) => part.type === "image" && part.url,
+    );
+    const signature = text + "|" + images.map((part) => part.url).join(",");
+    if (signature === parts.signature) return;
+    parts.signature = signature;
+    parts.text = text;
+    parts.content.textContent = "";
+    if (text) parts.content.appendChild(document.createTextNode(text));
+    for (const part of images) {
+      const image = document.createElement("img");
+      image.className = "bubble-image";
+      image.src = part.url;
+      image.alt = "附件图片";
+      image.loading = "lazy";
+      parts.content.appendChild(image);
     }
   }
 
@@ -901,10 +923,97 @@
     els.prompt.focus();
   }
 
-  async function sendViaRest(sessionId, text) {
+  function readFileAsDataUrl(file) {
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve(String(reader.result || ""));
+      reader.onerror = () => reject(new Error("读取图片失败"));
+      reader.readAsDataURL(file);
+    });
+  }
+
+  function loadImageElement(src) {
+    return new Promise((resolve, reject) => {
+      const image = new Image();
+      image.onload = () => resolve(image);
+      image.onerror = () => reject(new Error("图片解码失败"));
+      image.src = src;
+    });
+  }
+
+  async function prepareAttachment(file) {
+    if (!ATTACHMENT_TYPES.includes(file.type)) {
+      throw new Error("仅支持 PNG / JPEG / GIF / WebP");
+    }
+    const dataUrl = await readFileAsDataUrl(file);
+    const base64 = dataUrl.split(",")[1] || "";
+    const image = await loadImageElement(dataUrl);
+    const longest = Math.max(image.width, image.height);
+    if (longest <= MAX_ATTACHMENT_EDGE) {
+      return { mime: file.type, data: base64, name: file.name || null };
+    }
+    // 浏览器端降采样：既省 token，也避免超大请求体
+    const scale = MAX_ATTACHMENT_EDGE / longest;
+    const canvas = document.createElement("canvas");
+    canvas.width = Math.round(image.width * scale);
+    canvas.height = Math.round(image.height * scale);
+    const context = canvas.getContext("2d");
+    if (!context) return { mime: file.type, data: base64, name: file.name || null };
+    context.drawImage(image, 0, 0, canvas.width, canvas.height);
+    const mime = file.type === "image/png" ? "image/png" : "image/jpeg";
+    const scaled = canvas.toDataURL(mime, 0.9);
+    return { mime, data: scaled.split(",")[1] || "", name: file.name || null };
+  }
+
+  async function addAttachments(files) {
+    for (const file of files) {
+      if (state.pendingAttachments.length >= MAX_ATTACHMENTS) {
+        toast(`一次最多附带 ${MAX_ATTACHMENTS} 张图片`, "info");
+        break;
+      }
+      try {
+        state.pendingAttachments.push(await prepareAttachment(file));
+      } catch (error) {
+        toast(error.message || "图片处理失败", "error");
+      }
+    }
+    renderPendingAttachments();
+    updateSendState();
+  }
+
+  function renderPendingAttachments() {
+    if (!els.attachments) return;
+    els.attachments.textContent = "";
+    els.attachments.hidden = state.pendingAttachments.length === 0;
+    state.pendingAttachments.forEach((attachment, index) => {
+      const chip = document.createElement("div");
+      chip.className = "attachment-chip";
+      const image = document.createElement("img");
+      image.src = `data:${attachment.mime};base64,${attachment.data}`;
+      image.alt = attachment.name || "待发送图片";
+      const remove = document.createElement("button");
+      remove.type = "button";
+      remove.className = "attachment-remove";
+      remove.textContent = "×";
+      remove.setAttribute("aria-label", "移除图片");
+      remove.addEventListener("click", () => {
+        state.pendingAttachments.splice(index, 1);
+        renderPendingAttachments();
+        updateSendState();
+      });
+      chip.append(image, remove);
+      els.attachments.appendChild(chip);
+    });
+  }
+
+  async function sendViaRest(sessionId, text, attachments = state.pendingAttachments) {
     const reply = await api("/api/chat", {
       method: "POST",
-      body: JSON.stringify({ session_id: sessionId, text }),
+      body: JSON.stringify({
+        session_id: sessionId,
+        text,
+        attachments,
+      }),
     });
     appendAssistantText(reply.text);
     setBusy(false);
@@ -918,7 +1027,8 @@
 
   async function sendPrompt(rawText) {
     const text = String(rawText || "").trim();
-    if (!text || state.busy) return;
+    const attachments = state.pendingAttachments.slice();
+    if ((!text && !attachments.length) || state.busy) return;
     const sessionId = state.sessionId || uuid();
     if (!state.sessionId) {
       state.sessionId = sessionId;
@@ -928,9 +1038,24 @@
         /* ignore */
       }
     }
-    rememberTitle(sessionId, text);
+    rememberTitle(sessionId, text || (attachments.length ? "[图片]" : ""));
     state.liveMessage = null;
-    state.messages.push({ role: "user", content: text, tool_calls: [] });
+    const localParts = [];
+    if (text) localParts.push({ type: "text", text });
+    attachments.forEach((attachment) => {
+      localParts.push({
+        type: "image",
+        url: `data:${attachment.mime};base64,${attachment.data}`,
+      });
+    });
+    state.messages.push({
+      role: "user",
+      content: text,
+      parts: localParts,
+      tool_calls: [],
+    });
+    state.pendingAttachments = [];
+    renderPendingAttachments();
     showWelcome(false);
     renderMessages({ scroll: true, force: true });
     renderSessions();
@@ -940,10 +1065,17 @@
 
     try {
       const socket = await ensureSocket();
-      socket.send(JSON.stringify({ type: "prompt", session_id: sessionId, text }));
+      socket.send(
+        JSON.stringify({
+          type: "prompt",
+          session_id: sessionId,
+          text,
+          attachments,
+        }),
+      );
     } catch {
       try {
-        await sendViaRest(sessionId, text);
+        await sendViaRest(sessionId, text, attachments);
       } catch (error) {
         setBusy(false);
         state.messages.push({
@@ -1273,6 +1405,34 @@
     });
 
     els.prompt.addEventListener("input", resizePrompt);
+    if (els.attach && els.attachmentInput) {
+      els.attach.addEventListener("click", () => els.attachmentInput.click());
+      els.attachmentInput.addEventListener("change", () => {
+        const files = Array.from(els.attachmentInput.files || []);
+        els.attachmentInput.value = "";
+        void addAttachments(files);
+      });
+    }
+    els.prompt.addEventListener("paste", (event) => {
+      const items = Array.from(event.clipboardData?.items || []);
+      const files = items
+        .filter((item) => item.kind === "file")
+        .map((item) => item.getAsFile())
+        .filter((file) => file !== null);
+      if (files.length) {
+        event.preventDefault();
+        void addAttachments(files);
+      }
+    });
+    els.composer.addEventListener("dragover", (event) => {
+      event.preventDefault();
+    });
+    els.composer.addEventListener("drop", (event) => {
+      const files = Array.from(event.dataTransfer?.files || []);
+      if (!files.length) return;
+      event.preventDefault();
+      void addAttachments(files);
+    });
     els.prompt.addEventListener("keydown", (event) => {
       if (event.key === "Enter" && !event.shiftKey) {
         event.preventDefault();

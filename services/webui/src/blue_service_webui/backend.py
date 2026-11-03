@@ -3,13 +3,17 @@
 from __future__ import annotations
 
 import asyncio
-import json
+import base64
 from collections.abc import AsyncGenerator
 from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from pathlib import Path
 from typing import Any, Protocol
 
 from blue_contracts_session import (
+    SessionAttachment,
+    SessionAttachmentGetEvent,
+    SessionAttachmentReplyEvent,
+    SessionAttachmentResponse,
     SessionCancelEvent,
     SessionCancelReplyEvent,
     SessionCancelResponse,
@@ -29,6 +33,7 @@ from blue_contracts_session import (
     SessionStateResponse,
     SessionStreamEvent,
     SessionStreamPayload,
+    parse_attachment_url,
 )
 from blue_contracts_tool import (
     CatalogQueryEvent,
@@ -46,6 +51,7 @@ from blue.transport import BusRuntime
 
 __all__ = [
     "BusBackend",
+    "MessagePartView",
     "MessageView",
     "ServiceView",
     "SessionStreamHandler",
@@ -99,12 +105,24 @@ class ToolCallView(BaseModel):
     arguments: dict[str, Any] = Field(default_factory=dict)
 
 
+class MessagePartView(BaseModel):
+    """前端展示用的一个内容块（文本 / 图片 / 文件）。"""
+
+    type: str = Field(description="text / image / file")
+    text: str = Field(default="", description="文本内容")
+    hash: str = Field(default="", description="附件内容哈希")
+    mime: str = Field(default="", description="附件 MIME 类型")
+    url: str = Field(default="", description="附件访问地址")
+    filename: str | None = Field(default=None, description="文件名（file 块）")
+
+
 class MessageView(BaseModel):
     """前端展示用的一条消息。"""
 
     role: str
     name: str | None = None
     content: str = ""
+    parts: list[MessagePartView] = Field(default_factory=list[MessagePartView])
     reasoning_content: str | None = None
     tool_calls: list[ToolCallView] = Field(default_factory=list[ToolCallView])
     tool_call_id: str | None = None
@@ -161,8 +179,17 @@ class WebBackend(Protocol):
         """读取会话快照。"""
         ...
 
-    async def prompt(self, session_id: str, text: str) -> SessionReplyResponse:
-        """发送用户消息并等待最终回复。"""
+    async def prompt(
+        self,
+        session_id: str,
+        text: str,
+        attachments: list[SessionAttachment] | None = None,
+    ) -> SessionReplyResponse:
+        """发送用户消息（可带附件）并等待最终回复。"""
+        ...
+
+    async def get_attachment(self, digest: str) -> tuple[str, bytes] | None:
+        """按内容哈希取附件；不存在返回 ``None``。"""
         ...
 
     async def reset(self, session_id: str) -> bool:
@@ -271,11 +298,22 @@ class BusBackend:
             return None
         return response.session
 
-    async def prompt(self, session_id: str, text: str) -> SessionReplyResponse:
-        """把用户消息交给 agent，并等待最终回复。"""
+    async def prompt(
+        self,
+        session_id: str,
+        text: str,
+        attachments: list[SessionAttachment] | None = None,
+    ) -> SessionReplyResponse:
+        """把用户消息（可带附件）交给 agent，并等待最终回复。"""
         response = await self._request(
             SessionPromptEvent.name,
-            {"text": text},
+            {
+                "text": text,
+                "attachments": [
+                    attachment.model_dump(mode="json")
+                    for attachment in (attachments or [])
+                ],
+            },
             SessionReplyEvent.name,
             session_id=session_id,
         )
@@ -284,6 +322,24 @@ class BusBackend:
         if not response.success:
             raise WebUIError(response.error_msg or "Agent 处理失败")
         return response
+
+    async def get_attachment(self, digest: str) -> tuple[str, bytes] | None:
+        """按内容哈希取附件；不存在返回 None。"""
+        response = await self._request(
+            SessionAttachmentGetEvent.name,
+            {"hash": digest},
+            SessionAttachmentReplyEvent.name,
+            session_id="webui.attachments",
+        )
+        if not isinstance(response, SessionAttachmentResponse):
+            raise WebUIError("收到非预期的附件响应")
+        if not response.success:
+            return None
+        try:
+            data = base64.b64decode(response.data, validate=True)
+        except (ValueError, TypeError) as error:
+            raise WebUIError(f"附件内容不是合法 base64：{error}") from error
+        return response.mime, data
 
     async def reset(self, session_id: str) -> bool:
         """删除会话历史。"""
@@ -381,21 +437,52 @@ class BusBackend:
 
 
 def serialize_message(message: Message) -> MessageView:
-    """把 ``Message`` 转为不依赖 Pydantic 特例的展示模型。"""
+    """把 ``Message`` 转为不依赖 Pydantic 特例的展示模型。
+
+    多模态消息额外给出 ``parts``：文本块照原样，附件块给出哈希与访问地址
+    （``/api/attachments/<hash>``，内容寻址因而可长缓存）。
+    """
     content = message.content
+    parts: list[MessagePartView] = []
+    texts: list[str] = []
     if isinstance(content, str):
-        text = content
-    elif content is None:
-        text = ""
-    else:
-        text = json.dumps(
-            [item.model_dump(mode="json") for item in content],
-            ensure_ascii=False,
-        )
+        if content:
+            parts.append(MessagePartView(type="text", text=content))
+            texts.append(content)
+    elif isinstance(content, list):
+        for item in content:
+            if item.text is not None:
+                parts.append(MessagePartView(type="text", text=item.text))
+                texts.append(item.text)
+                continue
+            image = item.image_url
+            if image is not None:
+                digest = parse_attachment_url(image.url) or ""
+                parts.append(
+                    MessagePartView(
+                        type="image",
+                        hash=digest,
+                        url=f"/api/attachments/{digest}" if digest else image.url,
+                    )
+                )
+                continue
+            file = item.file
+            if file is not None:
+                source = file.file_data or ""
+                digest = parse_attachment_url(source) or ""
+                parts.append(
+                    MessagePartView(
+                        type="file",
+                        hash=digest,
+                        url=f"/api/attachments/{digest}" if digest else source,
+                        filename=file.filename,
+                    )
+                )
     return MessageView(
         role=message.role.value,
         name=message.name,
-        content=text,
+        content="\n".join(texts),
+        parts=parts,
         reasoning_content=message.reasoning_content,
         tool_calls=[
             ToolCallView(

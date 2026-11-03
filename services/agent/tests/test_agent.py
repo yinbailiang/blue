@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 import asyncio
+import base64
+from collections.abc import Iterable
 from typing import cast
 
 import pytest
 from blue_contracts_session import (
+    SessionAttachmentBlob,
     SessionPromptEvent,
     SessionPromptRequest,
     SessionReplyEvent,
@@ -17,6 +20,7 @@ from blue_contracts_session import (
 )
 from blue_service_agent.agent import AgentCore
 from blue_service_agent.config import AgentConfig
+from blue_service_agent.session_gateway import AttachmentPayload
 from blue_service_echo import echo
 from blue_service_registry import ToolRegistryService
 from infinity_agent import FunctionCall, Message, MessageRole, ToolCall
@@ -58,6 +62,7 @@ class MemorySessionGateway:
     def __init__(self) -> None:
         self.messages: dict[str, list[Message]] = {}
         self.steps: dict[str, int] = {}
+        self.blobs: dict[str, AttachmentPayload] = {}
 
     async def ensure(
         self, bus_proxy: EventBus.Proxy, session_id: str, system_prompt: str
@@ -78,9 +83,23 @@ class MemorySessionGateway:
         bus_proxy: EventBus.Proxy,
         session_id: str,
         messages: list[Message],
+        attachments: Iterable[SessionAttachmentBlob] = (),
     ) -> None:
         del bus_proxy
         self.messages.setdefault(session_id, []).extend(messages)
+        for blob in attachments:
+            self.blobs[blob.hash] = AttachmentPayload(
+                hash=blob.hash,
+                mime=blob.mime,
+                size=len(base64.b64decode(blob.data)),
+                data=blob.data,
+            )
+
+    async def get_attachment(
+        self, bus_proxy: EventBus.Proxy, digest: str
+    ) -> AttachmentPayload | None:
+        del bus_proxy
+        return self.blobs.get(digest)
 
     async def update(
         self, bus_proxy: EventBus.Proxy, session_id: str, steps: int

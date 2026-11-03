@@ -453,7 +453,7 @@ Ready / Running → Stopping → Stopped
 | --- | --- |
 | `bus` | 管理 RabbitMQ、vhost/用户/权限配置，可选 AMQP TCP 代理 |
 | `registry` | 工具运行时注册中心：租约、心跳、目录版本与 `catalog.changed` 广播 |
-| `session` | SQLite（WAL）会话持久化，独立进程、支持重启后恢复 |
+| `session` | SQLite（WAL）会话持久化 + 内容寻址附件表（去重、级联、GC），独立进程、支持重启后恢复 |
 | `agent` | 模型推理 + 工具目录缓存，本身不保存会话正文；加载历史时自愈悬空 `tool_calls`，未知工具立即失败 |
 | `webui` | FastAPI + 静态单页 Chat UI，WebSocket 实时进度，托管在 supervisor 中 |
 | `clock` / `echo` / `text_stats` | 基础工具 |
@@ -571,6 +571,20 @@ uv run pytest -q
   升级时必须同步该目录的 `README.md` 与许可证文件
 - 生成物（`.blue/`、`services/*/service_runtime_config.json`）已在 `.gitignore`
 
+## 多模态附件
+
+WebUI 支持**粘贴 / 拖入 / 选择**图片（PNG、JPEG、GIF、WebP），随消息一起送给模型：
+
+- 消息 JSON 里存的是内容寻址伪 URL `blue+attachment://<sha256>`，真实字节进会话库的
+  `attachments` 表（主键即哈希）→ **同一张图只存一份**；`message_attachments` 记录
+  消息与附件的映射，删会话时随消息级联消失，附件本身由 GC 按「无引用 + 超宽限期」回收；
+- agent 发请求前把伪 URL 换成 `data:` URL（DeepSeek 只接受 data/http(s)），换不到就
+  **降级成文本占位**，绝不把伪 URL 递给模型；
+- WebUI 通过 `GET /api/attachments/<hash>` 取图，内容寻址因而可 `immutable` 长缓存；
+- 预算：单张 ≤2 MiB（前端先降采样到长边 1568）、每轮 ≤4 张，超限报错而不是静默丢图。
+
+细节（表结构、迁移、失败语义、界面链路）见 [`docs/multimodal.md`](docs/multimodal.md)。
+
 ## 事件协议
 
 事件契约按域拥有，放在两个轻量契约包里：
@@ -590,7 +604,7 @@ uv run pytest -q
 `session.get` / `session.get.reply` / `session.append` /
 `session.append.reply` / `session.update` / `session.update.reply` /
 `session.reset` / `session.reset.reply` / `session.state` /
-`session.state.reply`。
+`session.state.reply` / `session.attachment.get` / `session.attachment.reply`。
 
 多目标/多实例靠载荷字段区分：`tool.call.tool`、`worker_id`、
 `session_id + request_id`。多部署隔离用 RabbitMQ vhost，不要编码进事件名。

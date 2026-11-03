@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 import asyncio
+import base64
+import binascii
 import contextlib
 import logging
 import time
+from collections.abc import Iterable
 from typing import Protocol
 
 from blue_contracts_session import (
@@ -13,6 +16,11 @@ from blue_contracts_session import (
     SessionAppendReplyEvent,
     SessionAppendRequest,
     SessionAppendResponse,
+    SessionAttachmentBlob,
+    SessionAttachmentGetEvent,
+    SessionAttachmentGetRequest,
+    SessionAttachmentReplyEvent,
+    SessionAttachmentResponse,
     SessionGetEvent,
     SessionGetReplyEvent,
     SessionGetRequest,
@@ -31,13 +39,16 @@ from blue_contracts_session import (
     SessionUpdateReplyEvent,
     SessionUpdateRequest,
     SessionUpdateResponse,
+    sha256_hex,
 )
 from infinity_bus import Event, EventBus, EventHandler
 from pydantic import BaseModel
 
+from blue.errors import BlueError
 from blue.transport import BusRuntime
 from blue_service_session.config import SessionConfig
 from blue_service_session.db import (
+    AttachmentRecord,
     SessionDatabase,
     SessionMeta,
     SessionNotFoundError,
@@ -49,6 +60,10 @@ logger = logging.getLogger(__name__)
 __all__ = ["SessionBackend", "SessionRpcHandler", "SessionService"]
 
 
+class SessionAttachmentError(BlueError):
+    """附件不合法（过大、超数量、哈希不匹配、base64 损坏）。"""
+
+
 class SessionBackend(Protocol):
     """RPC 处理器依赖的会话存储能力。"""
 
@@ -56,8 +71,17 @@ class SessionBackend(Protocol):
         """取/建会话。"""
         ...
 
-    async def append(self, session_id: str, payloads: list[str]) -> SessionMeta:
-        """追加消息。"""
+    async def append(
+        self,
+        session_id: str,
+        payloads: list[str],
+        attachments: Iterable[SessionAttachmentBlob] = (),
+    ) -> SessionMeta:
+        """追加消息（可同时落库附件）。"""
+        ...
+
+    async def get_attachment(self, digest: str) -> AttachmentRecord | None:
+        """按哈希取附件。"""
         ...
 
     async def update(
@@ -121,9 +145,50 @@ class SessionService:
         """取/建会话。"""
         return await self._db.ensure(session_id, system_prompt, now=time.time())
 
-    async def append(self, session_id: str, payloads: list[str]) -> SessionMeta:
-        """追加消息。"""
-        return await self._db.append(session_id, payloads, now=time.time())
+    async def append(
+        self,
+        session_id: str,
+        payloads: list[str],
+        attachments: Iterable[SessionAttachmentBlob] = (),
+    ) -> SessionMeta:
+        """追加消息；附件与消息在同一事务里落库。
+
+        :raises SessionAttachmentError: 附件超限、base64 损坏或哈希不匹配
+        """
+        blobs = self._decode_attachments(list(attachments))
+        return await self._db.append(
+            session_id, payloads, now=time.time(), attachments=blobs
+        )
+
+    async def get_attachment(self, digest: str) -> AttachmentRecord | None:
+        """按内容哈希取附件。"""
+        return await self._db.get_attachment(digest)
+
+    def _decode_attachments(
+        self, blobs: list[SessionAttachmentBlob]
+    ) -> list[tuple[str, str, bytes]]:
+        """校验并解码附件负载。
+
+        :raises SessionAttachmentError: 数量超限、单条过大、base64 损坏或哈希不匹配
+        """
+        limit = self._config.max_attachments_per_message
+        if len(blobs) > limit:
+            raise SessionAttachmentError(f"附件数量超过上限（{len(blobs)} > {limit}）")
+        decoded: list[tuple[str, str, bytes]] = []
+        for blob in blobs:
+            try:
+                data = base64.b64decode(blob.data, validate=True)
+            except (binascii.Error, ValueError) as error:
+                raise SessionAttachmentError(f"附件 base64 非法：{error}") from error
+            if len(data) > self._config.max_attachment_bytes:
+                limit_bytes = self._config.max_attachment_bytes
+                raise SessionAttachmentError(
+                    f"附件过大（{len(data)} > {limit_bytes} 字节）"
+                )
+            if sha256_hex(data) != blob.hash:
+                raise SessionAttachmentError("附件哈希与内容不一致")
+            decoded.append((blob.hash, blob.mime, data))
+        return decoded
 
     async def update(
         self, session_id: str, steps: int | None, touch: bool
@@ -152,6 +217,15 @@ class SessionService:
                 continue
             if removed:
                 logger.info("已回收会话：%s", ", ".join(removed))
+            try:
+                swept = await self._db.sweep_attachments(
+                    now=time.time(), grace=self._config.attachment_grace
+                )
+            except Exception:
+                logger.warning("附件回收失败", exc_info=True)
+            else:
+                if swept:
+                    logger.info("已回收无引用附件 %s 个", swept)
 
 
 class SessionRpcHandler(EventHandler):
@@ -165,6 +239,7 @@ class SessionRpcHandler(EventHandler):
                 SessionUpdateEvent.name,
                 SessionResetEvent.name,
                 SessionStateEvent.name,
+                SessionAttachmentGetEvent.name,
             ],
             handle_timeout=15.0,
         )
@@ -187,6 +262,8 @@ class SessionRpcHandler(EventHandler):
             await self._handle_reset(payload, bus_proxy)
         elif isinstance(payload, SessionStateRequest):
             await self._handle_state(payload, bus_proxy)
+        elif isinstance(payload, SessionAttachmentGetRequest):
+            await self._handle_attachment(payload, bus_proxy)
 
     async def _handle_get(
         self, payload: SessionGetRequest, bus_proxy: EventBus.Proxy
@@ -213,14 +290,16 @@ class SessionRpcHandler(EventHandler):
         self, payload: SessionAppendRequest, bus_proxy: EventBus.Proxy
     ) -> None:
         try:
-            meta = await self._backend.append(payload.session_id, payload.messages)
+            meta = await self._backend.append(
+                payload.session_id, payload.messages, payload.attachments
+            )
             reply = SessionAppendResponse(
                 session_id=payload.session_id,
                 request_id=payload.request_id,
                 message_count=meta.message_count,
                 updated_at=meta.updated_at,
             )
-        except SessionNotFoundError as error:
+        except (SessionNotFoundError, SessionAttachmentError) as error:
             reply = SessionAppendResponse(
                 session_id=payload.session_id,
                 request_id=payload.request_id,
@@ -270,6 +349,29 @@ class SessionRpcHandler(EventHandler):
                 error_msg=str(error),
             )
         await bus_proxy.publish(SessionResetReplyEvent.name, reply)
+
+    async def _handle_attachment(
+        self, payload: SessionAttachmentGetRequest, bus_proxy: EventBus.Proxy
+    ) -> None:
+        """读取附件：命中回 base64，未命中回失败。"""
+        record = await self._backend.get_attachment(payload.hash)
+        if record is None:
+            reply = SessionAttachmentResponse(
+                session_id=payload.session_id,
+                request_id=payload.request_id,
+                success=False,
+                error_msg=f"附件不存在：{payload.hash}",
+            )
+        else:
+            reply = SessionAttachmentResponse(
+                session_id=payload.session_id,
+                request_id=payload.request_id,
+                hash=record.hash,
+                mime=record.mime,
+                size=record.size,
+                data=base64.b64encode(record.data).decode("ascii"),
+            )
+        await bus_proxy.publish(SessionAttachmentReplyEvent.name, reply)
 
     async def _handle_state(
         self, payload: SessionStateRequest, bus_proxy: EventBus.Proxy

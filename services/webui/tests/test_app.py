@@ -8,6 +8,7 @@ from contextlib import asynccontextmanager
 from typing import Any
 
 from blue_contracts_session import (
+    SessionAttachment,
     SessionInfo,
     SessionReplyResponse,
     SessionSnapshot,
@@ -28,6 +29,8 @@ class FakeBackend:
 
     def __init__(self) -> None:
         self.reset_calls: list[str] = []
+        self.last_attachments: list[SessionAttachment] = []
+        self.blobs: dict[str, tuple[str, bytes]] = {}
         self.cancel_calls: list[str] = []
         self.stream_queue: asyncio.Queue[SessionStreamPayload] | None = None
 
@@ -66,7 +69,13 @@ class FakeBackend:
             message_count=3,
         )
 
-    async def prompt(self, session_id: str, text: str) -> SessionReplyResponse:
+    async def prompt(
+        self,
+        session_id: str,
+        text: str,
+        attachments: list[SessionAttachment] | None = None,
+    ) -> SessionReplyResponse:
+        self.last_attachments = list(attachments or [])
         if self.stream_queue is not None:
             for payload in (
                 SessionStreamPayload(
@@ -94,6 +103,9 @@ class FakeBackend:
             text=f"收到：{text}",
             steps=1,
         )
+
+    async def get_attachment(self, digest: str) -> tuple[str, bytes] | None:
+        return self.blobs.get(digest)
 
     async def reset(self, session_id: str) -> bool:
         self.reset_calls.append(session_id)
@@ -251,8 +263,13 @@ def test_websocket_cancel_interrupts_running_prompt() -> None:
             self.released = asyncio.Event()
             self.cancelled_sessions: list[str] = []
 
-        async def prompt(self, session_id: str, text: str) -> SessionReplyResponse:
-            del text
+        async def prompt(
+            self,
+            session_id: str,
+            text: str,
+            attachments: list[SessionAttachment] | None = None,
+        ) -> SessionReplyResponse:
+            del text, attachments
             await self.released.wait()
             return SessionReplyResponse(
                 session_id=session_id,

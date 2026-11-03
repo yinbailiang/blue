@@ -4,6 +4,9 @@
   idle_ttl: <float, positive> = 7200.0
   prune_interval: <float, positive> = 60.0
   busy_timeout_ms: <int, range(100, 60000)> = 5000
+  max_attachment_bytes: <int, range(1024, 33554432)> = 2097152
+  max_attachments_per_message: <int, range(1, 16)> = 4
+  attachment_grace: <float, positive> = 3600.0
 }
 
 service {

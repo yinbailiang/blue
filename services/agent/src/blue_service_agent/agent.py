@@ -46,6 +46,10 @@ from infinity_bus.templates.request import request
 from blue.errors import ConfigError
 from blue.messages import decode_messages
 from blue.transport import BusRuntime
+from blue_service_agent.attachments import (
+    AttachmentMaterializer,
+    build_user_message,
+)
 from blue_service_agent.catalog import ToolCatalogClient
 from blue_service_agent.config import AgentConfig
 from blue_service_agent.history import (
@@ -204,10 +208,13 @@ class AgentCore:
                 # 历史可能带着进程中断遗留的悬空 tool_calls，
                 # 直接回灌会被模型接口以 400 拒收
                 messages = sanitize_history(decode_messages(snapshot.messages))
-                user_message = Message.user(payload.text)
+                user_message, attachment_blobs = build_user_message(
+                    payload.text, payload.attachments
+                )
                 messages.append(user_message)
+                # 附件与消息同一事务落库：内容寻址天然去重
                 await self._sessions.append(
-                    bus_proxy, payload.session_id, [user_message]
+                    bus_proxy, payload.session_id, [user_message], attachment_blobs
                 )
                 text, steps = await self._run_turn(
                     payload.session_id, payload.request_id, messages, bus_proxy
@@ -277,6 +284,9 @@ class AgentCore:
         """执行一轮对话：模型可多次调用工具，直到最终答复或达到步数上限。"""
         reply = ""
         steps = 0
+        materializer = AttachmentMaterializer(
+            fetch=lambda digest: self._fetch_attachment(bus_proxy, digest)
+        )
         while steps < self._settings.max_steps:
             steps += 1
             await self._stream_event(
@@ -290,9 +300,11 @@ class AgentCore:
             )
             tools = await self._tools_for(bus_proxy)
             chunks: list[StreamChunk] = []
+            # 库里存的是附件伪 URL，模型只接受 data URL：发请求前换一份副本
+            request_messages = await materializer.materialize(messages)
             try:
                 async for chunk in self._require_client().stream_chat(
-                    messages,
+                    request_messages,
                     self._request_config(tools),
                 ):
                     chunks.append(chunk)
@@ -464,6 +476,20 @@ class AgentCore:
                     ],
                 ),
             )
+
+    async def _fetch_attachment(
+        self, bus_proxy: EventBus.Proxy, digest: str
+    ) -> str | None:
+        """按哈希取附件并拼成 data URL；失败返回 None 让调用方降级。"""
+        try:
+            payload = await self._sessions.get_attachment(bus_proxy, digest)
+        except Exception:
+            logger.warning("附件 %s 读取失败", digest, exc_info=True)
+            return None
+        if payload is None:
+            logger.warning("附件 %s 不存在（可能已被回收）", digest)
+            return None
+        return payload.data_url()
 
     async def _stream_event(
         self, bus_proxy: EventBus.Proxy, payload: SessionStreamPayload

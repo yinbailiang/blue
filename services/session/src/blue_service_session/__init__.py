@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 from blue_service_session.config import SessionConfig
-from blue_service_session.db import SessionDatabase
-from blue_service_session.service import SessionService
+from blue_service_session.db import AttachmentRecord, SessionDatabase
+from blue_service_session.service import SessionAttachmentError, SessionService
 
 __all__ = [
+    "AttachmentRecord",
+    "SessionAttachmentError",
     "SessionConfig",
     "SessionDatabase",
     "SessionService",

@@ -7,17 +7,22 @@
 from __future__ import annotations
 
 import asyncio
+import logging
+from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
 
 import aiosqlite
-from blue_contracts_session import SessionInfo
+from blue_contracts_session import SessionInfo, collect_attachment_hashes
 from infinity_agent import Message
 
 from blue.errors import BlueError
 from blue.messages import encode_message
 
+logger = logging.getLogger(__name__)
+
 __all__ = [
+    "AttachmentRecord",
     "SessionDatabase",
     "SessionMeta",
     "SessionNotFoundError",
@@ -45,7 +50,29 @@ CREATE INDEX IF NOT EXISTS idx_messages_session
 
 CREATE INDEX IF NOT EXISTS idx_sessions_updated
     ON sessions(updated_at);
+
+CREATE TABLE IF NOT EXISTS attachments (
+    hash TEXT PRIMARY KEY,
+    mime TEXT NOT NULL,
+    size INTEGER NOT NULL,
+    data BLOB NOT NULL,
+    created_at REAL NOT NULL,
+    last_seen_at REAL NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS message_attachments (
+    message_id INTEGER NOT NULL REFERENCES messages(id) ON DELETE CASCADE,
+    hash TEXT NOT NULL REFERENCES attachments(hash),
+    position INTEGER NOT NULL,
+    PRIMARY KEY (message_id, position)
+);
+
+CREATE INDEX IF NOT EXISTS idx_message_attachments_hash
+    ON message_attachments(hash);
 """
+
+_SCHEMA_VERSION = 2
+"""schema 版本；所有建表语句都是 ``IF NOT EXISTS``，老库按需补表即可。"""
 
 
 class SessionNotFoundError(BlueError):
@@ -61,6 +88,16 @@ class SessionMeta:
     updated_at: float
     steps: int
     message_count: int
+
+
+@dataclass(frozen=True)
+class AttachmentRecord:
+    """一条附件：内容哈希、元信息与原始字节。"""
+
+    hash: str
+    mime: str
+    size: int
+    data: bytes
 
 
 @dataclass(frozen=True)
@@ -169,11 +206,72 @@ class SessionDatabase:
         async with self._lock:
             return await self._record_locked(session_id)
 
+    async def put_attachments(
+        self, blobs: Iterable[tuple[str, str, bytes]], *, now: float
+    ) -> None:
+        """按内容哈希写入附件（已存在则只刷新 last_seen_at）。"""
+        rows = [
+            (digest, mime, len(data), data, now, now) for digest, mime, data in blobs
+        ]
+        if not rows:
+            return
+        async with self._lock:
+            connection = self._connection_or_raise()
+            await connection.executemany(
+                """
+                INSERT INTO attachments
+                       (hash, mime, size, data, created_at, last_seen_at)
+                VALUES (?, ?, ?, ?, ?, ?)
+                ON CONFLICT(hash) DO UPDATE SET last_seen_at = excluded.last_seen_at
+                """,
+                rows,
+            )
+            await connection.commit()
+
+    async def get_attachment(self, digest: str) -> AttachmentRecord | None:
+        """按内容哈希取附件；不存在时返回 ``None``。"""
+        async with self._lock:
+            connection = self._connection_or_raise()
+            cursor = await connection.execute(
+                "SELECT hash, mime, size, data FROM attachments WHERE hash = ?",
+                (digest,),
+            )
+            row = await cursor.fetchone()
+            await cursor.close()
+        if row is None:
+            return None
+        return AttachmentRecord(
+            hash=str(row[0]), mime=str(row[1]), size=int(row[2]), data=bytes(row[3])
+        )
+
+    async def sweep_attachments(self, *, now: float, grace: float) -> int:
+        """回收不再被任何消息引用、且超过宽限期的附件；返回删除条数。"""
+        async with self._lock:
+            connection = self._connection_or_raise()
+            cursor = await connection.execute(
+                """
+                DELETE FROM attachments
+                 WHERE last_seen_at < ?
+                   AND hash NOT IN (SELECT hash FROM message_attachments)
+                """,
+                (now - grace,),
+            )
+            removed = int(cursor.rowcount or 0)
+            await cursor.close()
+            await connection.commit()
+        return max(0, removed)
+
     async def append(
-        self, session_id: str, payloads: list[str], *, now: float
+        self,
+        session_id: str,
+        payloads: list[str],
+        *,
+        now: float,
+        attachments: Iterable[tuple[str, str, bytes]] = (),
     ) -> SessionMeta:
-        """追加消息并刷新 updated_at。"""
-        if not payloads:
+        """追加消息（可同时落库它们引用的附件）并刷新 updated_at。"""
+        blobs = list(attachments)
+        if not payloads and not blobs:
             meta = await self.meta(session_id)
             return meta
 
@@ -184,22 +282,29 @@ class SessionDatabase:
                 meta = await self._meta_locked(session_id)
                 if meta is None:
                     raise SessionNotFoundError(f"会话不存在：{session_id}")
-                await connection.executemany(
-                    """
-                    INSERT INTO messages (session_id, payload, created_at)
-                    VALUES (?, ?, ?)
-                    """,
-                    [(session_id, payload, now) for payload in payloads],
-                )
-                await connection.execute(
-                    """
-                    UPDATE sessions
-                       SET updated_at = ?,
-                           message_count = message_count + ?
-                     WHERE session_id = ?
-                    """,
-                    (now, len(payloads), session_id),
-                )
+                await self._upsert_attachments_locked(blobs, now=now)
+                for payload in payloads:
+                    cursor = await connection.execute(
+                        """
+                        INSERT INTO messages (session_id, payload, created_at)
+                        VALUES (?, ?, ?)
+                        """,
+                        (session_id, payload, now),
+                    )
+                    message_id = cursor.lastrowid
+                    await cursor.close()
+                    if message_id is not None:
+                        await self._link_attachments_locked(int(message_id), payload)
+                if payloads:
+                    await connection.execute(
+                        """
+                        UPDATE sessions
+                           SET updated_at = ?,
+                               message_count = message_count + ?
+                         WHERE session_id = ?
+                        """,
+                        (now, len(payloads), session_id),
+                    )
                 await connection.commit()
             except Exception:
                 await connection.rollback()
@@ -331,15 +436,19 @@ class SessionDatabase:
     async def _init_schema(self, connection: aiosqlite.Connection) -> None:
         cursor = await connection.execute("PRAGMA user_version")
         row = await cursor.fetchone()
+        await cursor.close()
         if row is None:
             raise RuntimeError("无法读取 SQLite user_version")
         version = int(row[0])
-        if version == 0:
-            await connection.executescript(_SCHEMA)
-            await connection.execute("PRAGMA user_version = 1")
+        if version > _SCHEMA_VERSION:
+            raise RuntimeError(
+                f"会话数据库版本 {version} 高于本程序支持的 {_SCHEMA_VERSION}"
+            )
+        if version == _SCHEMA_VERSION:
             return
-        if version != 1:
-            raise RuntimeError(f"不支持的会话数据库版本：{version}")
+        # 建表语句全是 IF NOT EXISTS：老库只需补缺失的表，不需要重写数据
+        await connection.executescript(_SCHEMA)
+        await connection.execute(f"PRAGMA user_version = {_SCHEMA_VERSION}")
 
     async def _record_locked(self, session_id: str) -> SessionRecord | None:
         meta = await self._meta_locked(session_id)
@@ -405,6 +514,56 @@ class SessionDatabase:
                 [(session_id,) for session_id in removed],
             )
         return removed
+
+    async def _upsert_attachments_locked(
+        self, blobs: Iterable[tuple[str, str, bytes]], *, now: float
+    ) -> None:
+        """事务内写附件（幂等：同哈希只刷新 last_seen_at）。"""
+        rows = [
+            (digest, mime, len(data), data, now, now) for digest, mime, data in blobs
+        ]
+        if not rows:
+            return
+        connection = self._connection_or_raise()
+        await connection.executemany(
+            """
+            INSERT INTO attachments (hash, mime, size, data, created_at, last_seen_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+            ON CONFLICT(hash) DO UPDATE SET last_seen_at = excluded.last_seen_at
+            """,
+            rows,
+        )
+
+    async def _link_attachments_locked(self, message_id: int, payload: str) -> None:
+        """把消息里引用的附件登记到映射表；未落库的哈希只告警不关联。"""
+        hashes = collect_attachment_hashes(payload)
+        if not hashes:
+            return
+        connection = self._connection_or_raise()
+        placeholders = ",".join("?" * len(hashes))
+        cursor = await connection.execute(
+            f"SELECT hash FROM attachments WHERE hash IN ({placeholders})",
+            hashes,
+        )
+        rows = await cursor.fetchall()
+        await cursor.close()
+        known = {str(row[0]) for row in rows}
+        missing = [digest for digest in hashes if digest not in known]
+        if missing:
+            logger.warning("消息引用了未落库的附件，已忽略关联：%s", missing)
+        links = [
+            (message_id, digest, position)
+            for position, digest in enumerate(hashes)
+            if digest in known
+        ]
+        if links:
+            await connection.executemany(
+                """
+                INSERT OR REPLACE INTO message_attachments (message_id, hash, position)
+                VALUES (?, ?, ?)
+                """,
+                links,
+            )
 
     def _connection_or_raise(self) -> aiosqlite.Connection:
         if self._connection is None:

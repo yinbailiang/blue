@@ -9,7 +9,7 @@ from typing import Any, Literal
 
 from infinity_bus import EventDeclaration
 from infinity_bus.templates.request import RequestProtocol, ResponseProtocol
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 __all__ = [
     "EVENTS",
@@ -17,6 +17,10 @@ __all__ = [
     "SessionAppendReplyEvent",
     "SessionAppendRequest",
     "SessionAppendResponse",
+    "SessionAttachment",
+    "SessionAttachmentBlob",
+    "SessionAttachmentGetRequest",
+    "SessionAttachmentResponse",
     "SessionCancelEvent",
     "SessionCancelReplyEvent",
     "SessionCancelRequest",
@@ -54,10 +58,39 @@ __all__ = [
 # ---------------------------------------------------------------------------
 
 
-class SessionPromptRequest(RequestProtocol):
-    """用户向某个会话投递一条消息。"""
+class SessionAttachment(BaseModel):
+    """随 prompt 内联上传的附件（方案 A：一次往返）。"""
 
-    text: str = Field(description="用户消息")
+    mime: str = Field(description="声明的 MIME 类型，如 image/png")
+    data: str = Field(description="base64 负载，可为裸 base64 或 data URL")
+    name: str | None = Field(default=None, description="可选文件名")
+
+
+class SessionAttachmentBlob(BaseModel):
+    """落库用的附件负载：与消息一起内联提交，由会话库按哈希去重。"""
+
+    hash: str = Field(description="内容哈希（sha256），与消息里的伪 URL 一致")
+    mime: str = Field(description="MIME 类型")
+    data: str = Field(description="base64 负载（不含 data: 前缀）")
+
+
+class SessionPromptRequest(RequestProtocol):
+    """用户向某个会话投递一条消息（可携带附件）。"""
+
+    text: str = Field(default="", description="用户消息；与 attachments 至少给一个")
+    attachments: list[SessionAttachment] = Field(
+        default_factory=list[SessionAttachment], description="内联附件"
+    )
+
+    @model_validator(mode="after")
+    def validate_content(self) -> SessionPromptRequest:
+        """文本与附件不能同时为空。
+
+        :raises ValueError: 两者都为空
+        """
+        if not self.text.strip() and not self.attachments:
+            raise ValueError("text 与 attachments 至少要有一个")
+        return self
 
 
 class SessionReplyResponse(ResponseProtocol):
@@ -167,10 +200,14 @@ class SessionGetResponse(ResponseProtocol):
 
 
 class SessionAppendRequest(RequestProtocol):
-    """向会话追加消息。"""
+    """向会话追加消息（可同时提交消息引用的附件负载）。"""
 
     messages: list[str] = Field(
         default_factory=list[str], description="Message JSON 文本列表"
+    )
+    attachments: list[SessionAttachmentBlob] = Field(
+        default_factory=list[SessionAttachmentBlob],
+        description="消息里引用的附件负载（按哈希去重后落库）",
     )
 
 
@@ -304,6 +341,35 @@ class SessionStateReplyEvent(EventDeclaration):
     payload_type = SessionStateResponse
 
 
+class SessionAttachmentGetRequest(RequestProtocol):
+    """按内容哈希取附件。"""
+
+    hash: str = Field(description="附件内容哈希")
+
+
+class SessionAttachmentResponse(ResponseProtocol):
+    """附件内容（base64）与元信息。"""
+
+    hash: str = Field(default="", description="附件内容哈希")
+    mime: str = Field(default="", description="MIME 类型")
+    size: int = Field(default=0, description="原始字节数")
+    data: str = Field(default="", description="base64 负载（不含 data: 前缀）")
+
+
+class SessionAttachmentGetEvent(EventDeclaration):
+    """附件读取请求事件。"""
+
+    name = "session.attachment.get"
+    payload_type = SessionAttachmentGetRequest
+
+
+class SessionAttachmentReplyEvent(EventDeclaration):
+    """附件读取响应事件。"""
+
+    name = "session.attachment.reply"
+    payload_type = SessionAttachmentResponse
+
+
 EVENTS: tuple[type[EventDeclaration], ...] = (
     SessionPromptEvent,
     SessionReplyEvent,
@@ -320,5 +386,7 @@ EVENTS: tuple[type[EventDeclaration], ...] = (
     SessionUpdateEvent,
     SessionUpdateReplyEvent,
     SessionStreamEvent,
+    SessionAttachmentGetEvent,
+    SessionAttachmentReplyEvent,
 )
 """会话领域全部跨进程事件声明。"""

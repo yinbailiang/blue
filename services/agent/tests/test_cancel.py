@@ -4,14 +4,16 @@ from __future__ import annotations
 
 import asyncio
 import types
-from collections.abc import AsyncGenerator
+from collections.abc import AsyncGenerator, Iterable
 
 from blue_contracts_session import (
+    SessionAttachmentBlob,
     SessionPromptRequest,
     SessionSnapshot,
 )
 from blue_service_agent.agent import AgentCore
 from blue_service_agent.config import AgentConfig
+from blue_service_agent.session_gateway import AttachmentPayload
 from blue_service_registry import ToolRegistryService
 from infinity_agent import Message, MessageRole, Messages
 from infinity_agent.clients import (
@@ -51,10 +53,20 @@ class RecordingGateway:
         )
 
     async def append(
-        self, bus_proxy: EventBus.Proxy, session_id: str, messages: list[Message]
+        self,
+        bus_proxy: EventBus.Proxy,
+        session_id: str,
+        messages: list[Message],
+        attachments: Iterable[SessionAttachmentBlob] = (),
     ) -> None:
-        del bus_proxy
+        del bus_proxy, attachments
         self.messages.setdefault(session_id, []).extend(messages)
+
+    async def get_attachment(
+        self, bus_proxy: EventBus.Proxy, digest: str
+    ) -> AttachmentPayload | None:
+        del bus_proxy, digest
+        return None
 
     async def update(
         self, bus_proxy: EventBus.Proxy, session_id: str, steps: int

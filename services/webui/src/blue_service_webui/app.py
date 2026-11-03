@@ -4,15 +4,16 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import re
 from pathlib import Path
 from typing import Any, cast
 
-from blue_contracts_session import SessionInfo
+from blue_contracts_session import SessionAttachment, SessionInfo
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, Response
 from fastapi.staticfiles import StaticFiles
 from infinity_agent import ToolDefinition
-from pydantic import BaseModel, Field, ValidationError
+from pydantic import BaseModel, Field, ValidationError, model_validator
 
 from blue.errors import BlueError
 from blue_service_webui.backend import (
@@ -27,13 +28,29 @@ __all__ = ["ChatRequest", "create_app"]
 
 WEB_DIR = Path(__file__).resolve().parent / "web"
 
+_HEX_DIGEST = re.compile(r"[0-9a-f]{64}\Z")
+"""附件哈希（sha256 十六进制）格式。"""
+
 
 class ChatRequest(BaseModel):
-    """REST / WebSocket 用户消息。"""
+    """REST / WebSocket 用户消息（可携带内联附件）。"""
 
     session_id: str = Field(min_length=1, max_length=128)
-    text: str = Field(min_length=1, max_length=100_000)
+    text: str = Field(default="", max_length=100_000)
+    attachments: list[SessionAttachment] = Field(
+        default_factory=list[SessionAttachment], description="内联附件"
+    )
     type: str = Field(default="prompt", description="帧类型（WebSocket 兼容字段）")
+
+    @model_validator(mode="after")
+    def _require_content(self) -> ChatRequest:
+        """文本与附件至少要有一个。
+
+        :raises ValueError: 两者都为空
+        """
+        if not self.text.strip() and not self.attachments:
+            raise ValueError("消息不能为空")
+        return self
 
 
 class SessionsResponse(BaseModel):
@@ -101,6 +118,24 @@ def create_app(*, backend: WebBackend, config: WebUIConfig) -> FastAPI:
             raise HTTPException(status_code=503, detail=str(error)) from error
         return {"ok": True}
 
+    @app.get("/api/attachments/{digest}", include_in_schema=False)
+    async def attachment(digest: str) -> Response:
+        """按内容哈希返回附件字节（内容寻址，可长缓存）。"""
+        if not _HEX_DIGEST.fullmatch(digest):
+            raise HTTPException(status_code=400, detail="附件哈希格式非法")
+        try:
+            found = await backend.get_attachment(digest)
+        except BlueError as error:
+            raise HTTPException(status_code=503, detail=str(error)) from error
+        if found is None:
+            raise HTTPException(status_code=404, detail="附件不存在")
+        mime, data = found
+        return Response(
+            content=data,
+            media_type=mime or "application/octet-stream",
+            headers={"Cache-Control": "public, max-age=31536000, immutable"},
+        )
+
     @app.get("/api/tools", response_model=ToolsResponse)
     async def tools() -> ToolsResponse:
         """返回工具目录。"""
@@ -119,10 +154,8 @@ def create_app(*, backend: WebBackend, config: WebUIConfig) -> FastAPI:
     async def chat(request: ChatRequest) -> dict[str, Any]:
         """无 WebSocket 时的同步聊天接口。"""
         text = request.text.strip()
-        if not text:
-            raise HTTPException(status_code=422, detail="消息不能为空")
         try:
-            reply = await backend.prompt(request.session_id, text)
+            reply = await backend.prompt(request.session_id, text, request.attachments)
         except BlueError as error:
             raise HTTPException(status_code=502, detail=str(error)) from error
         return {
@@ -146,17 +179,12 @@ def create_app(*, backend: WebBackend, config: WebUIConfig) -> FastAPI:
                         {"type": "error", "message": f"消息格式错误：{error}"}
                     )
                     continue
-                text = request.text.strip()
-                if not text:
-                    await websocket.send_json(
-                        {"type": "error", "message": "消息不能为空"}
-                    )
-                    continue
                 await _stream_prompt(
                     websocket,
                     backend,
                     request.session_id,
-                    text,
+                    request.text.strip(),
+                    request.attachments,
                     poll_interval=config.poll_interval,
                 )
         except WebSocketDisconnect:
@@ -172,6 +200,7 @@ async def _stream_prompt(
     backend: WebBackend,
     session_id: str,
     text: str,
+    attachments: list[SessionAttachment],
     *,
     poll_interval: float,
 ) -> None:
@@ -184,7 +213,7 @@ async def _stream_prompt(
         {"type": "status", "phase": "thinking", "label": "Agent 正在思考…"}
     )
     async with backend.subscribe(session_id) as stream:
-        prompt_task = asyncio.create_task(backend.prompt(session_id, text))
+        prompt_task = asyncio.create_task(backend.prompt(session_id, text, attachments))
         stream_task = asyncio.create_task(stream.get())
         receive_task = asyncio.create_task(websocket.receive_json())
         cancelled = False

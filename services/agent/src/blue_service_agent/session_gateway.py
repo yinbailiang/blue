@@ -2,12 +2,18 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterable
+from dataclasses import dataclass
 from typing import Protocol
 
 from blue_contracts_session import (
     SessionAppendEvent,
     SessionAppendReplyEvent,
     SessionAppendResponse,
+    SessionAttachmentBlob,
+    SessionAttachmentGetEvent,
+    SessionAttachmentReplyEvent,
+    SessionAttachmentResponse,
     SessionGetEvent,
     SessionGetReplyEvent,
     SessionGetResponse,
@@ -23,7 +29,22 @@ from infinity_bus.templates.request import request
 from blue.errors import BlueError
 from blue.messages import encode_messages
 
-__all__ = ["BusSessionGateway", "SessionGateway"]
+__all__ = ["AttachmentPayload", "BusSessionGateway", "SessionGateway"]
+
+
+@dataclass(frozen=True)
+class AttachmentPayload:
+    """从会话库取回的附件。"""
+
+    hash: str
+    mime: str
+    size: int
+    data: str
+    """裸 base64 负载。"""
+
+    def data_url(self) -> str:
+        """拼成模型可接受的 data URL。"""
+        return f"data:{self.mime};base64,{self.data}"
 
 
 class SessionGateway(Protocol):
@@ -43,8 +64,15 @@ class SessionGateway(Protocol):
         bus_proxy: EventBus.Proxy,
         session_id: str,
         messages: list[Message],
+        attachments: Iterable[SessionAttachmentBlob] = (),
     ) -> None:
-        """追加消息。"""
+        """追加消息（可同时提交附件负载）。"""
+        ...
+
+    async def get_attachment(
+        self, bus_proxy: EventBus.Proxy, digest: str
+    ) -> AttachmentPayload | None:
+        """按内容哈希取附件；不存在返回 ``None``。"""
         ...
 
     async def update(
@@ -91,12 +119,14 @@ class BusSessionGateway:
         bus_proxy: EventBus.Proxy,
         session_id: str,
         messages: list[Message],
+        attachments: Iterable[SessionAttachmentBlob] = (),
     ) -> None:
-        """追加消息。"""
+        """追加消息；附件与消息在同一次 RPC 里提交，由会话库按哈希去重。"""
+        blobs = [blob.model_dump(mode="json") for blob in attachments]
         response = await request(
             bus_proxy,
             SessionAppendEvent.name,
-            {"messages": encode_messages(messages)},
+            {"messages": encode_messages(messages), "attachments": blobs},
             SessionAppendReplyEvent.name,
             session_id=session_id,
             timeout=self._timeout,
@@ -105,6 +135,28 @@ class BusSessionGateway:
             raise BlueError("收到非预期的会话追加响应类型")
         if not response.success:
             raise BlueError(response.error_msg or "会话追加失败")
+
+    async def get_attachment(
+        self, bus_proxy: EventBus.Proxy, digest: str
+    ) -> AttachmentPayload | None:
+        """按内容哈希取附件；服务端回失败时视为不存在。"""
+        response = await request(
+            bus_proxy,
+            SessionAttachmentGetEvent.name,
+            {"hash": digest},
+            SessionAttachmentReplyEvent.name,
+            timeout=self._timeout,
+        )
+        if not isinstance(response, SessionAttachmentResponse):
+            raise BlueError("收到非预期的附件响应类型")
+        if not response.success:
+            return None
+        return AttachmentPayload(
+            hash=response.hash,
+            mime=response.mime,
+            size=response.size,
+            data=response.data,
+        )
 
     async def update(
         self,
