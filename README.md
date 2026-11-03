@@ -77,7 +77,7 @@ contracts/                    # 域契约包（不依赖控制面/服务实现�
 src/blue/                     # 控制面 + 共享 SDK（随包安装）
 ├── transport.py              # RabbitMQ fanout / 进程内 fanout
 ├── lifecycle.py              # serve_forever
-├── worker.py                 # ToolWorker（工具服务使用）
+├── worker.py                 # ToolWorker / ToolRegistrar（工具服务使用）
 ├── runtime.py                # 服务侧运行时：读配置、连总线、run_tool
 ├── config.py                 # blue.infd 入口与文档导出
 ├── errors.py                 # BlueError / ConfigError / ...
@@ -103,6 +103,7 @@ services/                     # 工作负载（不随 blue 包安装）
 ├── webui/                    # FastAPI 后端 + 静态单页应用
 ├── clock/ echo/ text_stats/ weather/
 ├── read_file/ write_file/ edit_file/ shell/
+├── mcp_bridge/               # MCP 客户端桥：外部 MCP server → 工具目录
 ├── chat/ inspect/            # 手工运行的 UI 客户端
 └── */service.infd            # 服务模板 + 系统元数据
 ```
@@ -447,10 +448,73 @@ Ready / Running → Stopping → Stopped
 | `read_file` / `write_file` / `edit_file` | 文件读写与精确替换 |
 | `shell` | 异步 shell 命令，超时进程组强杀、输出截断；默认工作目录为项目根 |
 | `weather` | 天气查询（wttr.in，免密钥）：实时实况 + 最多 3 天预报，天气码本地译中文 |
+| `mcp_bridge` | MCP 客户端桥：把外部 MCP server（stdio）的工具接入工具目录；工具集声明式、schema 自动降级并留痕 |
+| `mcp_server` | MCP 服务端桥：把 blue 工具目录暴露给外部 MCP 客户端（stdio，手工运行，白名单 + 危险工具门禁） |
 | `chat` / `inspect` | 手工 UI 客户端，不纳入 supervisor 调谐 |
 
 > **安全提示**：`read_file` / `write_file` / `edit_file` / `shell` 以工具进程
 > 权限运行，没有额外沙箱。只在可信工作目录中启用。
+>
+> **MCP 提示**：`mcp_bridge` 会以工具进程权限启动外部命令（`npx` / `uvx` /
+> 任意 `command`）。MCP server 就是一段任意代码，只接入可信来源。
+
+## MCP 桥接
+
+`mcp_bridge` 把外部 **MCP server**（stdio 传输）的工具接进工具目录，agent 用它
+们和用本地工具没有区别。
+
+```infd
+!from p"services/mcp_bridge/service.infd" import ServiceTemplate as McpBridgeService
+
+mcp_bridge = McpBridgeService(
+  tools = ["fs__read_file", "git__status"],
+  servers = [
+    {name = "fs", command = "npx", args = ["-y", "@modelcontextprotocol/server-filesystem", "/tmp"]},
+    {name = "git", command = "uvx", args = ["mcp-server-git"]},
+  ],
+)
+```
+
+约定：
+
+- **工具集是声明式的**。只有 `tools` 里列出的 `<server>__<tool>` 会注册；运行期
+  不跟随 MCP 的 `tools/list_changed`，只有 `blue apply` 才会对齐。
+- **fail loud**：声明了但 server 未提供的工具会让桥启动失败（`blue status` 可见），
+  而不是静默少一个；server 提供了但没声明的工具只 warning。
+- **调用必应答**：server 掉线、调用超时（`call_timeout`，默认 60s）、JSON-RPC error
+  都会立刻回 `tool.result(success=false)`，不会挂到 agent 的 `tool_timeout`。
+- **参数 schema 自动降级**：MCP 的完整 JSON Schema 超出工具参数能表达的部分
+  （`$ref` 的 `definitions` 写法、`allOf`、`const`、`format`、无 `items` 的数组…）
+  会被就地降级，并在工具描述末尾追加 `[blue] 参数 schema 已降级：…`，同时逐条告警。
+- **零新增依赖**：桥自带 stdio JSON-RPC 客户端（只实现 `initialize` /
+  `tools/list` / `tools/call`），不引入官方 `mcp` SDK 的传递依赖链。
+
+未接入的能力：MCP 的 `resources/*`、`prompts/*`、`notifications/cancelled`、
+`progress` 与 streamable HTTP 传输。设计与取舍见
+[`docs/mcp-bridge.md`](docs/mcp-bridge.md)。
+
+### 反向：把 blue 工具暴露给外部 MCP 客户端
+
+`mcp_server` 是反方向——把 blue 的工具目录变成一个 stdio MCP server，给
+Claude Code / Cursor 这类客户端用。它手工运行、不纳入 supervisor 调谐：
+
+```bash
+# 先看目录里有哪些工具（注意：--expose 收的是工具名，不是服务名）
+BLUE_BUS_URL=amqp://guest:guest@127.0.0.1:5672/blue \
+  uv run --package blue-service-mcp-server blue-service-mcp-server --list-tools
+
+# 作为 stdio MCP server 运行
+BLUE_BUS_URL=amqp://guest:guest@127.0.0.1:5672/blue \
+  uv run --package blue-service-mcp-server \
+  blue-service-mcp-server --expose now,text_stats,get_weather
+```
+
+- `--expose` 必须显式列出，不支持「全部」；
+- `run_shell` / `write_file` / `edit_file` 默认拒绝，需 `--allow-unsafe`；
+- `tools/list` 走 `catalog.query`，`tools/call` 走 `tool.call`，调用前先核对目录，
+  白名单有但服务没跑的工具立即报错而不是挂到超时；
+- stdout 只承载协议帧，日志与 `--list-tools` 输出都走 stderr。
+
 >
 > **网络提示**：`weather` 会向 `wttr.in` 发起 HTTPS 请求；如需换源或镜像，
 > 在 `blue.infd` 里传 `WeatherService(base_url = ..., timeout = ...)`。
@@ -462,7 +526,10 @@ Ready / Running → Stopping → Stopped
 3. 在 `src/blue_service_<name>/` 实现入口；工具服务直接调用
    `blue.runtime.run_tool`；
 4. 在 `blue.infd` 中 `!from` 导入模板并实例化 `<name> = ...`；
-5. 运行 `uv sync --all-packages`、`uv run blue config-check`。
+5. 运行 `uv sync --all-packages`、`uv run blue config-check`；
+6. 登记到 `pyproject.toml` 的 `[tool.pyright] extraPaths`，以及
+   `tests/test_service_manifests.py` 的 `SERVICES` / `MANAGED` /
+   `EXPECTED_CONTRACTS`（三处都不写，类型检查与清单测试会漏掉新服务）。
 
 服务名必须是合法 `.infd` 标识符：`[a-z][a-z0-9_]*`，并与目录名、
 `service.name` 完全一致。

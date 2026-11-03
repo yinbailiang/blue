@@ -14,6 +14,8 @@ members = [
     "blue-service-echo",
     "blue-service-edit-file",
     "blue-service-inspect",
+    "blue-service-mcp-bridge",
+    "blue-service-mcp-server",
     "blue-service-read-file",
     "blue-service-registry",
     "blue-service-session",
@@ -427,6 +429,44 @@ requires-dist = [
     { name = "blue-contracts-session", editable = "contracts/session" },
     { name = "blue-contracts-tool", editable = "contracts/tool" },
     { name = "infinity-bus", extras = ["templates"], specifier = ">=6.0.0" },
+]
+
+[[package]]
+name = "blue-service-mcp-bridge"
+version = "0.1.0"
+source = { editable = "services/mcp_bridge" }
+dependencies = [
+    { name = "blue" },
+    { name = "blue-contracts-tool" },
+    { name = "infinity-agent" },
+    { name = "pydantic" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "blue", editable = "." },
+    { name = "blue-contracts-tool", editable = "contracts/tool" },
+    { name = "infinity-agent", specifier = ">=0.2.1" },
+    { name = "pydantic", specifier = ">=2" },
+]
+
+[[package]]
+name = "blue-service-mcp-server"
+version = "0.1.0"
+source = { editable = "services/mcp_server" }
+dependencies = [
+    { name = "blue" },
+    { name = "blue-contracts-tool" },
+    { name = "infinity-agent" },
+    { name = "pydantic" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "blue", editable = "." },
+    { name = "blue-contracts-tool", editable = "contracts/tool" },
+    { name = "infinity-agent", specifier = ">=0.2.1" },
+    { name = "pydantic", specifier = ">=2" },
 ]
 
 [[package]]

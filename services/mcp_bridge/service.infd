@@ -1,0 +1,22 @@
+~ServiceTemplate {
+  call_timeout: <float, positive> = 60.0
+  startup_timeout: <float, positive> = 30.0
+  reconnect_backoff: <float, positive> = 0.5
+  reconnect_backoff_max: <float, positive> = 30.0
+  health_interval: <float, positive> = 5.0
+  tools: <list, each(str), size(0, 64)> = []
+  servers: <list, each(field(command, str)), size(0, 16)> = []
+}
+
+service {
+  name = "mcp_bridge"
+  kind = "tool"
+  package = "blue-service-mcp-bridge"
+  module = "blue_service_mcp_bridge"
+  depends_on = ["bus", "registry"]
+  depends_contracts = ["tool"]
+  restart = "always"
+  stop_timeout = 10.0
+  startup_timeout = 60.0
+  readiness = "process"
+}

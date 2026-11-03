@@ -1,0 +1,28 @@
+[project]
+name = "blue-service-mcp-server"
+version = "0.1.0"
+description = "blue MCP 服务端桥：把 blue 工具目录暴露给外部 MCP 客户端"
+requires-python = ">=3.14"
+dependencies = [
+    "blue",
+    "blue-contracts-tool",
+    "infinity-agent>=0.2.1",
+    "pydantic>=2",
+]
+
+[tool.uv.sources]
+blue = { workspace = true }
+blue-contracts-tool = { workspace = true }
+blue-service-mcp-bridge = { workspace = true }
+blue-service-registry = { workspace = true }
+
+[build-system]
+requires = ["uv_build>=0.9.0,<0.14"]
+build-backend = "uv_build"
+
+[tool.uv.build-backend]
+module-name = "blue_service_mcp_server"
+module-root = "src"
+
+[project.scripts]
+blue-service-mcp-server = "blue_service_mcp_server:main"

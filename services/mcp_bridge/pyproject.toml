@@ -1,0 +1,26 @@
+[project]
+name = "blue-service-mcp-bridge"
+version = "0.1.0"
+description = "blue MCP 客户端桥：把外部 MCP server 的工具接入工具目录"
+requires-python = ">=3.14"
+dependencies = [
+    "blue",
+    "blue-contracts-tool",
+    "infinity-agent>=0.2.1",
+    "pydantic>=2",
+]
+
+[tool.uv.sources]
+blue = { workspace = true }
+blue-contracts-tool = { workspace = true }
+
+[build-system]
+requires = ["uv_build>=0.9.0,<0.14"]
+build-backend = "uv_build"
+
+[tool.uv.build-backend]
+module-name = "blue_service_mcp_bridge"
+module-root = "src"
+
+[project.scripts]
+blue-service-mcp-bridge = "blue_service_mcp_bridge:main"

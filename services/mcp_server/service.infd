@@ -1,0 +1,15 @@
+~ServiceTemplate {
+}
+
+service {
+  name = "mcp_server"
+  kind = "ui"
+  package = "blue-service-mcp-server"
+  module = "blue_service_mcp_server"
+  depends_on = ["bus", "registry"]
+  depends_contracts = ["tool"]
+  restart = "never"
+  stop_timeout = 5.0
+  startup_timeout = 10.0
+  readiness = "none"
+}

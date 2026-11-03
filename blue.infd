@@ -22,6 +22,7 @@
 !from p"services/edit_file/service.infd" import ServiceTemplate as EditFileService
 !from p"services/shell/service.infd" import ServiceTemplate as ShellService
 !from p"services/weather/service.infd" import ServiceTemplate as WeatherService
+!from p"services/mcp_bridge/service.infd" import ServiceTemplate as McpBridgeService
 
 supervisor {
   state_dir: str = ".blue"
@@ -71,6 +72,14 @@ shell = ShellService()
 
 # 天气查询：默认走 wttr.in，可改 base_url / timeout
 weather = WeatherService()
+
+# MCP 客户端桥：把外部 MCP server（stdio）的工具接进目录。
+# 工具集是声明式的：只有 tools 里列出的 <server>__<tool> 会注册；声明的工具在
+# server 上不存在时桥启动失败（fail loud）。启用时把下面三行取消注释：
+#mcp_bridge = McpBridgeService(
+#  tools = ["fs__read_file"],
+#  servers = [{name = "fs", command = "npx", args = ["-y", "@modelcontextprotocol/server-filesystem", "/tmp"]}],
+#)
 
 # UI 客户端不纳入 supervisor 调谐，手工运行：
 #   uv run --package blue-service-chat blue-service-chat --interactive
