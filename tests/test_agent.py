@@ -11,7 +11,7 @@ from infinity_bus.templates.request import request
 from blue.agent import AgentCore
 from blue.catalog import ToolRegistryService
 from blue.config import AgentSettings
-from blue.protocol import SessionReplyResponse, Topic, TopicBook
+from blue.protocol import SessionPromptEvent, SessionReplyEvent, SessionReplyResponse
 from blue.transport import MemoryFanout
 from blue.worker import ToolWorker
 from tests.support import ScriptedClient, make_runtime, wait_until
@@ -30,16 +30,13 @@ def test_agent_calls_tool_then_replies() -> None:
 
 
 async def _agent_calls_tool() -> None:
-    topics = TopicBook("test")
     hub = MemoryFanout()
     registry = ToolRegistryService(
-        runtime=make_runtime(hub, "registry", topics),
+        runtime=make_runtime(hub, "registry"),
         ttl=5.0,
         sweep_interval=0.05,
     )
-    worker = ToolWorker(
-        runtime=make_runtime(hub, "tool.echo", topics), tool=echo, ttl=5.0
-    )
+    worker = ToolWorker(runtime=make_runtime(hub, "tool.echo"), tool=echo, ttl=5.0)
     client = ScriptedClient(
         [
             Message.assistant(tool_calls=[_echo_call("call-1", "ping")]),
@@ -47,11 +44,11 @@ async def _agent_calls_tool() -> None:
         ]
     )
     core = AgentCore(
-        runtime=make_runtime(hub, "agent", topics),
+        runtime=make_runtime(hub, "agent"),
         settings=AgentSettings(api_key_env="BLUE_UNUSED_KEY", max_steps=4),
         client=client,
     )
-    chat = make_runtime(hub, "chat", topics)
+    chat = make_runtime(hub, "chat")
 
     await registry.start()
     await worker.start()
@@ -61,9 +58,9 @@ async def _agent_calls_tool() -> None:
         await wait_until(lambda: registry.state.worker_count == 1)
         response = await request(
             chat.proxy(),
-            topics.name(Topic.SESSION_PROMPT),
+            SessionPromptEvent.name,
             {"text": "帮我回显 ping"},
-            topics.name(Topic.SESSION_REPLY),
+            SessionReplyEvent.name,
             session_id="session-1",
             timeout=10.0,
         )
@@ -97,25 +94,22 @@ def test_agent_stops_at_max_steps() -> None:
 
 
 async def _agent_stops_at_max_steps() -> None:
-    topics = TopicBook("test")
     hub = MemoryFanout()
     registry = ToolRegistryService(
-        runtime=make_runtime(hub, "registry", topics),
+        runtime=make_runtime(hub, "registry"),
         ttl=5.0,
         sweep_interval=0.05,
     )
-    worker = ToolWorker(
-        runtime=make_runtime(hub, "tool.echo", topics), tool=echo, ttl=5.0
-    )
+    worker = ToolWorker(runtime=make_runtime(hub, "tool.echo"), tool=echo, ttl=5.0)
     client = ScriptedClient(
         [Message.assistant(tool_calls=[_echo_call("loop-1", "x")]) for _ in range(5)]
     )
     core = AgentCore(
-        runtime=make_runtime(hub, "agent", topics),
+        runtime=make_runtime(hub, "agent"),
         settings=AgentSettings(api_key_env="BLUE_UNUSED_KEY", max_steps=2),
         client=client,
     )
-    chat = make_runtime(hub, "chat", topics)
+    chat = make_runtime(hub, "chat")
 
     await registry.start()
     await worker.start()
@@ -125,9 +119,9 @@ async def _agent_stops_at_max_steps() -> None:
         await wait_until(lambda: registry.state.worker_count == 1)
         response = await request(
             chat.proxy(),
-            topics.name(Topic.SESSION_PROMPT),
+            SessionPromptEvent.name,
             {"text": "一直调用工具"},
-            topics.name(Topic.SESSION_REPLY),
+            SessionReplyEvent.name,
             session_id="session-2",
             timeout=10.0,
         )

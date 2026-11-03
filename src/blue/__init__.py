@@ -12,7 +12,7 @@ from blue.config import (
     load_settings,
 )
 from blue.errors import BlueError
-from blue.protocol import Topic, TopicBook
+from blue.protocol import ALL_EVENTS, EVENT_NAMES, register_events
 from blue.session import Session, SessionStore
 from blue.transport import (
     BusRuntime,
@@ -23,6 +23,8 @@ from blue.transport import (
 from blue.worker import ToolWorker
 
 __all__ = [
+    "ALL_EVENTS",
+    "EVENT_NAMES",
     "AgentAggregate",
     "AgentCore",
     "AgentSettings",
@@ -41,8 +43,7 @@ __all__ = [
     "ToolRegistryService",
     "ToolRegistryState",
     "ToolWorker",
-    "Topic",
-    "TopicBook",
     "build_client",
     "load_settings",
+    "register_events",
 ]

@@ -18,7 +18,14 @@ from infinity_bus.templates.request import request
 
 from blue.config import DEFAULT_CONFIG_PATH
 from blue.errors import BlueError
-from blue.protocol import CatalogQueryResponse, SessionStateResponse, Topic, TopicBook
+from blue.protocol import (
+    CatalogQueryEvent,
+    CatalogQueryResponse,
+    CatalogReplyEvent,
+    SessionStateEvent,
+    SessionStateReplyEvent,
+    SessionStateResponse,
+)
 from handlers.support import build_runtime, load_settings_for_external
 
 __all__ = ["main"]
@@ -45,7 +52,6 @@ def main(argv: Sequence[str] | None = None) -> int:
 async def _run(*, config_path: str, what: str, timeout: float) -> int:
     """按目标查询并打印。"""
     settings = load_settings_for_external(config_path)
-    topics = TopicBook(settings.bus.namespace)
     runtime = build_runtime(settings, "ui.inspect")
     await runtime.start()
     try:
@@ -53,9 +59,9 @@ async def _run(*, config_path: str, what: str, timeout: float) -> int:
         if what == "tools":
             catalog = await request(
                 proxy,
-                topics.name(Topic.CATALOG_QUERY),
+                CatalogQueryEvent.name,
                 {},
-                topics.name(Topic.CATALOG_REPLY),
+                CatalogReplyEvent.name,
                 timeout=timeout,
             )
             if not isinstance(catalog, CatalogQueryResponse):
@@ -66,9 +72,9 @@ async def _run(*, config_path: str, what: str, timeout: float) -> int:
             return 0
         state = await request(
             proxy,
-            topics.name(Topic.SESSION_STATE),
+            SessionStateEvent.name,
             {},
-            topics.name(Topic.SESSION_STATE_REPLY),
+            SessionStateReplyEvent.name,
             timeout=timeout,
         )
         if not isinstance(state, SessionStateResponse):

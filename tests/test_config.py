@@ -19,7 +19,6 @@ agent {
 
 bus {
   transport: in("rabbit", "memory") = "memory"
-  namespace: str = "demo"
 }
 
 registry {
@@ -46,7 +45,6 @@ def test_load_settings_parses_all_sections(tmp_path: Path) -> None:
     assert settings.agent.max_steps == 3
     assert settings.agent.tool_timeout == pytest.approx(2.5)
     assert settings.bus.transport == "memory"
-    assert settings.bus.namespace == "demo"
     assert settings.registry.ttl == pytest.approx(5.0)
     assert settings.registry.sweep_interval == pytest.approx(0.5)
 
@@ -57,7 +55,6 @@ def test_load_settings_applies_defaults(tmp_path: Path) -> None:
 
     assert settings.agent.provider == "deepseek"
     assert settings.bus.transport == "rabbit"
-    assert settings.bus.namespace == "blue"
     assert settings.registry.ttl > 0
 
 

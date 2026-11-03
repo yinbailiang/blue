@@ -7,6 +7,10 @@
 uv run python -m handlers.tools.echo          # 工具处理器（一个工具一个进程）
 uv run python -m handlers.tools.clock
 uv run python -m handlers.tools.text
+uv run python -m handlers.tools.read_file
+uv run python -m handlers.tools.write_file
+uv run python -m handlers.tools.edit_file
+uv run python -m handlers.tools.shell
 uv run python -m handlers.ui.chat --text "你好"   # 用户界面
 uv run python -m handlers.ui.inspect tools
 ```

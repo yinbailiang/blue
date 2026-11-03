@@ -17,13 +17,12 @@ from infinity_agent import (
 )
 from infinity_agent.clients import LLMClient, RequestConfig
 
-from blue.protocol import TopicBook
 from blue.transport import MemoryFanout, MemoryRuntime
 
 
-def make_runtime(hub: MemoryFanout, member_id: str, topics: TopicBook) -> MemoryRuntime:
+def make_runtime(hub: MemoryFanout, member_id: str) -> MemoryRuntime:
     """在共享 hub 上创建一个进程内总线成员。"""
-    return MemoryRuntime(hub=hub, member_id=member_id, topics=topics)
+    return MemoryRuntime(hub=hub, member_id=member_id)
 
 
 class ScriptedClient(LLMClient):

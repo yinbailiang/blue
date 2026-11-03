@@ -21,7 +21,7 @@ from handlers.tools.echo import echo
 from infinity_bus.templates.request import request
 
 from blue.catalog import ToolRegistryService
-from blue.protocol import ToolCallResult, Topic, TopicBook
+from blue.protocol import ToolCallEvent, ToolCallResult, ToolResultEvent
 from blue.transport import RabbitRuntime
 from blue.worker import ToolWorker
 
@@ -51,17 +51,18 @@ def test_tool_registry_and_call_over_rabbitmq() -> None:
 
 
 async def _rabbit_roundtrip() -> None:
-    namespace = f"it{uuid.uuid4().hex[:8]}"
-    topics = TopicBook(namespace)
     suffix = uuid.uuid4().hex[:8]
     registry_runtime = RabbitRuntime(
-        url=RABBIT_URL, member_id=f"registry.{suffix}", topics=topics
+        url=RABBIT_URL,
+        member_id=f"registry.{suffix}",
     )
     worker_runtime = RabbitRuntime(
-        url=RABBIT_URL, member_id=f"tool.{suffix}", topics=topics
+        url=RABBIT_URL,
+        member_id=f"tool.{suffix}",
     )
     client_runtime = RabbitRuntime(
-        url=RABBIT_URL, member_id=f"client.{suffix}", topics=topics
+        url=RABBIT_URL,
+        member_id=f"client.{suffix}",
     )
     registry = ToolRegistryService(
         runtime=registry_runtime, ttl=5.0, sweep_interval=0.5
@@ -73,9 +74,9 @@ async def _rabbit_roundtrip() -> None:
     try:
         result = await request(
             client_runtime.proxy(),
-            topics.name(Topic.TOOL_CALL),
+            ToolCallEvent.name,
             {"tool": "echo", "arguments": {"text": "rabbit"}},
-            topics.name(Topic.TOOL_RESULT),
+            ToolResultEvent.name,
             timeout=10.0,
         )
         assert isinstance(result, ToolCallResult)

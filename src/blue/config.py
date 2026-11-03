@@ -76,7 +76,6 @@ class BusSettings(BaseModel):
 
     transport: Literal["rabbit", "memory"] = "rabbit"
     url: str = "amqp://guest:guest@127.0.0.1:5672/"
-    namespace: str = Field(default="blue", min_length=1)
 
 
 class RegistrySettings(BaseModel):

@@ -14,8 +14,16 @@ from blue.config import ConfigError
 
 
 def test_tool_programs_are_registered() -> None:
-    """内置外置工具清单包含三个程序。"""
-    assert set(TOOLS) == {"clock", "echo", "text_stats"}
+    """内置外置工具清单包含全部随仓库提供的程序。"""
+    assert set(TOOLS) == {
+        "clock",
+        "echo",
+        "edit_file",
+        "read_file",
+        "run_shell",
+        "text_stats",
+        "write_file",
+    }
 
 
 @pytest.mark.parametrize("alias", sorted(TOOLS))

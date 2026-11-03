@@ -10,13 +10,16 @@ from infinity_bus import Event, EventBus, EventHandler
 from pydantic import BaseModel
 
 from blue.protocol import (
+    CatalogQueryEvent,
     CatalogQueryRequest,
     CatalogQueryResponse,
+    CatalogReplyEvent,
+    ToolHeartbeatEvent,
     ToolHeartbeatPayload,
+    ToolRegisterEvent,
     ToolRegisterPayload,
+    ToolUnregisterEvent,
     ToolUnregisterPayload,
-    Topic,
-    TopicBook,
 )
 
 logger = logging.getLogger(__name__)
@@ -26,11 +29,6 @@ __all__ = ["RegistryBackend", "RegistryHandler"]
 
 class RegistryBackend(Protocol):
     """处理器依赖的注册中心能力。"""
-
-    @property
-    def topics(self) -> TopicBook:
-        """主题表。"""
-        ...
 
     def register_tool(self, payload: ToolRegisterPayload) -> bool:
         """登记工具进程，返回目录是否变化。"""
@@ -54,16 +52,15 @@ class RegistryBackend(Protocol):
 
 
 class RegistryHandler(EventHandler):
-    """把注册中心主题事件翻译成后端的状态变更。"""
+    """把注册中心事件翻译成后端的状态变更。"""
 
     def __init__(self, backend: RegistryBackend) -> None:
-        topics = backend.topics
         super().__init__(
             subscriptions=[
-                topics.name(Topic.TOOL_REGISTER),
-                topics.name(Topic.TOOL_HEARTBEAT),
-                topics.name(Topic.TOOL_UNREGISTER),
-                topics.name(Topic.CATALOG_QUERY),
+                ToolRegisterEvent.name,
+                ToolHeartbeatEvent.name,
+                ToolUnregisterEvent.name,
+                CatalogQueryEvent.name,
             ],
             handle_timeout=10.0,
         )
@@ -99,7 +96,7 @@ class RegistryHandler(EventHandler):
         elif isinstance(payload, CatalogQueryRequest):
             version, tools = backend.catalog_snapshot()
             await bus_proxy.publish(
-                backend.topics.name(Topic.CATALOG_REPLY),
+                CatalogReplyEvent.name,
                 CatalogQueryResponse(
                     session_id=payload.session_id,
                     request_id=payload.request_id,

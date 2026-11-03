@@ -21,7 +21,11 @@ from infinity_bus.templates.request import request
 
 from blue.config import DEFAULT_CONFIG_PATH
 from blue.errors import BlueError
-from blue.protocol import SessionReplyResponse, Topic, TopicBook
+from blue.protocol import (
+    SessionPromptEvent,
+    SessionReplyEvent,
+    SessionReplyResponse,
+)
 from blue.transport import BusRuntime
 from handlers.support import build_runtime, load_settings_for_external
 
@@ -58,37 +62,33 @@ async def _run(
 ) -> int:
     """建立总线成员并按模式收发消息。"""
     settings = load_settings_for_external(config_path)
-    topics = TopicBook(settings.bus.namespace)
     runtime = build_runtime(settings, "ui.chat")
     session = session_id or uuid.uuid4().hex
     await runtime.start()
     try:
         if interactive:
-            await _chat_loop(runtime, topics, session, timeout)
+            await _chat_loop(runtime, session, timeout)
             return 0
         if text is None:
             raise BlueError("需要 --text 或 --interactive")
-        print(await _ask(runtime, topics, session, text, timeout))
+        print(await _ask(runtime, session, text, timeout))
         return 0
     finally:
         await runtime.stop()
 
 
-async def _chat_loop(
-    runtime: BusRuntime, topics: TopicBook, session: str, timeout: float
-) -> None:
+async def _chat_loop(runtime: BusRuntime, session: str, timeout: float) -> None:
     """交互式对话（空行退出）。"""
     print(f"会话 {session} 已建立，输入空行退出。")
     while True:
         message = await asyncio.to_thread(input, "you> ")
         if not message.strip():
             return
-        print(f"agent> {await _ask(runtime, topics, session, message, timeout)}")
+        print(f"agent> {await _ask(runtime, session, message, timeout)}")
 
 
 async def _ask(
     runtime: BusRuntime,
-    topics: TopicBook,
     session: str,
     text: str,
     timeout: float,
@@ -96,9 +96,9 @@ async def _ask(
     """发送一条消息并取回核心的答复。"""
     response = await request(
         runtime.proxy("ui.chat"),
-        topics.name(Topic.SESSION_PROMPT),
+        SessionPromptEvent.name,
         {"text": text},
-        topics.name(Topic.SESSION_REPLY),
+        SessionReplyEvent.name,
         session_id=session,
         timeout=timeout,
     )

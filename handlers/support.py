@@ -14,7 +14,6 @@ from typing import Any
 
 from blue.config import DEFAULT_CONFIG_PATH, BlueSettings, ConfigError, load_settings
 from blue.lifecycle import LifecycleService, serve_forever
-from blue.protocol import TopicBook
 from blue.transport import BusRuntime, RabbitRuntime
 from blue.worker import ToolWorker
 
@@ -42,7 +41,6 @@ def build_runtime(settings: BlueSettings, role: str) -> BusRuntime:
     return RabbitRuntime(
         url=settings.bus.url,
         member_id=f"{role}.{uuid.uuid4().hex[:8]}",
-        topics=TopicBook(settings.bus.namespace),
     )
 
 

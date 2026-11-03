@@ -46,7 +46,7 @@ src/blue/                 # 核心：本体聚合（随包安装）
 ├── agent.py          # 会话中心：模型循环 + 总线工具调用
 ├── catalog.py        # 工具目录状态 + 注册中心服务 + Agent 侧缓存
 ├── session.py        # 中心化会话仓库（每会话独立锁 + 空闲回收）
-├── protocol.py       # 事件主题与负载模型（按 namespace 生成事件声明）
+├── protocol.py       # 固定事件名与负载模型（静态声明，不做动态生成）
 ├── transport.py      # BusRuntime：RabbitMQ fanout / 进程内 fanout
 ├── worker.py         # 工具进程宿主（供外置工具使用）
 ├── config.py         # .infd 编译 + 强类型校验 + 凭证解析
@@ -64,7 +64,11 @@ handlers/                 # 外置程序（不随包安装，独立进程）
 ├── tools/            # 工具处理器：一个工具一个模块一个进程
 │   ├── echo.py
 │   ├── clock.py
-│   └── text.py
+│   ├── text.py
+│   ├── read_file.py
+│   ├── write_file.py
+│   ├── edit_file.py
+│   └── shell.py
 └── ui/               # 用户界面
     ├── chat.py
     └── inspect.py
@@ -76,6 +80,18 @@ handlers/                 # 外置程序（不随包安装，独立进程）
   （参考 `echo.py`）；核心无需改动、无需重启。
 - **新增界面**：在 `handlers/ui/` 加一个程序，只依赖 `blue` 包暴露的协议与传输。
 - **核心不感知具体工具与界面**：核心只有主题契约与目录，不含任何具体实现。
+
+### 内置工具
+
+| 工具 | 进程 | 说明 |
+| --- | --- | --- |
+| `read_file` | `handlers.tools.read_file` | 按行范围读取 UTF-8 文本文件 |
+| `write_file` | `handlers.tools.write_file` | 覆盖写入文本文件，可自动创建父目录 |
+| `edit_file` | `handlers.tools.edit_file` | 精确字符串替换，默认要求原文唯一，保留原换行风格 |
+| `run_shell` | `handlers.tools.shell` | 异步执行 shell 命令，支持超时与输出截断 |
+
+> **安全提示**：文件工具与 `run_shell` 以工具进程的权限运行，没有额外沙箱。
+> 只在你信任的工作目录中启动这些进程；`run_shell` 超时会连同子进程一并强制结束。
 
 ## 配置
 
@@ -117,6 +133,10 @@ uv run blue serve
 # 外置程序：各自独立终端启动
 uv run python -m handlers.tools.echo
 uv run python -m handlers.tools.clock
+uv run python -m handlers.tools.read_file
+uv run python -m handlers.tools.write_file
+uv run python -m handlers.tools.edit_file
+uv run python -m handlers.tools.shell
 uv run python -m handlers.ui.chat --session demo --interactive
 uv run python -m handlers.ui.chat --text "统计这段文字：hello world"
 uv run python -m handlers.ui.inspect tools
@@ -134,12 +154,31 @@ uv run python -m handlers.ui.inspect sessions
 
 ## 事件协议
 
-| 主题 | 方向 | 说明 |
+事件名是**固定常量**（全局唯一、与配置无关）：运维可以直接在 broker、抓包与告警中
+引用；代码里使用事件声明类（如 `ToolCallEvent.name`），可被 IDE 跳转与 `grep` 定位。
+
+```text
+tool.register  tool.heartbeat  tool.unregister   catalog.changed
+tool.call      tool.result     catalog.query     catalog.reply
+session.prompt session.reply   session.reset     session.reset.reply
+session.state  session.state.reply
+```
+
+多目标/多实例靠**载荷字段**区分、接收方自行剔除：
+
+- `tool.call` → `payload.tool`（每个工具进程只看自己的名字）；
+- RPC → `session_id` + `request_id`（`infinity_bus` 自动注入与匹配）；
+- 工具生命周期 → `worker_id`。
+
+若需在共用 broker 上隔离多套部署，用 RabbitMQ 的 **vhost / 用户隔离**，
+不要把隔离维度编码进事件名。
+
+| 事件 | 方向 | 说明 |
 | --- | --- | --- |
 | `tool.register` / `tool.heartbeat` / `tool.unregister` | 工具 → 所有人 | 自我注册、续约、下线 |
 | `catalog.changed` | 核心 → 所有人 | 工具目录快照（带版本号） |
 | `catalog.query` / `catalog.reply` | 界面 ↔ 核心 | 目录查询（RPC） |
-| `tool.call` / `tool.result` | 核心 ↔ 工具 | 工具调用 RPC |
+| `tool.call` / `tool.result` | 核心 ↔ 工具 | 工具调用 RPC（载荷带工具名） |
 | `session.prompt` / `session.reply` | 界面 ↔ 核心 | 对话 RPC |
 | `session.reset` / `session.state` | 界面 ↔ 核心 | 会话管理（RPC） |
 

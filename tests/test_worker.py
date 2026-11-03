@@ -6,15 +6,18 @@ import asyncio
 import json
 
 from handlers.tools.echo import echo
+from handlers.tools.shell import run_shell
 from handlers.tools.text import text_stats
 from infinity_bus.templates.request import request
 
 from blue.catalog import ToolRegistryService
 from blue.protocol import (
+    CatalogQueryEvent,
     CatalogQueryResponse,
+    CatalogReplyEvent,
+    ToolCallEvent,
     ToolCallResult,
-    Topic,
-    TopicBook,
+    ToolResultEvent,
 )
 from blue.transport import MemoryFanout
 from blue.worker import ToolWorker
@@ -27,18 +30,14 @@ def test_worker_registers_and_serves_calls() -> None:
 
 
 async def _worker_serves_calls() -> None:
-    hub_topics = TopicBook("test")
-
     hub = MemoryFanout()
     registry = ToolRegistryService(
-        runtime=make_runtime(hub, "registry", hub_topics),
+        runtime=make_runtime(hub, "registry"),
         ttl=5.0,
         sweep_interval=0.05,
     )
-    worker = ToolWorker(
-        runtime=make_runtime(hub, "tool.echo", hub_topics), tool=echo, ttl=5.0
-    )
-    client = make_runtime(hub, "client", hub_topics)
+    worker = ToolWorker(runtime=make_runtime(hub, "tool.echo"), tool=echo, ttl=5.0)
+    client = make_runtime(hub, "client")
     await registry.start()
     await worker.start()
     await client.start()
@@ -47,9 +46,9 @@ async def _worker_serves_calls() -> None:
 
         catalog = await request(
             client.proxy(),
-            hub_topics.name(Topic.CATALOG_QUERY),
+            CatalogQueryEvent.name,
             {},
-            hub_topics.name(Topic.CATALOG_REPLY),
+            CatalogReplyEvent.name,
             timeout=5.0,
         )
         assert isinstance(catalog, CatalogQueryResponse)
@@ -59,9 +58,9 @@ async def _worker_serves_calls() -> None:
 
         result = await request(
             client.proxy(),
-            hub_topics.name(Topic.TOOL_CALL),
+            ToolCallEvent.name,
             {"tool": "echo", "arguments": {"text": "ping"}},
-            hub_topics.name(Topic.TOOL_RESULT),
+            ToolResultEvent.name,
             timeout=5.0,
         )
         assert isinstance(result, ToolCallResult)
@@ -79,25 +78,56 @@ def test_worker_reports_validation_errors() -> None:
 
 
 async def _worker_reports_errors() -> None:
-    topics = TopicBook("test")
     hub = MemoryFanout()
     worker = ToolWorker(
-        runtime=make_runtime(hub, "tool.stats", topics), tool=text_stats, ttl=5.0
+        runtime=make_runtime(hub, "tool.stats"), tool=text_stats, ttl=5.0
     )
-    client = make_runtime(hub, "client", topics)
+    client = make_runtime(hub, "client")
     await worker.start()
     await client.start()
     try:
         result = await request(
             client.proxy(),
-            topics.name(Topic.TOOL_CALL),
+            ToolCallEvent.name,
             {"tool": "text_stats", "arguments": {}},
-            topics.name(Topic.TOOL_RESULT),
+            ToolResultEvent.name,
             timeout=5.0,
         )
         assert isinstance(result, ToolCallResult)
         assert result.success is False
         assert result.error_msg is not None
+    finally:
+        await client.stop()
+        await worker.stop()
+
+
+def test_worker_serves_async_tool() -> None:
+    """异步工具经 ToolWorker 等待执行并返回结果。"""
+    asyncio.run(_worker_serves_async_tool())
+
+
+async def _worker_serves_async_tool() -> None:
+    hub = MemoryFanout()
+    worker = ToolWorker(
+        runtime=make_runtime(hub, "tool.shell"), tool=run_shell, ttl=5.0
+    )
+    client = make_runtime(hub, "client")
+    await worker.start()
+    await client.start()
+    try:
+        result = await request(
+            client.proxy(),
+            ToolCallEvent.name,
+            {"tool": "run_shell", "arguments": {"command": "printf ping"}},
+            ToolResultEvent.name,
+            timeout=5.0,
+        )
+        assert isinstance(result, ToolCallResult)
+        assert result.success is True
+        payload = json.loads(result.content)
+        assert payload["stdout"] == "ping"
+        assert payload["exit_code"] == 0
+        assert payload["timed_out"] is False
     finally:
         await client.stop()
         await worker.stop()

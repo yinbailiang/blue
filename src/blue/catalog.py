@@ -20,11 +20,12 @@ from infinity_bus import EventBus
 from infinity_bus.templates.request import request
 
 from blue.protocol import (
+    CatalogChangedEvent,
     CatalogChangedPayload,
+    CatalogQueryEvent,
     CatalogQueryResponse,
+    CatalogReplyEvent,
     ToolRegisterPayload,
-    Topic,
-    TopicBook,
 )
 from blue.subscribers.catalog import CatalogChangedHandler
 from blue.subscribers.registry import RegistryHandler
@@ -161,7 +162,6 @@ class ToolRegistryService:
         owns_runtime: bool = True,
     ) -> None:
         self._runtime = runtime
-        self._topics = runtime.topics
         self._ttl = ttl
         self._sweep_interval = sweep_interval
         self._now = now
@@ -183,11 +183,6 @@ class ToolRegistryService:
     def clock(self) -> Callable[[], float]:
         """时钟函数（测试可注入）。"""
         return self._now
-
-    @property
-    def topics(self) -> TopicBook:
-        """主题表。"""
-        return self._topics
 
     async def start(self) -> None:
         """启动总线、注册处理器并开始租约巡检。"""
@@ -218,7 +213,7 @@ class ToolRegistryService:
         )
         try:
             active = proxy or self._runtime.proxy()
-            await active.publish(self._topics.name(Topic.CATALOG_CHANGED), payload)
+            await active.publish(CatalogChangedEvent.name, payload)
         except Exception:
             logger.warning(
                 "广播工具目录失败（version=%s）", payload.version, exc_info=True
@@ -255,9 +250,8 @@ class ToolRegistryService:
 class ToolCatalogClient:
     """Agent 侧的工具目录缓存。"""
 
-    def __init__(self, *, runtime: BusRuntime, topics: TopicBook) -> None:
+    def __init__(self, *, runtime: BusRuntime) -> None:
         self._runtime = runtime
-        self._topics = topics
         self._tools: list[ToolDefinition] = []
         self._version = -1
         self._lock = asyncio.Lock()
@@ -266,11 +260,6 @@ class ToolCatalogClient:
     def tools(self) -> list[ToolDefinition]:
         """缓存中的工具定义。"""
         return list(self._tools)
-
-    @property
-    def topics(self) -> TopicBook:
-        """主题表。"""
-        return self._topics
 
     @property
     def version(self) -> int:
@@ -301,9 +290,9 @@ class ToolCatalogClient:
             try:
                 response = await request(
                     active,
-                    self._topics.name(Topic.CATALOG_QUERY),
+                    CatalogQueryEvent.name,
                     {},
-                    self._topics.name(Topic.CATALOG_REPLY),
+                    CatalogReplyEvent.name,
                     timeout=timeout,
                 )
             except TimeoutError:

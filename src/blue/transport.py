@@ -25,7 +25,7 @@ from infinity_bus import (
 )
 from infinity_bus.templates.queues import RabbitFanoutQueue
 
-from blue.protocol import TopicBook
+from blue.protocol import register_events
 
 __all__ = [
     "BusRuntime",
@@ -39,13 +39,12 @@ __all__ = [
 class BusRuntime(ABC):
     """总线成员运行时：统一事件注册、处理器注册与生命周期。"""
 
-    def __init__(self, *, member_id: str, topics: TopicBook) -> None:
+    def __init__(self, *, member_id: str) -> None:
         if not member_id.strip():
             raise ValueError("member_id 不能为空")
         self._member_id = member_id
-        self._topics = topics
         self._events = EventRegistry()
-        topics.register(self._events)
+        register_events(self._events)
         self._handlers = EventHandlerRegistry()
         self._bus: EventBus | None = None
 
@@ -53,11 +52,6 @@ class BusRuntime(ABC):
     def member_id(self) -> str:
         """本成员在总线上的唯一标识。"""
         return self._member_id
-
-    @property
-    def topics(self) -> TopicBook:
-        """主题表。"""
-        return self._topics
 
     @property
     def bus(self) -> EventBus:
@@ -122,10 +116,9 @@ class RabbitRuntime(BusRuntime):
         *,
         url: str,
         member_id: str,
-        topics: TopicBook,
         strategy: Literal["restart", "offline"] = "restart",
     ) -> None:
-        super().__init__(member_id=member_id, topics=topics)
+        super().__init__(member_id=member_id)
         self._url = url
         self._strategy: Literal["restart", "offline"] = strategy
         self._queue: RabbitFanoutQueue | None = None
@@ -225,9 +218,8 @@ class MemoryRuntime(BusRuntime):
         *,
         hub: MemoryFanout,
         member_id: str,
-        topics: TopicBook,
     ) -> None:
-        super().__init__(member_id=member_id, topics=topics)
+        super().__init__(member_id=member_id)
         self._hub = hub
         self._queue: MemoryMemberQueue | None = None
 

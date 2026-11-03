@@ -18,7 +18,6 @@ from infinity_agent.clients import LLMClient
 from blue.agent import AgentCore
 from blue.catalog import ToolRegistryService
 from blue.config import BlueSettings
-from blue.protocol import TopicBook
 from blue.session import SessionStore
 from blue.transport import BusRuntime
 
@@ -70,11 +69,6 @@ class AgentAggregate:
     def registry(self) -> ToolRegistryService:
         """工具目录。"""
         return self._registry
-
-    @property
-    def topics(self) -> TopicBook:
-        """主题表。"""
-        return self._runtime.topics
 
     @property
     def is_running(self) -> bool:

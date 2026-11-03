@@ -10,16 +10,22 @@ from infinity_bus import Event, EventBus
 from pydantic import BaseModel
 
 from blue.protocol import (
+    CatalogChangedEvent,
     CatalogChangedPayload,
+    CatalogQueryEvent,
+    SessionPromptEvent,
     SessionPromptRequest,
     SessionReplyResponse,
+    SessionStateEvent,
     SessionStateRequest,
     SessionStateResponse,
+    ToolCallEvent,
     ToolCallRequest,
+    ToolHeartbeatEvent,
     ToolHeartbeatPayload,
+    ToolRegisterEvent,
     ToolRegisterPayload,
-    Topic,
-    TopicBook,
+    ToolUnregisterEvent,
 )
 from blue.subscribers.catalog import CatalogChangedHandler
 from blue.subscribers.registry import RegistryHandler
@@ -42,7 +48,6 @@ class FakeRegistryBackend:
     """只记录状态变更的注册中心替身。"""
 
     def __init__(self) -> None:
-        self.topics = TopicBook("test")
         self.registered: list[str] = []
         self.heartbeats: list[str] = []
         self.unregistered: list[str] = []
@@ -69,16 +74,15 @@ class FakeRegistryBackend:
         self.broadcasts += 1
 
 
-def test_registry_handler_subscribes_registry_topics() -> None:
-    """注册中心订阅者订阅四类主题。"""
+def test_registry_handler_subscribes_registry_events() -> None:
+    """注册中心订阅者订阅四类固定事件。"""
     handler = RegistryHandler(FakeRegistryBackend())
-    topics = TopicBook("test")
 
     assert set(handler.subscriptions.patterns) == {
-        topics.name(Topic.TOOL_REGISTER),
-        topics.name(Topic.TOOL_HEARTBEAT),
-        topics.name(Topic.TOOL_UNREGISTER),
-        topics.name(Topic.CATALOG_QUERY),
+        ToolRegisterEvent.name,
+        ToolHeartbeatEvent.name,
+        ToolUnregisterEvent.name,
+        CatalogQueryEvent.name,
     }
 
 
@@ -94,13 +98,13 @@ def test_registry_handler_translates_events() -> None:
         await handler.handle(
             register,
             proxy,
-            Event(name=backend.topics.name(Topic.TOOL_REGISTER), data=register),
+            Event(name=ToolRegisterEvent.name, data=register),
         )
         heartbeat = ToolHeartbeatPayload(worker_id="w1")
         await handler.handle(
             heartbeat,
             proxy,
-            Event(name=backend.topics.name(Topic.TOOL_HEARTBEAT), data=heartbeat),
+            Event(name=ToolHeartbeatEvent.name, data=heartbeat),
         )
 
     asyncio.run(scenario())
@@ -115,8 +119,6 @@ def test_catalog_handler_applies_snapshot() -> None:
     applied: list[tuple[int, list[ToolDefinition]]] = []
 
     class FakeCatalog:
-        topics = TopicBook("test")
-
         def apply(self, version: int, tools: list[ToolDefinition]) -> bool:
             applied.append((version, tools))
             return True
@@ -130,7 +132,7 @@ def test_catalog_handler_applies_snapshot() -> None:
         handler.handle(
             payload,
             cast(EventBus.Proxy, RecordingProxy()),
-            Event(name=TopicBook("test").name(Topic.CATALOG_CHANGED), data=payload),
+            Event(name=CatalogChangedEvent.name, data=payload),
         )
     )
 
@@ -142,8 +144,6 @@ def test_session_handler_has_no_timeout() -> None:
     """会话订阅者不能被总线默认超时打断。"""
 
     class FakeSessions:
-        topics = TopicBook("test")
-
         async def handle_prompt(
             self, payload: SessionPromptRequest, bus_proxy: EventBus.Proxy
         ) -> SessionReplyResponse:
@@ -165,6 +165,8 @@ def test_session_handler_has_no_timeout() -> None:
     handler = SessionHandler(FakeSessions())
 
     assert handler.handle_timeout is None
+    assert SessionPromptEvent.name in handler.subscriptions.patterns
+    assert SessionStateEvent.name in handler.subscriptions.patterns
     assert len(handler.subscriptions) == 3
 
 
@@ -172,8 +174,6 @@ def test_tool_call_handler_subscribes_tool_call() -> None:
     """工具进程只订阅 tool.call。"""
 
     class FakeWorker:
-        topics = TopicBook("test")
-
         async def handle_call(
             self, payload: ToolCallRequest, bus_proxy: EventBus.Proxy
         ) -> None:
@@ -181,7 +181,5 @@ def test_tool_call_handler_subscribes_tool_call() -> None:
 
     handler = ToolCallHandler(FakeWorker())
 
-    assert list(handler.subscriptions.patterns) == [
-        TopicBook("test").name(Topic.TOOL_CALL)
-    ]
+    assert list(handler.subscriptions.patterns) == [ToolCallEvent.name]
     assert handler.handle_timeout is None

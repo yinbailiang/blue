@@ -18,7 +18,6 @@ from blue.aggregate import AgentAggregate
 from blue.config import DEFAULT_CONFIG_PATH, BlueSettings, ConfigError, load_settings
 from blue.errors import BlueError
 from blue.lifecycle import serve_forever
-from blue.protocol import TopicBook
 from blue.transport import RabbitRuntime
 
 __all__ = ["main"]
@@ -50,7 +49,6 @@ def _config_check(path: str) -> int:
     print(f"配置有效：{path}")
     print(f"  agent   : {settings.agent.provider}/{settings.agent.model}")
     print(f"  传输    : {settings.bus.transport} @ {settings.bus.url}")
-    print(f"  命名空间: {settings.bus.namespace}")
     print(f"  租约    : ttl={settings.registry.ttl}s")
     return 0
 
@@ -68,7 +66,6 @@ def _build_runtime(settings: BlueSettings) -> RabbitRuntime:
     return RabbitRuntime(
         url=settings.bus.url,
         member_id=f"core.{uuid.uuid4().hex[:8]}",
-        topics=TopicBook(settings.bus.namespace),
     )
 
 

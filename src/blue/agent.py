@@ -35,9 +35,9 @@ from blue.protocol import (
     SessionResetResponse,
     SessionStateRequest,
     SessionStateResponse,
+    ToolCallEvent,
     ToolCallResult,
-    Topic,
-    TopicBook,
+    ToolResultEvent,
 )
 from blue.session import Session, SessionStore
 from blue.subscribers.session import SessionHandler
@@ -94,15 +94,12 @@ class AgentCore:
         :param owns_runtime: 是否由本对象负责关闭总线（聚合运行时传 ``False``）。
         """
         self._runtime = runtime
-        self._topics: TopicBook = runtime.topics
         self._settings = settings
         self._client = client
         self._client_entered = False
         self._owns_runtime = owns_runtime
         self._sessions = sessions or SessionStore(system_prompt=settings.system_prompt)
-        self._catalog: ToolCatalogClient = catalog or ToolCatalogClient(
-            runtime=runtime, topics=runtime.topics
-        )
+        self._catalog: ToolCatalogClient = catalog or ToolCatalogClient(runtime=runtime)
 
     @property
     def sessions(self) -> SessionStore:
@@ -113,11 +110,6 @@ class AgentCore:
     def catalog(self) -> ToolCatalogClient:
         """工具目录缓存。"""
         return self._catalog
-
-    @property
-    def topics(self) -> TopicBook:
-        """主题表。"""
-        return self._topics
 
     @property
     def is_running(self) -> bool:
@@ -250,9 +242,9 @@ class AgentCore:
         try:
             response = await request(
                 bus_proxy,
-                self._topics.name(Topic.TOOL_CALL),
+                ToolCallEvent.name,
                 {"tool": name, "arguments": tool_call.function.arguments},
-                self._topics.name(Topic.TOOL_RESULT),
+                ToolResultEvent.name,
                 session_id=session_id,
                 timeout=self._settings.tool_timeout,
             )

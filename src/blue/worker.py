@@ -33,11 +33,13 @@ from infinity_bus import EventBus
 from blue.protocol import (
     ToolCallRequest,
     ToolCallResult,
+    ToolHeartbeatEvent,
     ToolHeartbeatPayload,
+    ToolRegisterEvent,
     ToolRegisterPayload,
+    ToolResultEvent,
+    ToolUnregisterEvent,
     ToolUnregisterPayload,
-    Topic,
-    TopicBook,
 )
 from blue.subscribers.tool_call import ToolCallHandler
 from blue.transport import BusRuntime
@@ -70,7 +72,6 @@ class ToolWorker:
         if ttl <= 0:
             raise ValueError("ttl 必须 > 0")
         self._runtime = runtime
-        self._topics = runtime.topics
         self._registry = ToolRegistry()
         self._registry.register(tool, name=name, description=description)
         definitions = self._registry.definitions
@@ -98,11 +99,6 @@ class ToolWorker:
         """工具定义（可直接作为 LLM 的 tools 参数）。"""
         return self._definition
 
-    @property
-    def topics(self) -> TopicBook:
-        """主题表。"""
-        return self._topics
-
     async def start(self) -> None:
         """启动总线、注册调用处理器并登记到注册中心。"""
         await self._runtime.start()
@@ -127,7 +123,7 @@ class ToolWorker:
         if self._runtime.is_running:
             with suppress(Exception):
                 await self._runtime.proxy().publish(
-                    self._topics.name(Topic.TOOL_UNREGISTER),
+                    ToolUnregisterEvent.name,
                     ToolUnregisterPayload(worker_id=self._worker_id),
                 )
         await self._runtime.stop()
@@ -149,7 +145,7 @@ class ToolWorker:
         if not ok:
             logger.warning("工具 %s 执行失败：%s", self.tool_name, text)
         await bus_proxy.publish(
-            self._topics.name(Topic.TOOL_RESULT),
+            ToolResultEvent.name,
             ToolCallResult(
                 session_id=payload.session_id,
                 request_id=payload.request_id,
@@ -162,7 +158,7 @@ class ToolWorker:
     async def _publish_register(self) -> None:
         """向注册中心登记自己。"""
         await self._runtime.proxy().publish(
-            self._topics.name(Topic.TOOL_REGISTER),
+            ToolRegisterEvent.name,
             ToolRegisterPayload(
                 worker_id=self._worker_id, tool=self._definition, ttl=self._ttl
             ),
@@ -175,7 +171,7 @@ class ToolWorker:
             await asyncio.sleep(interval)
             try:
                 await self._runtime.proxy().publish(
-                    self._topics.name(Topic.TOOL_HEARTBEAT),
+                    ToolHeartbeatEvent.name,
                     ToolHeartbeatPayload(worker_id=self._worker_id),
                 )
             except Exception:

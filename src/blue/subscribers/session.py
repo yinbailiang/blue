@@ -8,14 +8,18 @@ from infinity_bus import Event, EventBus, EventHandler
 from pydantic import BaseModel
 
 from blue.protocol import (
+    SessionPromptEvent,
     SessionPromptRequest,
+    SessionReplyEvent,
     SessionReplyResponse,
+    SessionResetEvent,
+    SessionResetReplyEvent,
     SessionResetRequest,
     SessionResetResponse,
+    SessionStateEvent,
+    SessionStateReplyEvent,
     SessionStateRequest,
     SessionStateResponse,
-    Topic,
-    TopicBook,
 )
 
 __all__ = ["SessionBackend", "SessionHandler"]
@@ -23,11 +27,6 @@ __all__ = ["SessionBackend", "SessionHandler"]
 
 class SessionBackend(Protocol):
     """处理器依赖的会话服务能力。"""
-
-    @property
-    def topics(self) -> TopicBook:
-        """主题表。"""
-        ...
 
     async def handle_prompt(
         self, payload: SessionPromptRequest, bus_proxy: EventBus.Proxy
@@ -45,19 +44,18 @@ class SessionBackend(Protocol):
 
 
 class SessionHandler(EventHandler):
-    """会话主题的事件入口。
+    """会话事件入口。
 
     ``handle_timeout=None``：一轮对话可能包含多次模型与工具往返，不能用总线
     默认的 32 秒超时打断；并发由会话锁与总线信号量控制。
     """
 
     def __init__(self, backend: SessionBackend) -> None:
-        topics = backend.topics
         super().__init__(
             subscriptions=[
-                topics.name(Topic.SESSION_PROMPT),
-                topics.name(Topic.SESSION_RESET),
-                topics.name(Topic.SESSION_STATE),
+                SessionPromptEvent.name,
+                SessionResetEvent.name,
+                SessionStateEvent.name,
             ],
             handle_timeout=None,
         )
@@ -74,14 +72,12 @@ class SessionHandler(EventHandler):
 
         if isinstance(payload, SessionPromptRequest):
             reply = await backend.handle_prompt(payload, bus_proxy)
-            await bus_proxy.publish(backend.topics.name(Topic.SESSION_REPLY), reply)
+            await bus_proxy.publish(SessionReplyEvent.name, reply)
         elif isinstance(payload, SessionResetRequest):
             await bus_proxy.publish(
-                backend.topics.name(Topic.SESSION_RESET_REPLY),
-                backend.handle_reset(payload),
+                SessionResetReplyEvent.name, backend.handle_reset(payload)
             )
         elif isinstance(payload, SessionStateRequest):
             await bus_proxy.publish(
-                backend.topics.name(Topic.SESSION_STATE_REPLY),
-                backend.handle_state(payload),
+                SessionStateReplyEvent.name, backend.handle_state(payload)
             )

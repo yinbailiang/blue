@@ -10,7 +10,14 @@ from infinity_bus.templates.request import request
 
 from blue.aggregate import AgentAggregate
 from blue.config import AgentSettings, BlueSettings, RegistrySettings
-from blue.protocol import CatalogQueryResponse, SessionReplyResponse, Topic, TopicBook
+from blue.protocol import (
+    CatalogQueryEvent,
+    CatalogQueryResponse,
+    CatalogReplyEvent,
+    SessionPromptEvent,
+    SessionReplyEvent,
+    SessionReplyResponse,
+)
 from blue.transport import MemoryFanout
 from blue.worker import ToolWorker
 from tests.support import ScriptedClient, make_runtime, wait_until
@@ -22,21 +29,18 @@ def test_aggregate_hosts_sessions_and_catalog() -> None:
 
 
 async def _scenario() -> None:
-    topics = TopicBook("test")
     hub = MemoryFanout()
     settings = BlueSettings(
         agent=AgentSettings(api_key_env="BLUE_UNUSED_KEY", max_steps=2),
         registry=RegistrySettings(ttl=5.0, sweep_interval=0.05),
     )
     aggregate = AgentAggregate(
-        runtime=make_runtime(hub, "core", topics),
+        runtime=make_runtime(hub, "core"),
         settings=settings,
         client=ScriptedClient([Message.assistant(content="聚合可用")]),
     )
-    worker = ToolWorker(
-        runtime=make_runtime(hub, "tool.echo", topics), tool=echo, ttl=5.0
-    )
-    ui = make_runtime(hub, "ui", topics)
+    worker = ToolWorker(runtime=make_runtime(hub, "tool.echo"), tool=echo, ttl=5.0)
+    ui = make_runtime(hub, "ui")
 
     await aggregate.start()
     await worker.start()
@@ -46,9 +50,9 @@ async def _scenario() -> None:
 
         catalog = await request(
             ui.proxy(),
-            topics.name(Topic.CATALOG_QUERY),
+            CatalogQueryEvent.name,
             {},
-            topics.name(Topic.CATALOG_REPLY),
+            CatalogReplyEvent.name,
             timeout=5.0,
         )
         assert isinstance(catalog, CatalogQueryResponse)
@@ -56,9 +60,9 @@ async def _scenario() -> None:
 
         reply = await request(
             ui.proxy(),
-            topics.name(Topic.SESSION_PROMPT),
+            SessionPromptEvent.name,
             {"text": "你好"},
-            topics.name(Topic.SESSION_REPLY),
+            SessionReplyEvent.name,
             session_id="s-1",
             timeout=10.0,
         )
