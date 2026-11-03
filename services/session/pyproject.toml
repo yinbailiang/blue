@@ -7,7 +7,7 @@ dependencies = [
     "aiosqlite>=0.22.0",
     "blue",
     "blue-contracts-session",
-    "infinity-agent>=0.2.1",
+    "infinity-agent>=0.3.0",
     "infinity-bus[templates]>=6.0.0",
     "pydantic>=2",
 ]

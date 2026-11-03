@@ -8,7 +8,7 @@ dependencies = [
     "blue-contracts-session",
     "blue-contracts-tool",
     "fastapi>=0.115.0",
-    "infinity-agent>=0.2.1",
+    "infinity-agent>=0.3.0",
     "infinity-bus[templates]>=6.0.0",
     "pydantic>=2",
     "uvicorn>=0.30.0",

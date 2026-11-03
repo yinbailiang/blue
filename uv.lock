@@ -255,7 +255,7 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "blue-contracts-tool", editable = "contracts/tool" },
-    { name = "infinity-agent", specifier = ">=0.2.1" },
+    { name = "infinity-agent", specifier = ">=0.3.0" },
     { name = "infinity-agent-kit", specifier = ">=1.0.0" },
     { name = "infinity-bus", extras = ["templates"], specifier = ">=6.0.0" },
     { name = "infinity-data", extras = ["tool"], specifier = ">=3.3.0" },
@@ -297,7 +297,7 @@ dependencies = [
 
 [package.metadata]
 requires-dist = [
-    { name = "infinity-agent", specifier = ">=0.2.1" },
+    { name = "infinity-agent", specifier = ">=0.3.0" },
     { name = "infinity-bus", extras = ["templates"], specifier = ">=6.0.0" },
     { name = "pydantic", specifier = ">=2" },
 ]
@@ -325,7 +325,7 @@ requires-dist = [
     { name = "blue", editable = "." },
     { name = "blue-contracts-session", editable = "contracts/session" },
     { name = "blue-contracts-tool", editable = "contracts/tool" },
-    { name = "infinity-agent", specifier = ">=0.2.1" },
+    { name = "infinity-agent", specifier = ">=0.3.0" },
     { name = "infinity-bus", extras = ["templates"], specifier = ">=6.0.0" },
     { name = "pydantic", specifier = ">=2" },
 ]
@@ -446,7 +446,7 @@ dependencies = [
 requires-dist = [
     { name = "blue", editable = "." },
     { name = "blue-contracts-tool", editable = "contracts/tool" },
-    { name = "infinity-agent", specifier = ">=0.2.1" },
+    { name = "infinity-agent", specifier = ">=0.3.0" },
     { name = "pydantic", specifier = ">=2" },
 ]
 
@@ -465,7 +465,7 @@ dependencies = [
 requires-dist = [
     { name = "blue", editable = "." },
     { name = "blue-contracts-tool", editable = "contracts/tool" },
-    { name = "infinity-agent", specifier = ">=0.2.1" },
+    { name = "infinity-agent", specifier = ">=0.3.0" },
     { name = "pydantic", specifier = ">=2" },
 ]
 
@@ -521,7 +521,7 @@ requires-dist = [
     { name = "aiosqlite", specifier = ">=0.22.0" },
     { name = "blue", editable = "." },
     { name = "blue-contracts-session", editable = "contracts/session" },
-    { name = "infinity-agent", specifier = ">=0.2.1" },
+    { name = "infinity-agent", specifier = ">=0.3.0" },
     { name = "infinity-bus", extras = ["templates"], specifier = ">=6.0.0" },
     { name = "pydantic", specifier = ">=2" },
 ]
@@ -595,7 +595,7 @@ requires-dist = [
     { name = "blue-contracts-session", editable = "contracts/session" },
     { name = "blue-contracts-tool", editable = "contracts/tool" },
     { name = "fastapi", specifier = ">=0.115.0" },
-    { name = "infinity-agent", specifier = ">=0.2.1" },
+    { name = "infinity-agent", specifier = ">=0.3.0" },
     { name = "infinity-bus", extras = ["templates"], specifier = ">=6.0.0" },
     { name = "pydantic", specifier = ">=2" },
     { name = "uvicorn", specifier = ">=0.30.0" },
@@ -750,16 +750,16 @@ wheels = [
 
 [[package]]
 name = "infinity-agent"
-version = "0.2.1"
+version = "0.3.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "aiohttp" },
     { name = "certifi" },
     { name = "pydantic" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/4f/1a/4341679896e02593a3c75616e5a8f44e9597e73222296aab31f42dda2657/infinity_agent-0.2.1.tar.gz", hash = "sha256:a734dafbb2e148632571d8c0c9b58b85c8c37ed1e5f5e9177a35597f8a11125f", size = 33590, upload-time = "2026-09-15T04:14:03.063Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/3f/59/4e07ef8463833e22f6a482c88cb7e725ac9093ae111c3923b7cde933c85b/infinity_agent-0.3.0.tar.gz", hash = "sha256:5c66d8c55027138f9af7aba620fb1e4b77d922a46559012641c2deceb1ddd42a", size = 36530, upload-time = "2026-11-03T23:08:00.698Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/1d/6a/7e561b39c07d8e2fcc8bf64d74e014211fa6acbb6bb52b4406756978da8a/infinity_agent-0.2.1-py3-none-any.whl", hash = "sha256:6b4ad86b504977cc18baddb3b8d212fc80691d4746ec07794de7563932ee2f71", size = 44145, upload-time = "2026-09-15T04:14:01.906Z" },
+    { url = "https://files.pythonhosted.org/packages/8d/65/66310a4dbe8e2351522829858188982e07d327cbbe9206a719c5dade1976/infinity_agent-0.3.0-py3-none-any.whl", hash = "sha256:925472a28a3afab4123142718cfd8f707101e17a15fc47a4223d15011c32938e", size = 46415, upload-time = "2026-11-03T23:07:59.695Z" },
 ]
 
 [[package]]

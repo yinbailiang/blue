@@ -6,7 +6,7 @@ requires-python = ">=3.14"
 dependencies = [
     "blue",
     "blue-contracts-tool",
-    "infinity-agent>=0.2.1",
+    "infinity-agent>=0.3.0",
     "pydantic>=2",
 ]
 
