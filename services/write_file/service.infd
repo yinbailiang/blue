@@ -1,4 +1,5 @@
 ~ServiceTemplate {
+  workdir: <str?> = null
 }
 
 service {

@@ -103,7 +103,17 @@ def test_blue_infd_compiles_and_matches_service_packages() -> None:
     assert set(desired.services) == MANAGED
     for name, service in desired.services.items():
         module = importlib.import_module(f"blue_service_{name}")
-        if name in {"agent", "bus", "session", "shell", "weather", "webui"}:
+        if name in {
+            "agent",
+            "bus",
+            "edit_file",
+            "read_file",
+            "session",
+            "shell",
+            "weather",
+            "webui",
+            "write_file",
+        }:
             config_model = module.CONFIG_MODEL
             config_model.model_validate(service.config)
         else:

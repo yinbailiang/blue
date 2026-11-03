@@ -310,6 +310,18 @@ services/<name>/service_runtime_config.json
 - 相对路径按项目根解析，绝对路径直接使用；
 - 单次调用仍可用工具参数 `cwd` 覆盖默认值。
 
+`read_file` / `write_file` / `edit_file` 的配置示例与 `shell` 同形：
+
+```json
+{
+  "workdir": null
+}
+```
+
+- 三个文件工具共用 `blue.runtime.WorkspaceConfig`，相对路径同样锚定**项目根**，
+  而不是工具进程所在的 `services/<name>`；`~` 与绝对路径不受影响；
+- 这三类工具没有覆盖参数，相对路径的语义完全由 `workdir` 决定。
+
 `webui` 的配置示例：
 
 ```json
@@ -445,7 +457,7 @@ Ready / Running → Stopping → Stopped
 | `agent` | 模型推理 + 工具目录缓存，本身不保存会话正文；加载历史时自愈悬空 `tool_calls`，未知工具立即失败 |
 | `webui` | FastAPI + 静态单页 Chat UI，WebSocket 实时进度，托管在 supervisor 中 |
 | `clock` / `echo` / `text_stats` | 基础工具 |
-| `read_file` / `write_file` / `edit_file` | 文件读写与精确替换 |
+| `read_file` / `write_file` / `edit_file` | 文件读写与精确替换；相对路径默认锚定项目根 |
 | `shell` | 异步 shell 命令，超时进程组强杀、输出截断；默认工作目录为项目根 |
 | `weather` | 天气查询（wttr.in，免密钥）：实时实况 + 最多 3 天预报，天气码本地译中文 |
 | `mcp_bridge` | MCP 客户端桥：把外部 MCP server（stdio）的工具接入工具目录；工具集声明式、schema 自动降级并留痕 |

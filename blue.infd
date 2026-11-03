@@ -63,6 +63,7 @@ webui = WebUIService()
 #echo = EchoService()
 clock = ClockService()
 text_stats = TextStatsService()
+# 文件类工具的 workdir 与 shell 同义：缺省为项目根，相对路径按项目根解析
 read_file = ReadFileService()
 write_file = WriteFileService()
 edit_file = EditFileService()

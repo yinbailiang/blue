@@ -7,6 +7,9 @@ from pathlib import Path
 import pytest
 from blue_service_read_file import read_file
 
+import blue.runtime as runtime
+from blue.runtime import WorkspaceConfig, configure_workspace
+
 
 def test_read_file_line_range_and_truncation(tmp_path: Path) -> None:
     """按行范围读取并标记是否截断。"""
@@ -59,3 +62,48 @@ def test_read_file_supports_absolute_path(tmp_path: Path) -> None:
 
     result = read_file(str(target))
     assert result.path == str(target.resolve())
+
+
+@pytest.fixture(autouse=True)
+def _isolate_workspace(monkeypatch: pytest.MonkeyPatch) -> None:
+    """``configure_workspace()`` 写入的进程级状态不应泄漏到其它用例。"""
+    monkeypatch.setattr(runtime, "_workspace", None)
+
+
+def test_relative_path_anchors_project_root_not_service_dir(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """回归：相对路径按项目根解析，而不是工具进程的 cwd（服务目录）。"""
+    project = tmp_path / "project"
+    service_dir = project / "services" / "read_file"
+    service_dir.mkdir(parents=True)
+    (project / "AGENT.md").write_text("root-level\n", encoding="utf-8")
+    monkeypatch.setenv("BLUE_PROJECT_ROOT", str(project))
+    monkeypatch.chdir(service_dir)
+
+    result = read_file("AGENT.md")
+
+    assert result.path == str((project / "AGENT.md").resolve())
+    assert result.content == "root-level"
+
+
+def test_relative_path_honours_configured_workdir(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """workdir 配置为相对路径时按项目根解析。"""
+    root = tmp_path / "root"
+    nested = root / "sub"
+    nested.mkdir(parents=True)
+    (nested / "a.txt").write_text("x", encoding="utf-8")
+    monkeypatch.setenv("BLUE_PROJECT_ROOT", str(root))
+    configure_workspace(WorkspaceConfig(workdir="sub"))
+
+    result = read_file("a.txt")
+
+    assert result.path == str((nested / "a.txt").resolve())
+
+
+def test_read_file_rejects_empty_path() -> None:
+    """空路径给出明确错误。"""
+    with pytest.raises(ValueError, match="不能为空"):
+        read_file("")

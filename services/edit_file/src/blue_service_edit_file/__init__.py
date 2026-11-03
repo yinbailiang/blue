@@ -2,12 +2,27 @@
 
 from __future__ import annotations
 
-from pathlib import Path
 from typing import Annotated
 
 from pydantic import BaseModel, Field
 
-from blue.runtime import run_tool
+from blue.runtime import (
+    WorkspaceConfig,
+    configure_workspace,
+    load_runtime_config,
+    run_tool,
+    workspace,
+)
+
+__all__ = [
+    "CONFIG_MODEL",
+    "EditFileResult",
+    "edit_file",
+    "main",
+]
+
+CONFIG_MODEL = WorkspaceConfig
+"""契约测试使用的运行时配置模型。"""
 
 
 class EditFileResult(BaseModel):
@@ -24,8 +39,11 @@ def edit_file(
     new_text: Annotated[str, "替换后的文本"],
     replace_all: Annotated[bool, "是否替换全部匹配；默认要求原文唯一"] = False,
 ) -> EditFileResult:
-    """在 UTF-8 文本文件中做精确字符串替换，并保留原换行风格。"""
-    target = _resolve_path(path)
+    """在 UTF-8 文本文件中做精确字符串替换，并保留原换行风格。
+
+    相对路径按服务配置的 ``workdir`` 解析，缺省为项目根（``blue.infd`` 所在目录）。
+    """
+    target = workspace().resolve(path)
     if not target.is_file():
         raise ValueError(f"文件不存在或不是普通文件：{target}")
     if not old_text:
@@ -66,17 +84,13 @@ def _with_newline(text: str, newline: str) -> str:
     return normalized if newline == "\n" else normalized.replace("\n", newline)
 
 
-def _resolve_path(path: str) -> Path:
-    """把用户路径解析为绝对路径。"""
-    return Path(path).expanduser().resolve()
-
-
 TOOL = edit_file
 """工具进程入口。"""
 
 
 def main() -> int:
     """控制台脚本入口。"""
+    configure_workspace(load_runtime_config(CONFIG_MODEL))
     return run_tool(TOOL, "edit_file")
 
 

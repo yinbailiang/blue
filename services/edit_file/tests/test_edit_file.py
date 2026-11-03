@@ -7,6 +7,9 @@ from pathlib import Path
 import pytest
 from blue_service_edit_file import edit_file
 
+import blue.runtime as runtime
+from blue.runtime import WorkspaceConfig, configure_workspace
+
 
 def test_edit_file_replaces_unique_match(tmp_path: Path) -> None:
     """唯一匹配时完成精确替换。"""
@@ -66,3 +69,46 @@ def test_edit_file_preserves_crlf(tmp_path: Path) -> None:
 
     assert result.replacements == 1
     assert target.read_bytes() == b"gamma\r\ndelta\r\n"
+
+
+@pytest.fixture(autouse=True)
+def _isolate_workspace(monkeypatch: pytest.MonkeyPatch) -> None:
+    """``configure_workspace()`` 写入的进程级状态不应泄漏到其它用例。"""
+    monkeypatch.setattr(runtime, "_workspace", None)
+
+
+def test_relative_path_anchors_project_root_not_service_dir(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """回归：相对路径改的是项目根下的文件，而不是服务目录里的同名文件。"""
+    project = tmp_path / "project"
+    service_dir = project / "services" / "edit_file"
+    service_dir.mkdir(parents=True)
+    target = project / "notes.txt"
+    target.write_text("alpha\n", encoding="utf-8")
+    decoy = service_dir / "notes.txt"
+    decoy.write_text("alpha\n", encoding="utf-8")
+    monkeypatch.setenv("BLUE_PROJECT_ROOT", str(project))
+    monkeypatch.chdir(service_dir)
+
+    result = edit_file("notes.txt", "alpha", "beta")
+
+    assert result.path == str(target.resolve())
+    assert target.read_text(encoding="utf-8") == "beta\n"
+    assert decoy.read_text(encoding="utf-8") == "alpha\n"
+
+
+def test_relative_path_honours_configured_workdir(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """workdir 配置为相对路径时按项目根解析。"""
+    root = tmp_path / "root"
+    nested = root / "sub"
+    nested.mkdir(parents=True)
+    (nested / "a.txt").write_text("alpha\n", encoding="utf-8")
+    monkeypatch.setenv("BLUE_PROJECT_ROOT", str(root))
+    configure_workspace(WorkspaceConfig(workdir="sub"))
+
+    result = edit_file("a.txt", "alpha", "beta")
+
+    assert result.path == str((nested / "a.txt").resolve())

@@ -16,7 +16,7 @@ from typing import Any, TypeVar
 
 from blue_contracts_tool import EVENTS as TOOL_EVENTS
 from infinity_bus import EventDeclaration
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict, Field
 
 from blue.errors import RuntimeConfigError
 from blue.lifecycle import LifecycleService, serve_forever
@@ -26,14 +26,22 @@ from blue.worker import ToolWorker
 __all__ = [
     "DEFAULT_BUS_URL",
     "DEFAULT_RUNTIME_CONFIG",
+    "PROJECT_ROOT_ENV",
+    "Workspace",
+    "WorkspaceConfig",
     "build_runtime",
     "bus_url",
+    "configure_workspace",
     "load_runtime_config",
+    "project_root",
     "registry_ttl",
+    "resolve_workspace",
+    "resolve_workspace_path",
     "run_service",
     "run_tool",
     "runtime_config_path",
     "service_name",
+    "workspace",
 ]
 
 DEFAULT_RUNTIME_CONFIG = "service_runtime_config.json"
@@ -41,6 +49,9 @@ DEFAULT_RUNTIME_CONFIG = "service_runtime_config.json"
 
 DEFAULT_BUS_URL = "amqp://guest:guest@127.0.0.1:5672/"
 """未注入 ``BLUE_BUS_URL`` 时的开发默认值。"""
+
+PROJECT_ROOT_ENV = "BLUE_PROJECT_ROOT"
+"""supervisor 注入的项目根目录环境变量（``blue.infd`` 所在目录）。"""
 
 ConfigT = TypeVar("ConfigT", bound=BaseModel)
 
@@ -99,6 +110,87 @@ def registry_ttl(default: float = 15.0) -> float:
     except ValueError:
         return default
     return value if value > 0 else default
+
+
+# supervisor 以服务目录作为进程 cwd（见 control/runner.py），若相对路径直接按
+# cwd 解析会落到 services/<name>/ 下。文件类工具统一锚定项目根，与 shell 语义一致。
+class WorkspaceConfig(BaseModel):
+    """文件类工具的工作目录配置。"""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    workdir: str | None = Field(
+        default=None,
+        description="相对路径的锚点；缺省为项目根，绝对路径不受影响",
+    )
+
+
+def project_root() -> Path:
+    """项目根目录：``blue.infd`` 所在目录，由 supervisor 注入。"""
+    configured = os.environ.get(PROJECT_ROOT_ENV)
+    if configured:
+        return Path(configured).expanduser().resolve()
+    return Path.cwd()
+
+
+def resolve_workspace(config: WorkspaceConfig) -> Path:
+    """把配置解析为绝对工作目录。
+
+    优先级：显式 ``workdir`` > 项目根 > 进程当前目录。
+    """
+    root = project_root()
+    if config.workdir is None:
+        return root
+    configured = Path(config.workdir).expanduser()
+    if configured.is_absolute():
+        return configured.resolve()
+    return (root / configured).resolve()
+
+
+def resolve_workspace_path(path: str, workdir: Path) -> Path:
+    """把用户给出的路径解析为绝对路径：绝对路径原样，相对路径按 ``workdir``。"""
+    candidate = Path(path).expanduser()
+    if candidate.is_absolute():
+        return candidate.resolve()
+    return (workdir / candidate).resolve()
+
+
+class Workspace:
+    """工具进程内的路径解析上下文。"""
+
+    def __init__(self, workdir: Path) -> None:
+        self._workdir = workdir
+
+    @property
+    def workdir(self) -> Path:
+        """相对路径的锚点目录。"""
+        return self._workdir
+
+    def resolve(self, path: str) -> Path:
+        """把用户给出的路径解析为绝对路径。
+
+        :raises ValueError: ``path`` 为空。
+        """
+        if not path.strip():
+            raise ValueError("path 不能为空")
+        return resolve_workspace_path(path, self._workdir)
+
+
+_workspace: Workspace | None = None
+"""工具进程级路径上下文；由 :func:`configure_workspace` 注入，未注入时锚定项目根。"""
+
+
+def configure_workspace(config: WorkspaceConfig) -> None:
+    """设置本进程后续工具调用的路径锚点。"""
+    global _workspace
+    _workspace = Workspace(resolve_workspace(config))
+
+
+def workspace() -> Workspace:
+    """当前进程的路径上下文；未配置时锚定项目根。"""
+    if _workspace is None:
+        return Workspace(project_root())
+    return _workspace
 
 
 def build_runtime(

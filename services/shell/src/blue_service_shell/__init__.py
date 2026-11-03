@@ -11,13 +11,17 @@ from typing import Annotated
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from blue.runtime import load_runtime_config, run_tool
+from blue.runtime import (
+    PROJECT_ROOT_ENV,
+    WorkspaceConfig,
+    load_runtime_config,
+    project_root,
+    resolve_workspace,
+    run_tool,
+)
 
 MAX_OUTPUT_CHARS = 20_000
 """stdout / stderr 各自保留的最大字符数。"""
-
-PROJECT_ROOT_ENV = "BLUE_PROJECT_ROOT"
-"""supervisor 注入的项目根目录环境变量。"""
 
 
 class ShellConfig(BaseModel):
@@ -31,26 +35,12 @@ class ShellConfig(BaseModel):
     )
 
 
-def project_root() -> Path:
-    """项目根目录：``blue.infd`` 所在目录，由 supervisor 注入。"""
-    configured = os.environ.get(PROJECT_ROOT_ENV)
-    if configured:
-        return Path(configured).expanduser().resolve()
-    return Path.cwd()
-
-
 def resolve_workdir(config: ShellConfig) -> Path:
     """把配置解析为绝对工作目录。
 
     优先级：显式 ``workdir`` > 项目根 > 进程当前目录。
     """
-    root = project_root()
-    if config.workdir is None:
-        return root
-    configured = Path(config.workdir).expanduser()
-    if configured.is_absolute():
-        return configured.resolve()
-    return (root / configured).resolve()
+    return resolve_workspace(WorkspaceConfig(workdir=config.workdir))
 
 
 _default_workdir: Path | None = None
