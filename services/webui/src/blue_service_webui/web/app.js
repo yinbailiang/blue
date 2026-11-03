@@ -657,10 +657,22 @@
     parts.label.textContent = `TOOL · ${name}`;
     parts.name.textContent = name;
     const text = String(message.content || "");
-    if (text !== parts.text) {
-      parts.text = text;
-      parts.body.textContent = text || "（无输出）";
-      parts.brief.textContent = toolBrief(text);
+    const images = (message.parts || []).filter(
+      (part) => part.type === "image" && part.url,
+    );
+    const signature = text + "|" + images.map((part) => part.url).join(",");
+    if (signature === parts.signature) return;
+    parts.signature = signature;
+    parts.text = text;
+    parts.body.textContent = text || "（无输出）";
+    parts.brief.textContent = toolBrief(text);
+    for (const part of images) {
+      const image = document.createElement("img");
+      image.className = "bubble-image";
+      image.src = part.url;
+      image.alt = "工具返回的图片";
+      image.loading = "lazy";
+      parts.body.appendChild(image);
     }
   }
 
@@ -1236,9 +1248,15 @@
     if (kind === "tool_result") {
       const call = event.tool_call || {};
       markToolCallStatus(call.id, "done");
+      const toolParts = [];
+      if (event.text) toolParts.push({ type: "text", text: event.text });
+      for (const hash of event.attachments || []) {
+        toolParts.push({ type: "image", hash, url: `/api/attachments/${hash}` });
+      }
       state.messages.push({
         role: "tool",
         content: event.text || "",
+        parts: toolParts,
         tool_call_id: call.id || null,
         name: call.name || null,
       });

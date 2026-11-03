@@ -19,7 +19,12 @@ import logging
 import time
 from dataclasses import dataclass
 
-from blue_contracts_tool import ToolCallRequest, ToolCallResult, ToolResultEvent
+from blue_contracts_tool import (
+    ToolAttachment,
+    ToolCallRequest,
+    ToolCallResult,
+    ToolResultEvent,
+)
 from infinity_agent import ToolDefinition, ToolFunction
 from infinity_bus import EventBus
 
@@ -167,7 +172,7 @@ class McpBridge:
         bound = self._tools.get(payload.tool)
         if bound is None:
             return
-        content, ok = await self._invoke(bound, dict(payload.arguments))
+        content, ok, attachments = await self._invoke(bound, dict(payload.arguments))
         await bus_proxy.publish(
             ToolResultEvent.name,
             ToolCallResult(
@@ -176,13 +181,14 @@ class McpBridge:
                 success=ok,
                 error_msg=None if ok else content,
                 content=content,
+                attachments=attachments,
             ),
         )
 
     async def _invoke(
         self, bound: BoundTool, arguments: dict[str, object]
-    ) -> tuple[str, bool]:
-        """执行一次 MCP 调用，返回（文本, 是否成功）。"""
+    ) -> tuple[str, bool, list[ToolAttachment]]:
+        """执行一次 MCP 调用，返回（文本, 是否成功, 附件）。"""
         session = await self._session_for(bound.server)
         if session is None:
             return self._failure(bound, f"MCP server {bound.server!r} 不可用")
@@ -202,14 +208,24 @@ class McpBridge:
         except Exception as error:
             logger.exception("MCP 工具 %s 调用异常", bound.name)
             return self._failure(bound, f"调用异常：{error}")
+        attachments = [
+            ToolAttachment(mime=item.mime, data=item.data, name=item.name)
+            for item in result.attachments
+        ]
         if result.is_error:
-            return result.content or f"MCP 工具 {bound.name} 返回 isError", False
-        return result.content, True
+            return (
+                result.content or f"MCP 工具 {bound.name} 返回 isError",
+                False,
+                attachments,
+            )
+        return result.content, True, attachments
 
-    def _failure(self, bound: BoundTool, reason: str) -> tuple[str, bool]:
-        """记录并格式化一次失败。"""
+    def _failure(
+        self, bound: BoundTool, reason: str
+    ) -> tuple[str, bool, list[ToolAttachment]]:
+        """记录并格式化一次失败（不带附件）。"""
         logger.warning("MCP 工具 %s 调用失败：%s", bound.name, reason)
-        return f"MCP 工具 {bound.name}：{reason}", False
+        return f"MCP 工具 {bound.name}：{reason}", False, []
 
     async def _discover(self) -> None:
         """连接全部启用的 server，并按白名单绑定工具。"""

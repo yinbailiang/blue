@@ -178,6 +178,10 @@ class SessionStreamPayload(BaseModel):
         default_factory=list[StreamToolCall], description="模型返回的全部工具调用"
     )
     success: bool = Field(default=True, description="工具调用是否成功")
+    attachments: list[str] = Field(
+        default_factory=list[str],
+        description="本次结果携带的附件哈希（供前端按 /api/attachments/<hash> 取图）",
+    )
 
 
 class SessionStreamEvent(EventDeclaration):

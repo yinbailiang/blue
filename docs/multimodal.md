@@ -89,10 +89,34 @@ WebUI ── session.prompt(text, attachments) ──▶ agent
 | 附件超限 / 哈希不符 | session 回 `success=false`，agent 报错，消息不入库 |
 | `sanitize_history` 遇到多模态消息 | 算「有内容」（旧实现按 `isinstance(str)` 判空会把它丢掉，已修） |
 
-## 7. 已知边界
+## 7. 工具返回的图片
 
-- **工具返回图片**（`tool.result` 携带附件）尚未接入：上游已支持 tool 消息多模态，
-  但 blue 侧的工具结果契约仍是纯文本，MCP 桥的 `image` 块仍降级为 `[image: …]`；
+工具可以把自己的图片放进返回对象的 `attachments` 字段（`blue.runtime.tool_attachment`
+负责 base64 编码），`ToolWorker` 会把它从正文里摘出来放进 `tool.result.attachments`，
+agent 再转成内容寻址的会话附件、以**多模态 tool 消息**回灌模型：
+
+```python
+from blue.runtime import tool_attachment
+
+class Screenshot(BaseModel):
+    text: str
+    attachments: list[dict[str, str | None]]
+
+def screenshot(url: str) -> Screenshot:
+    png = render(url)                      # 你自己产出的图片字节
+    return Screenshot(text="截图如下", attachments=[tool_attachment(png)])
+```
+
+- 正文里不会出现 base64（否则模型的上下文会被 base64 撑爆）；
+- `image/*` 走 `image_url` 内容块，其它走 `file` 内容块；
+- `session.stream` 的 `tool_result` 帧带 `attachments: [hash]`，前端在工具卡片里直接
+  用 `/api/attachments/<hash>` 渲染；
+- **MCP 桥**：`image` 内容块不再降级成 `[image: …]` 占位，而是转成同样的结构化附件，
+  因此「MCP 工具返回截图 → 模型真的看见」这条链路已经通了。
+
+## 8. 已知边界
+
 - 无图片编辑/裁剪，无多图拼合，无 OCR 专用通道（交给模型）；
+- 音频/视频等非图片二进制仍降级为占位说明（模型侧不支持）；
 - 未做 EXIF 方向纠正与色彩空间处理；
 - 附件只有 GC，没有「用户手动删除某张图」的入口。

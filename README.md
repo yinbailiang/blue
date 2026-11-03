@@ -581,7 +581,9 @@ WebUI 支持**粘贴 / 拖入 / 选择**图片（PNG、JPEG、GIF、WebP），�
 - agent 发请求前把伪 URL 换成 `data:` URL（DeepSeek 只接受 data/http(s)），换不到就
   **降级成文本占位**，绝不把伪 URL 递给模型；
 - WebUI 通过 `GET /api/attachments/<hash>` 取图，内容寻址因而可 `immutable` 长缓存；
-- 预算：单张 ≤2 MiB（前端先降采样到长边 1568）、每轮 ≤4 张，超限报错而不是静默丢图。
+- 预算：单张 ≤2 MiB（前端先降采样到长边 1568）、每轮 ≤4 张，超限报错而不是静默丢图；
+- **工具也能返回图片**：工具把 `blue.runtime.tool_attachment(...)` 放进返回对象的
+  `attachments` 字段即可，正文里不会出现 base64；MCP 桥的 `image` 块同样走这条路。
 
 细节（表结构、迁移、失败语义、界面链路）见 [`docs/multimodal.md`](docs/multimodal.md)。
 

@@ -8,6 +8,7 @@ http(s) 链接，因此发请求前必须换一次（materialize）。换不出�
 from __future__ import annotations
 
 import base64
+import binascii
 import logging
 from collections.abc import Awaitable, Callable, Iterable
 from dataclasses import dataclass, field
@@ -20,6 +21,7 @@ from blue_contracts_session import (
     parse_attachment_url,
     sha256_hex,
 )
+from blue_contracts_tool import ToolAttachment
 from infinity_agent import Message, MultiModalContent
 
 logger = logging.getLogger(__name__)
@@ -28,6 +30,7 @@ __all__ = [
     "DEFAULT_FALLBACK",
     "AttachmentMaterializer",
     "build_user_message",
+    "tool_attachment_parts",
 ]
 
 DEFAULT_FALLBACK = "（附件已附加，但内容不可用）"
@@ -138,3 +141,44 @@ class AttachmentMaterializer:
                     update={"file": file.model_copy(update={"file_data": data_url})}
                 )
         return part
+
+
+def tool_attachment_parts(
+    attachments: Iterable[ToolAttachment],
+) -> tuple[list[MultiModalContent], list[SessionAttachmentBlob]]:
+    """把工具返回的附件转成（内容块, 待落库 blob）。
+
+    与用户附件一样走内容寻址：同图只落一份，消息里只留伪 URL。
+
+    :param attachments: ``tool.result`` 里带回的附件
+    :return: （内容块列表, 去重后的 blob 列表）
+    """
+    parts: list[MultiModalContent] = []
+    blobs: list[SessionAttachmentBlob] = []
+    seen: set[str] = set()
+    for attachment in attachments:
+        try:
+            data = base64.b64decode(attachment.data, validate=True)
+        except binascii.Error, ValueError:
+            logger.warning("工具附件不是合法 base64，已跳过")
+            continue
+        digest = sha256_hex(data)
+        if attachment.mime.startswith("image/"):
+            parts.append(MultiModalContent.image_part(attachment_url(digest)))
+        else:
+            parts.append(
+                MultiModalContent.file_part(
+                    file_data=attachment_url(digest),
+                    filename=attachment.name,
+                )
+            )
+        if digest not in seen:
+            seen.add(digest)
+            blobs.append(
+                SessionAttachmentBlob(
+                    hash=digest,
+                    mime=attachment.mime,
+                    data=attachment.data,
+                )
+            )
+    return parts, blobs

@@ -8,6 +8,7 @@ supervisor 通过环境变量注入连接信息，通过 ``service_runtime_confi
 from __future__ import annotations
 
 import asyncio
+import base64
 import os
 import uuid
 from collections.abc import Callable, Iterable
@@ -41,6 +42,7 @@ __all__ = [
     "run_tool",
     "runtime_config_path",
     "service_name",
+    "tool_attachment",
     "workspace",
 ]
 
@@ -94,6 +96,39 @@ def bus_url() -> str:
 def service_name(default: str = "service") -> str:
     """取当前服务名（supervisor 注入 ``BLUE_SERVICE_NAME``）。"""
     return os.environ.get("BLUE_SERVICE_NAME", default)
+
+
+def tool_attachment(
+    data: bytes, mime: str = "image/png", *, name: str | None = None
+) -> dict[str, str | None]:
+    """构造工具返回值里的 ``attachments`` 元素。
+
+    工具把自己的图片/文件放进返回对象的 ``attachments`` 列表：
+
+    ```python
+    class Shot(BaseModel):
+        text: str
+        attachments: list[dict[str, str]]
+
+    def screenshot() -> Shot:
+        return Shot(text="截图如下", attachments=[tool_attachment(png, "image/png")])
+    ```
+
+    ``ToolWorker`` 会把这个字段摘出来放进 ``tool.result.attachments``，正文里不会出现
+    base64；agent 再把它转成内容寻址的会话附件并交给模型。
+
+    :param data: 原始字节
+    :param mime: MIME 类型
+    :param name: 可选文件名
+    :return: ``{"mime": ..., "data": <base64>, "name": ...}``
+    """
+    payload: dict[str, str | None] = {
+        "mime": mime,
+        "data": base64.b64encode(data).decode("ascii"),
+    }
+    if name is not None:
+        payload["name"] = name
+    return payload
 
 
 def registry_ttl(default: float = 15.0) -> float:

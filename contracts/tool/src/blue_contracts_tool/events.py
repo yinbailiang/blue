@@ -21,6 +21,7 @@ __all__ = [
     "CatalogQueryRequest",
     "CatalogQueryResponse",
     "CatalogReplyEvent",
+    "ToolAttachment",
     "ToolCallEvent",
     "ToolCallRequest",
     "ToolCallResult",
@@ -112,10 +113,26 @@ class ToolCallRequest(RequestProtocol):
     arguments: dict[str, Any] = Field(default_factory=dict, description="工具参数")
 
 
+class ToolAttachment(BaseModel):
+    """工具返回的附件（图片等）。
+
+    工具把 ``attachments`` 字段放进返回对象，``ToolWorker`` 会把它从正文里摘出来
+    放进 ``ToolCallResult.attachments``；agent 再把它转成内容寻址的会话附件。
+    """
+
+    mime: str = Field(description="MIME 类型，例如 image/png")
+    data: str = Field(description="base64 负载（不含 data: 前缀）")
+    name: str | None = Field(default=None, description="可选文件名")
+
+
 class ToolCallResult(ResponseProtocol):
     """工具进程返回的调用结果。"""
 
     content: str = Field(default="", description="工具输出（字符串或 JSON 文本）")
+    attachments: list[ToolAttachment] = Field(
+        default_factory=list[ToolAttachment],
+        description="结构化附件（图片等），由 agent 转成内容寻址存储",
+    )
 
 
 class ToolCallEvent(EventDeclaration):

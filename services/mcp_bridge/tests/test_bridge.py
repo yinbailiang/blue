@@ -32,6 +32,7 @@ from blue_service_mcp_bridge import (
     McpToolInfo,
     McpTransportError,
 )
+from blue_service_mcp_bridge.client import McpAttachment
 from blue_service_registry import ToolRegistryService
 from infinity_bus import EventBus
 from infinity_bus.templates.request import request
@@ -630,3 +631,40 @@ async def _end_to_end() -> None:
         await client.stop()
         await bridge.stop()
         await registry.stop()
+
+
+def test_bridge_forwards_mcp_image_as_tool_attachment() -> None:
+    """MCP 返回的图片块变成 tool.result.attachments（不再降级成占位文本）。"""
+    asyncio.run(_forwards_image())
+
+
+async def _forwards_image() -> None:
+    hub = MemoryFanout()
+    connector = FakeConnector(
+        {"fs": _tools()},
+        call=lambda _name, _args: McpCallResult(
+            content="截图如下",
+            is_error=False,
+            attachments=(McpAttachment(mime="image/png", data="QUJDRA=="),),
+        ),
+    )
+    bridge = _bridge(hub, _config(), connector)
+    client = make_runtime(hub, "client")
+    await bridge.start()
+    await client.start()
+    try:
+        result = await request(
+            client.proxy(),
+            ToolCallEvent.name,
+            {"tool": TOOL_NAME, "arguments": {"path": "a.txt"}},
+            ToolResultEvent.name,
+            timeout=5.0,
+        )
+        assert isinstance(result, ToolCallResult)
+        assert result.success is True
+        assert [item.mime for item in result.attachments] == ["image/png"]
+        assert result.attachments[0].data == "QUJDRA=="
+        assert "截图如下" in result.content
+    finally:
+        await client.stop()
+        await bridge.stop()

@@ -113,10 +113,12 @@ async def _call_rich() -> None:
         result = await session.call_tool("rich", {})
         assert result.is_error is False
         assert "第一段" in result.content
-        assert "[image: image/png, 4 bytes]" in result.content
+        # 图片不再是占位文本，而是结构化附件（由 agent 转成内容寻址存储）
+        assert [item.mime for item in result.attachments] == ["image/png"]
+        assert result.attachments[0].data == "QUJDRA=="
         assert "[resource: file:///tmp/report.txt]" in result.content
         assert "资源正文" in result.content
-        assert "[audio: audio/wav, 3 bytes]" in result.content
+        assert "[audio: audio/wav]" in result.content
         assert "future_block" in result.content
     finally:
         await session.close()

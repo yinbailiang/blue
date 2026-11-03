@@ -17,11 +17,13 @@ from blue_contracts_session import (
     parse_attachment_url,
     sha256_hex,
 )
+from blue_contracts_tool import ToolAttachment
 from blue_service_agent.agent import AgentCore
 from blue_service_agent.attachments import (
     DEFAULT_FALLBACK,
     AttachmentMaterializer,
     build_user_message,
+    tool_attachment_parts,
 )
 from blue_service_agent.config import AgentConfig
 from blue_service_agent.history import sanitize_history
@@ -299,3 +301,31 @@ async def _agent_round_trip() -> None:
     assert isinstance(sent_content, list)
     assert sent_content[1].image_url is not None
     assert sent_content[1].image_url.url.startswith("data:image/png;base64,")
+
+
+def test_tool_attachment_parts_builds_pseudo_urls_and_blobs() -> None:
+    """工具附件转成伪 URL 内容块 + 去重后的 blob。"""
+    data = base64.b64encode(PNG).decode("ascii")
+    parts, blobs = tool_attachment_parts(
+        [
+            ToolAttachment(mime=PNG_MIME, data=data),
+            ToolAttachment(mime=PNG_MIME, data=data),
+            ToolAttachment(
+                mime="application/pdf", data=base64.b64encode(b"%PDF").decode()
+            ),
+        ]
+    )
+    assert [part.image_url is not None for part in parts] == [True, True, False]
+    assert parts[2].file is not None
+    digest = sha256_hex(PNG)
+    first = parts[0].image_url
+    assert first is not None
+    assert parse_attachment_url(first.url) == digest
+    assert [blob.hash for blob in blobs] == [digest, sha256_hex(b"%PDF")]
+
+
+def test_tool_attachment_parts_skips_bad_base64() -> None:
+    """非法 base64 跳过而不是抛错。"""
+    parts, blobs = tool_attachment_parts([ToolAttachment(mime=PNG_MIME, data="!!!")])
+    assert parts == []
+    assert blobs == []

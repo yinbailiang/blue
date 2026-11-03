@@ -285,3 +285,55 @@ async def _worker_serves_call() -> None:
     finally:
         await client.stop()
         await worker.stop()
+
+
+def test_worker_extracts_attachments_from_tool_output() -> None:
+    """工具返回对象里的 attachments 被摘出来，正文里不留 base64。"""
+    asyncio.run(_worker_extracts_attachments())
+
+
+async def _worker_extracts_attachments() -> None:
+    from blue.runtime import tool_attachment
+
+    def screenshot() -> dict[str, object]:
+        """返回一张「截图」。"""
+        return {
+            "text": "截图如下",
+            "attachments": [tool_attachment(b"png-bytes", "image/png")],
+        }
+
+    hub = MemoryFanout()
+    worker = ToolWorker(
+        runtime=make_runtime(hub, "tool.screenshot"), tool=screenshot, ttl=5.0
+    )
+    client = make_runtime(hub, "client")
+    await worker.start()
+    await client.start()
+    try:
+        result = await request(
+            client.proxy(),
+            ToolCallEvent.name,
+            {"tool": "screenshot", "arguments": {}},
+            ToolResultEvent.name,
+            timeout=5.0,
+        )
+        assert isinstance(result, ToolCallResult)
+        assert result.success is True
+        assert "cG5nLWJ5dGVz" not in result.content  # base64 不进正文
+        assert [item.mime for item in result.attachments] == ["image/png"]
+        assert result.attachments[0].data == "cG5nLWJ5dGVz"
+        assert "截图如下" in result.content
+    finally:
+        await client.stop()
+        await worker.stop()
+
+
+def test_unpack_skips_malformed_attachments() -> None:
+    """附件条目缺 mime/data 时跳过，不影响正文。"""
+    from blue.worker import unpack_tool_output
+
+    payload = '{"text": "hi", "attachments": [{"mime": "image/png"}, "junk"]}'
+    text, ok, attachments = unpack_tool_output(payload)
+    assert ok is True
+    assert attachments == []
+    assert "hi" in text

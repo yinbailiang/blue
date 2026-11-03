@@ -17,6 +17,7 @@ import logging
 from typing import Any
 
 from blue_contracts_session import (
+    SessionAttachmentBlob,
     SessionPromptRequest,
     SessionReplyResponse,
     SessionStreamEvent,
@@ -24,11 +25,18 @@ from blue_contracts_session import (
     StreamToolCall,
 )
 from blue_contracts_tool import (
+    ToolAttachment,
     ToolCallEvent,
     ToolCallResult,
     ToolResultEvent,
 )
-from infinity_agent import Message, StreamChunk, ToolCall, ToolDefinition
+from infinity_agent import (
+    Message,
+    MultiModalContent,
+    StreamChunk,
+    ToolCall,
+    ToolDefinition,
+)
 from infinity_agent.clients import (
     DeepSeekConfig,
     DeepSeekRequestConfig,
@@ -49,6 +57,7 @@ from blue.transport import BusRuntime
 from blue_service_agent.attachments import (
     AttachmentMaterializer,
     build_user_message,
+    tool_attachment_parts,
 )
 from blue_service_agent.catalog import ToolCatalogClient
 from blue_service_agent.config import AgentConfig
@@ -322,6 +331,7 @@ class AgentCore:
                 await self._sessions.append(bus_proxy, session_id, [assistant])
                 break
             tool_messages: list[Message] = []
+            tool_blobs: list[SessionAttachmentBlob] = []
             try:
                 await self._run_tools(
                     bus_proxy,
@@ -332,6 +342,7 @@ class AgentCore:
                     messages,
                     tools,
                     tool_messages,
+                    tool_blobs,
                 )
             except asyncio.CancelledError:
                 await self._commit_interrupted_step(
@@ -341,7 +352,7 @@ class AgentCore:
             # assistant 与其全部工具结果一次提交：
             # 中断不会卡在「有 tool_calls 没结果」的中间态
             await self._sessions.append(
-                bus_proxy, session_id, [assistant, *tool_messages]
+                bus_proxy, session_id, [assistant, *tool_messages], tool_blobs
             )
         else:
             notice = f"（已达到最大步数 {self._settings.max_steps}，任务可能未完成）"
@@ -368,6 +379,7 @@ class AgentCore:
         messages: list[Message],
         tools: list[ToolDefinition],
         tool_messages: list[Message],
+        tool_blobs: list[SessionAttachmentBlob],
     ) -> None:
         """按序执行 assistant 消息里的工具调用，结果累积到 ``tool_messages``。
 
@@ -390,7 +402,11 @@ class AgentCore:
                     tool_call=stream_call,
                 ),
             )
-            content = await self._invoke_tool(bus_proxy, session_id, tool_call, tools)
+            content, tool_attachments = await self._invoke_tool(
+                bus_proxy, session_id, tool_call, tools
+            )
+            parts, blobs = tool_attachment_parts(tool_attachments)
+            tool_blobs.extend(blobs)
             await self._stream_event(
                 bus_proxy,
                 SessionStreamPayload(
@@ -401,9 +417,15 @@ class AgentCore:
                     text=content,
                     tool_call=stream_call,
                     success=True,
+                    attachments=[blob.hash for blob in blobs],
                 ),
             )
-            tool_message = Message.tool(content=content, tool_call_id=tool_call.id)
+            if parts:
+                if content.strip():
+                    parts.insert(0, MultiModalContent.text_part(content))
+                tool_message = Message.tool(content=parts, tool_call_id=tool_call.id)
+            else:
+                tool_message = Message.tool(content=content, tool_call_id=tool_call.id)
             messages.append(tool_message)
             tool_messages.append(tool_message)
 
@@ -533,7 +555,7 @@ class AgentCore:
         session_id: str,
         tool_call: ToolCall,
         tools: list[ToolDefinition],
-    ) -> str:
+    ) -> tuple[str, list[ToolAttachment]]:
         """通过总线调用一个工具进程，任何失败都转成工具错误文本回灌模型。"""
         name = tool_call.function.name
         available = await self._available_tool_names(bus_proxy, tools, name)
@@ -544,9 +566,12 @@ class AgentCore:
                 name,
                 "、".join(sorted(available)),
             )
-            return _error(
-                f"工具 {name} 不存在（可用工具：{'、'.join(sorted(available))}），"
-                "请改用可用工具或直接回答"
+            return (
+                _error(
+                    f"工具 {name} 不存在（可用工具：{'、'.join(sorted(available))}），"
+                    "请改用可用工具或直接回答"
+                ),
+                [],
             )
         try:
             response = await request(
@@ -558,14 +583,20 @@ class AgentCore:
                 timeout=self._settings.tool_timeout,
             )
         except TimeoutError:
-            return _error(f"工具 {name} 调用超时（{self._settings.tool_timeout}s）")
+            return (
+                _error(f"工具 {name} 调用超时（{self._settings.tool_timeout}s）"),
+                [],
+            )
         except Exception as error:
-            return _error(f"工具 {name} 调用失败：{error}")
+            return _error(f"工具 {name} 调用失败：{error}"), []
         if isinstance(response, ToolCallResult):
             if response.success:
-                return response.content
-            return _error(response.error_msg or response.content or "工具执行失败")
-        return _error(f"工具 {name} 返回了非预期的响应类型")
+                return response.content, list(response.attachments)
+            return (
+                _error(response.error_msg or response.content or "工具执行失败"),
+                [],
+            )
+        return _error(f"工具 {name} 返回了非预期的响应类型"), []
 
     def _require_client(self) -> LLMClient:
         """取已进入上下文的模型客户端。"""

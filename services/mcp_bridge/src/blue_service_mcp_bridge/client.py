@@ -28,6 +28,7 @@ from blue_service_mcp_bridge.config import McpServerConfig
 
 __all__ = [
     "DEFAULT_PROTOCOL_VERSION",
+    "McpAttachment",
     "McpCallError",
     "McpCallResult",
     "McpConnector",
@@ -98,11 +99,21 @@ class McpToolInfo:
 
 
 @dataclass(frozen=True)
+class McpAttachment:
+    """MCP 返回的图片内容块（base64）。"""
+
+    mime: str
+    data: str
+    name: str | None = None
+
+
+@dataclass(frozen=True)
 class McpCallResult:
-    """``tools/call`` 的结果，已降维成一段文本。"""
+    """``tools/call`` 的结果：文本摘要 + 图片附件。"""
 
     content: str
     is_error: bool
+    attachments: tuple[McpAttachment, ...] = ()
 
 
 class McpSession(Protocol):
@@ -278,12 +289,16 @@ class StdioMcpSession:
         result = await self._request(
             "tools/call", {"name": name, "arguments": arguments}, timeout=timeout
         )
-        text = _flatten_content(result)
+        text, attachments = _flatten_content(result)
         structured = result.get("structuredContent")
         if structured is not None:
             tail = json.dumps(structured, ensure_ascii=False, indent=2)
             text = f"{text}\n\n{tail}".strip()
-        return McpCallResult(content=text, is_error=result.get("isError") is True)
+        return McpCallResult(
+            content=text,
+            is_error=result.get("isError") is True,
+            attachments=tuple(attachments),
+        )
 
     async def close(self) -> None:
         """关闭 stdin、回收子进程并让等待中的请求立即失败（幂等）。"""
@@ -545,42 +560,59 @@ def _tool_info(item: object) -> McpToolInfo | None:
     )
 
 
-def _flatten_content(result: dict[str, object]) -> str:
-    """把 ``tools/call`` 的 content 块降维成一段文本。"""
+def _flatten_content(
+    result: dict[str, object],
+) -> tuple[str, list[McpAttachment]]:
+    """把 ``tools/call`` 的 content 块拆成（文本, 图片附件）。"""
     blocks = result.get("content")
     if not isinstance(blocks, list):
-        return ""
+        return "", []
     parts: list[str] = []
+    attachments: list[McpAttachment] = []
     for block in cast(list[object], blocks):
-        if isinstance(block, dict):
-            rendered = _render_block(cast(dict[str, object], block))
-            if rendered:
-                parts.append(rendered)
-    return "\n".join(parts)
+        if not isinstance(block, dict):
+            continue
+        text, attachment = _render_block(cast(dict[str, object], block))
+        if text:
+            parts.append(text)
+        if attachment is not None:
+            attachments.append(attachment)
+    return "\n".join(parts), attachments
 
 
-def _render_block(block: dict[str, object]) -> str:
-    """渲染单个 content 块；非文本内容降级为占位说明。"""
+def _render_block(
+    block: dict[str, object],
+) -> tuple[str, McpAttachment | None]:
+    """渲染单个 content 块：文本原样、图片转附件、其余降级为占位说明。"""
     kind = block.get("type")
     if kind is None or kind == "text":
         text = block.get("text")
         if isinstance(text, str):
-            return text
-    if kind in ("image", "audio"):
-        mime = _as_str(block.get("mimeType")) or f"{kind}/*"
-        return f"[{kind}: {mime}, {_base64_size(block.get('data'))} bytes]"
+            return text, None
+    if kind == "image":
+        data = block.get("data")
+        if isinstance(data, str) and data:
+            mime = _as_str(block.get("mimeType")) or "image/png"
+            return "", McpAttachment(mime=mime, data=data)
     if kind == "resource":
         resource = block.get("resource")
         entry = cast(dict[str, object], resource) if isinstance(resource, dict) else {}
         uri = _as_str(entry.get("uri"))
+        mime = _as_str(entry.get("mimeType"))
+        blob = entry.get("blob")
+        if isinstance(blob, str) and blob and mime.startswith("image/"):
+            return "", McpAttachment(mime=mime, data=blob, name=uri or None)
         text = entry.get("text")
         if isinstance(text, str) and text:
-            return f"[resource: {uri}]\n{text}"
-        mime = _as_str(entry.get("mimeType")) or "application/octet-stream"
-        return f"[resource: {uri} ({mime}, {_base64_size(entry.get('blob'))} bytes)]"
-    if kind in ("resource_link", "resourceLink"):
-        return f"[resource_link: {_as_str(block.get('uri'))}]"
-    return json.dumps(block, ensure_ascii=False)
+            return f"[resource: {uri}]\n{text}", None
+        size = _base64_size(blob)
+        return f"[resource: {uri} ({mime or 'binary'}, {size} bytes)]", None
+    if kind in ("audio", "resource_link", "resourceLink"):
+        label = (
+            f"[{kind}: {_as_str(block.get('mimeType')) or _as_str(block.get('uri'))}]"
+        )
+        return label, None
+    return json.dumps(block, ensure_ascii=False), None
 
 
 def _base64_size(data: object) -> int:

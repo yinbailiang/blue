@@ -31,6 +31,7 @@ from dataclasses import dataclass
 from typing import Any, cast
 
 from blue_contracts_tool import (
+    ToolAttachment,
     ToolCallRequest,
     ToolCallResult,
     ToolHeartbeatEvent,
@@ -55,7 +56,7 @@ from blue.transport import BusRuntime
 
 logger = logging.getLogger(__name__)
 
-__all__ = ["ToolLease", "ToolRegistrar", "ToolWorker"]
+__all__ = ["ToolLease", "ToolRegistrar", "ToolWorker", "unpack_tool_output"]
 
 
 @dataclass(frozen=True)
@@ -274,7 +275,7 @@ class ToolWorker:
                 function=FunctionCall(name=payload.tool, arguments=payload.arguments),
             )
         )
-        text, ok = _unpack(message.content)
+        text, ok, attachments = unpack_tool_output(message.content)
         if not ok:
             logger.warning("工具 %s 执行失败：%s", self.tool_name, text)
         await bus_proxy.publish(
@@ -285,26 +286,65 @@ class ToolWorker:
                 success=ok,
                 error_msg=None if ok else text,
                 content=text,
+                attachments=attachments,
             ),
         )
 
 
-def _unpack(content: MessageContent | None) -> tuple[str, bool]:
-    """把工具执行结果转成（文本, 是否成功）。
+def unpack_tool_output(
+    content: MessageContent | None,
+) -> tuple[str, bool, list[ToolAttachment]]:
+    """把工具执行结果转成（文本, 是否成功, 附件）。
 
     ``ToolRegistry`` 对 ``-> str`` 返回 JSON 字符串、对模型返回 JSON 对象，
     对异常返回 ``{"error": ...}``；这里统一降维为可读文本。
+
+    工具可以把自己的 ``attachments`` 字段放进返回对象（见
+    :func:`blue.runtime.tool_attachment`）：该字段会被摘出来放进
+    ``ToolCallResult.attachments``，正文里不再出现 base64。
     """
     raw = content if isinstance(content, str) else ""
     try:
         decoded: object = json.loads(raw)
     except json.JSONDecodeError:
-        return raw, True
+        return raw, True, []
     if isinstance(decoded, str):
-        return decoded, True
+        return decoded, True, []
     if isinstance(decoded, dict):
         mapping = cast(dict[str, object], decoded)
         error = mapping.get("error")
         if isinstance(error, str):
-            return error, False
-    return json.dumps(decoded, ensure_ascii=False, indent=2), True
+            return error, False, []
+        attachments = _extract_attachments(mapping)
+        if attachments:
+            mapping = {
+                key: value for key, value in mapping.items() if key != "attachments"
+            }
+        text = json.dumps(mapping, ensure_ascii=False, indent=2)
+        return text, True, attachments
+    return json.dumps(decoded, ensure_ascii=False, indent=2), True, []
+
+
+def _extract_attachments(mapping: dict[str, object]) -> list[ToolAttachment]:
+    """从工具返回对象里提取 ``attachments``（非法条目跳过并告警）。"""
+    raw = mapping.get("attachments")
+    if not isinstance(raw, list):
+        return []
+    extracted: list[ToolAttachment] = []
+    for item in cast(list[object], raw):
+        if not isinstance(item, dict):
+            logger.warning("工具返回了非对象附件，已跳过")
+            continue
+        entry = cast(dict[str, object], item)
+        mime = entry.get("mime")
+        data = entry.get("data")
+        if not isinstance(mime, str) or not isinstance(data, str):
+            logger.warning("工具返回的附件缺少 mime/data，已跳过")
+            continue
+        name = entry.get("name")
+        extracted.append(
+            ToolAttachment(
+                mime=mime, data=data, name=name if isinstance(name, str) else None
+            )
+        )
+    return extracted
