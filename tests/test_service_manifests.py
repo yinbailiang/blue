@@ -25,6 +25,7 @@ SERVICES = (
     "session",
     "shell",
     "text_stats",
+    "weather",
     "webui",
     "write_file",
 )
@@ -37,6 +38,7 @@ MANAGED = {
     "session",
     "shell",
     "text_stats",
+    "weather",
     "webui",
     "write_file",
 }
@@ -79,7 +81,7 @@ def test_blue_infd_compiles_and_matches_service_packages(
     assert set(desired.services) == MANAGED
     for name, service in desired.services.items():
         module = importlib.import_module(f"blue_service_{name}")
-        if name in {"agent", "bus", "session", "shell", "webui"}:
+        if name in {"agent", "bus", "session", "shell", "weather", "webui"}:
             config_model = module.CONFIG_MODEL
             config_model.model_validate(service.config)
         else:

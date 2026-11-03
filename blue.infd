@@ -18,6 +18,7 @@
 !from p"services/write_file/service.infd" import ServiceTemplate as WriteFileService
 !from p"services/edit_file/service.infd" import ServiceTemplate as EditFileService
 !from p"services/shell/service.infd" import ServiceTemplate as ShellService
+!from p"services/weather/service.infd" import ServiceTemplate as WeatherService
 
 supervisor {
   state_dir: str = ".blue"
@@ -61,6 +62,9 @@ edit_file = EditFileService()
 
 # workdir 缺省为项目根（blue.infd 所在目录）；可设为绝对路径或相对项目根的路径
 shell = ShellService()
+
+# 天气查询：默认走 wttr.in，可改 base_url / timeout
+weather = WeatherService()
 
 # UI 客户端不纳入 supervisor 调谐，手工运行：
 #   uv run --package blue-service-chat blue-service-chat --interactive

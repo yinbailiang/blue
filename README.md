@@ -75,7 +75,7 @@ services/                     # 工作负载（不随 blue 包安装）
 ├── session/                  # SQLite 会话存储（WAL）
 ├── agent/                    # 模型推理 + 工具目录
 ├── webui/                    # FastAPI 后端 + 静态单页应用
-├── clock/ echo/ text_stats/
+├── clock/ echo/ text_stats/ weather/
 ├── read_file/ write_file/ edit_file/ shell/
 ├── chat/ inspect/            # 手工运行的 UI 客户端
 └── */service.infd            # 服务模板 + 系统元数据
@@ -345,10 +345,14 @@ Ready / Running → Stopping → Stopped
 | `clock` / `echo` / `text_stats` | 基础工具 |
 | `read_file` / `write_file` / `edit_file` | 文件读写与精确替换 |
 | `shell` | 异步 shell 命令，超时进程组强杀、输出截断；默认工作目录为项目根 |
+| `weather` | 天气查询（wttr.in，免密钥）：实时实况 + 最多 3 天预报，天气码本地译中文 |
 | `chat` / `inspect` | 手工 UI 客户端，不纳入 supervisor 调谐 |
 
 > **安全提示**：`read_file` / `write_file` / `edit_file` / `shell` 以工具进程
 > 权限运行，没有额外沙箱。只在可信工作目录中启用。
+>
+> **网络提示**：`weather` 会向 `wttr.in` 发起 HTTPS 请求；如需换源或镜像，
+> 在 `blue.infd` 里传 `WeatherService(base_url = ..., timeout = ...)`。
 
 ## 新增服务
 

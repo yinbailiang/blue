@@ -1,0 +1,17 @@
+~ServiceTemplate {
+  base_url: str = "https://wttr.in"
+  lang: str = "zh"
+  timeout: <float, positive> = 15.0
+}
+
+service {
+  name = "weather"
+  kind = "tool"
+  package = "blue-service-weather"
+  module = "blue_service_weather"
+  depends_on = ["bus"]
+  restart = "always"
+  stop_timeout = 5.0
+  startup_timeout = 30.0
+  readiness = "process"
+}
