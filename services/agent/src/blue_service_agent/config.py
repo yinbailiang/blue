@@ -12,7 +12,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from blue.errors import RuntimeConfigError
 
-__all__ = ["AgentConfig", "RegistryConfig"]
+__all__ = ["AgentConfig"]
 
 
 class AgentConfig(BaseModel):
@@ -43,12 +43,3 @@ class AgentConfig(BaseModel):
             "未提供模型访问密钥：请在 secrets.toml 的 [agent].api_key 中配置"
             "（模板见 secrets.example.toml）"
         )
-
-
-class RegistryConfig(BaseModel):
-    """工具注册中心租约参数（由 supervisor 通过环境变量注入）。"""
-
-    model_config = ConfigDict(extra="forbid", frozen=True)
-
-    ttl: float = Field(default=15.0, gt=0)
-    sweep_interval: float = Field(default=2.0, gt=0)

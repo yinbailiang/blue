@@ -5,21 +5,16 @@ from __future__ import annotations
 import asyncio
 from typing import cast
 
-from blue_service_agent.subscribers.catalog import CatalogChangedHandler
-from blue_service_agent.subscribers.registry import RegistryHandler
-from blue_service_agent.subscribers.session import SessionHandler
-from infinity_agent import ToolDefinition
-from infinity_bus import Event, EventBus
-from pydantic import BaseModel
-
-from blue.protocol import (
-    CatalogChangedEvent,
-    CatalogChangedPayload,
-    CatalogQueryEvent,
+from blue_contracts_session import (
     SessionCancelEvent,
     SessionPromptEvent,
     SessionPromptRequest,
     SessionReplyResponse,
+)
+from blue_contracts_tool import (
+    CatalogChangedEvent,
+    CatalogChangedPayload,
+    CatalogQueryEvent,
     ToolCallEvent,
     ToolCallRequest,
     ToolHeartbeatEvent,
@@ -28,6 +23,13 @@ from blue.protocol import (
     ToolRegisterPayload,
     ToolUnregisterEvent,
 )
+from blue_service_agent.subscribers.catalog import CatalogChangedHandler
+from blue_service_agent.subscribers.session import SessionHandler
+from blue_service_registry import RegistryHandler
+from infinity_agent import ToolDefinition
+from infinity_bus import Event, EventBus
+from pydantic import BaseModel
+
 from blue.subscribers.tool_call import ToolCallHandler
 
 

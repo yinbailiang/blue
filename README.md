@@ -17,13 +17,15 @@
 blue CLI
   └─ Supervisor（根 blue 进程）
        ├─ DesiredStateLoader  ← blue.infd + services/*/service.infd
+       │                         + contracts/*/contract.infd
        ├─ Reconciler          ← desired vs actual
        ├─ ProcessRunner       ← 启动 / 停止 / 重启 / 退避 / 日志
        └─ .blue/              ← state.json + logs + lock
 
        ├─ services/bus        → 管理 RabbitMQ + 可选 AMQP TCP 代理
+       ├─ services/registry   → 工具租约 + 目录快照 + 目录广播
        ├─ services/session    → 会话持久化（aiosqlite + WAL）
-       ├─ services/agent      → 模型推理 + 工具目录
+       ├─ services/agent      → 模型推理 + 工具目录缓存
        ├─ services/webui      → FastAPI + 单页 Chat UI
        ├─ services/*          → 一个工具一个进程
        └─ services/chat|inspect → 手工运行的 CLI 客户端
@@ -33,7 +35,8 @@ blue CLI
 
 1. WebUI 通过 WebSocket / REST 发布 `session.prompt`；
 2. agent 通过 `session.get` 向 session 服务取出/创建会话；
-3. session 服务返回历史消息，agent 把工具目录交给模型；
+3. session 服务返回历史消息；agent 通过 `catalog.query` 向 registry 取工具目录，
+   把目录交给模型；
 4. 模型返回 `tool_calls`，agent 发布 `tool.call`；
 5. 对应工具进程执行后回发 `tool.result`；
 6. agent 把结果回灌模型，循环直到最终答复或 `max_steps`；
@@ -52,14 +55,26 @@ Agent 在模型流式输出期间同时发布 `session.stream`，携思考增量
 模型若请求了工具目录里不存在的工具，agent 立即回灌错误文本（附可用工具清单），
 不再空等到 `tool_timeout`——没有进程会应答这类调用。
 
+生成中点「停止」走 `session.cancel`，agent 取消该会话正在进行的 turn。中断后
+只落库真正产出的内容：已流出的文本保留并追加「（已停止）」，一个字都没流出就
+整步丢弃；工具执行中被中断时只保留已经跑完的调用与结果，其余丢弃。于是一次
+中断既不会留下界面上「看不见但存在」的空壳消息，也不会留下没有结果的
+`tool_call`。step 内的 assistant 消息与其全部工具结果是一次性提交的，中途被杀
+最多丢掉当前这一步。
+
 工具进程启动时发布 `tool.register`，周期补发注册并发布 `tool.heartbeat`，
 退出时发布 `tool.unregister`；agent 按 TTL 回收失联工具。
 
 ## 目录结构
 
 ```text
+contracts/                    # 域契约包（不依赖控制面/服务实现）
+├── tool/                     # blue-contracts-tool：tool.* / catalog.*
+│   └── contract.infd         # 契约元数据
+└── session/                  # blue-contracts-session：session.*
+    └── contract.infd
+
 src/blue/                     # 控制面 + 共享 SDK（随包安装）
-├── protocol.py               # 固定事件名与负载模型
 ├── transport.py              # RabbitMQ fanout / 进程内 fanout
 ├── lifecycle.py              # serve_forever
 ├── worker.py                 # ToolWorker（工具服务使用）
@@ -67,8 +82,8 @@ src/blue/                     # 控制面 + 共享 SDK（随包安装）
 ├── config.py                 # blue.infd 入口与文档导出
 ├── errors.py                 # BlueError / ConfigError / ...
 ├── control/
-│   ├── model.py              # ServiceMeta / DesiredState / ActualState
-│   ├── desired.py            # 编译 blue.infd + 加载 service.infd
+│   ├── model.py              # ServiceMeta / ContractMeta / DesiredState
+│   ├── desired.py            # 编译 blue.infd + 加载 service/contract 元数据
 │   ├── reconciler.py         # 调谐循环
 │   ├── runner.py             # 进程、进程树、日志泵
 │   ├── state.py              # state.json / 单实例锁 / 孤儿清理
@@ -82,8 +97,9 @@ src/blue/                     # 控制面 + 共享 SDK（随包安装）
 
 services/                     # 工作负载（不随 blue 包安装）
 ├── bus/                      # RabbitMQ 生命周期 + 配置 + 可选代理
+├── registry/                 # 工具租约 + 目录快照 + 目录广播
 ├── session/                  # SQLite 会话存储（WAL）
-├── agent/                    # 模型推理 + 工具目录
+├── agent/                    # 模型推理 + 工具目录缓存
 ├── webui/                    # FastAPI 后端 + 静态单页应用
 ├── clock/ echo/ text_stats/ weather/
 ├── read_file/ write_file/ edit_file/ shell/
@@ -99,6 +115,16 @@ services/echo/
 ├── service.infd
 ├── src/blue_service_echo/
 └── tests/
+```
+
+每个契约目录：
+
+```text
+contracts/tool/
+├── pyproject.toml
+├── contract.infd
+├── src/blue_contracts_tool/
+└── tests/            # 可选
 ```
 
 ## 配置模型
@@ -155,6 +181,7 @@ service {
   package = "blue-service-echo" # uv workspace 包名
   module = "blue_service_echo"  # python -m 模块
   depends_on = ["bus"]
+  depends_contracts = ["tool"]  # 依赖的事件契约名
   restart = "always"            # always / on-failure / never
   stop_timeout = 5.0
   startup_timeout = 30.0
@@ -167,6 +194,27 @@ service {
 - `~ServiceTemplate`：该服务的**配置 schema**，只放服务特有配置。
 - `service`：**通用系统元数据**，由控制面的 `ServiceMeta` 校验；不是服务配置。
 - 所有配置实例只存在于 `blue.infd`，`service.infd` 不保存配置实例。
+
+### `contract.infd`：契约包元数据
+
+契约包不由 `blue.infd` 显式实例化；控制面扫描 `contracts/*/contract.infd`
+自动纳入期望状态：
+
+```infd
+contract {
+  name = "tool"
+  package = "blue-contracts-tool"
+  module = "blue_contracts_tool"
+  description = "工具与目录领域事件契约"
+}
+```
+
+- 控制面为每个契约包计算 `source_hash`（`pyproject.toml` + `contract.infd` +
+  `src/**/*.py`），并把契约纳入 generation。
+- 服务用 `depends_contracts` 声明自己依赖的契约。
+- `blue apply` / `reload()` 检测到契约变化时，会重启所有声明了该契约的服务；
+  没有声明依赖的服务不受影响。
+- 契约依赖必须指向存在的契约，否则配置编译直接失败。
 
 ### 密钥管理
 
@@ -366,6 +414,8 @@ Ready / Running → Stopping → Stopped
 ```
 
 - **依赖**：`depends_on` 形成 DAG；依赖 Ready 后才启动下游，停止时逆序。
+- **契约变更**：`blue apply` 会比较契约包指纹；变化时重启所有
+  `depends_contracts` 命中该契约的服务。
 - **重启**：`always` / `on-failure` / `never`；指数退避 + 抖动；稳定运行
   `stable_after` 秒后重置失败计数。
 - **就绪**：`process`（存活）、`tcp`（连接 host:port）、`none`；`bus` 的 TCP
@@ -389,8 +439,9 @@ Ready / Running → Stopping → Stopped
 | 服务 | 说明 |
 | --- | --- |
 | `bus` | 管理 RabbitMQ、vhost/用户/权限配置，可选 AMQP TCP 代理 |
+| `registry` | 工具运行时注册中心：租约、心跳、目录版本与 `catalog.changed` 广播 |
 | `session` | SQLite（WAL）会话持久化，独立进程、支持重启后恢复 |
-| `agent` | 模型推理 + 工具注册中心，本身不保存会话正文；加载历史时自愈悬空 `tool_calls`，未知工具立即失败 |
+| `agent` | 模型推理 + 工具目录缓存，本身不保存会话正文；加载历史时自愈悬空 `tool_calls`，未知工具立即失败 |
 | `webui` | FastAPI + 静态单页 Chat UI，WebSocket 实时进度，托管在 supervisor 中 |
 | `clock` / `echo` / `text_stats` | 基础工具 |
 | `read_file` / `write_file` / `edit_file` | 文件读写与精确替换 |
@@ -443,7 +494,17 @@ uv run pytest -q
 
 ## 事件协议
 
-事件名是固定常量：`tool.register` / `tool.heartbeat` / `tool.unregister` /
+事件契约按域拥有，放在两个轻量契约包里：
+
+- `contracts/tool` → `blue-contracts-tool`：`tool.*` / `catalog.*`
+- `contracts/session` → `blue-contracts-session`：`session.*`
+
+每个包导出 `EVENTS`（`tuple[type[EventDeclaration], ...]`），并在
+`contract.infd` 中声明元数据；服务通过 `BusRuntime(events=...)` 只注册自己需要
+的事件，不再维护全局 `ALL_EVENTS`。
+契约包只依赖 `pydantic` / `infinity_bus`，不依赖 `blue` 或任何服务实现。
+
+固定事件名：`tool.register` / `tool.heartbeat` / `tool.unregister` /
 `catalog.changed` / `tool.call` / `tool.result` / `catalog.query` /
 `catalog.reply` / `session.prompt` / `session.reply` / `session.stream` /
 `session.cancel` / `session.cancel.reply` /
@@ -454,3 +515,5 @@ uv run pytest -q
 
 多目标/多实例靠载荷字段区分：`tool.call.tool`、`worker_id`、
 `session_id + request_id`。多部署隔离用 RabbitMQ vhost，不要编码进事件名。
+
+设计细节与迁移阶段见 [`docs/event-contracts.md`](docs/event-contracts.md)。

@@ -4,8 +4,14 @@ from __future__ import annotations
 
 import json
 
-from blue_service_agent.history import sanitize_history
+from blue_service_agent.history import (
+    STOPPED_NOTE,
+    interrupted_reply,
+    interrupted_step_messages,
+    sanitize_history,
+)
 from infinity_agent import FunctionCall, Message, MessageRole, ToolCall
+from infinity_agent.clients import TextChunk, ThinkingChunk
 
 
 def _call(call_id: str, name: str = "echo") -> ToolCall:
@@ -145,3 +151,58 @@ def test_sanitize_does_not_mutate_input() -> None:
     sanitize_history(history)
 
     assert history == original
+
+
+def test_interrupted_reply_marks_partial_text() -> None:
+    """中断时已流出的文本落成一条带标记的消息。"""
+    message = interrupted_reply([TextChunk(text="半截"), TextChunk(text="回答")])
+
+    assert message is not None
+    assert isinstance(message.content, str)
+    assert message.content.startswith("半截回答")
+    assert message.content.endswith(STOPPED_NOTE)
+
+
+def test_interrupted_reply_keeps_thinking_with_placeholder_content() -> None:
+    """只有思考内容时也要给出非空正文，否则界面上看不见这条消息。"""
+    message = interrupted_reply([ThinkingChunk(text=" 想了一下 ")])
+
+    assert message is not None
+    assert message.content == STOPPED_NOTE
+    assert message.reasoning_content == " 想了一下 "
+
+
+def test_interrupted_reply_is_none_when_nothing_streamed() -> None:
+    """一个字都没流出来时不该落库（幽灵消息的根源）。"""
+    assert interrupted_reply([]) is None
+    assert interrupted_reply([TextChunk(text="   ")]) is None
+
+
+def test_interrupted_step_keeps_only_finished_calls() -> None:
+    """只保留已跑完的调用与结果，未执行的调用整条丢弃。"""
+    assistant = Message.assistant(
+        content="先查两件事",
+        tool_calls=[_call("c1"), _call("c2")],
+    )
+    done = Message.tool(content="ok", tool_call_id="c1")
+
+    messages = interrupted_step_messages(assistant, [done])
+
+    assert [message.role for message in messages] == [
+        MessageRole.ASSISTANT,
+        MessageRole.TOOL,
+    ]
+    stopped = messages[0]
+    assert stopped.tool_calls is not None
+    assert [call.id for call in stopped.tool_calls] == ["c1"]
+    assert isinstance(stopped.content, str)
+    assert stopped.content.endswith(STOPPED_NOTE)
+    assert messages[1].tool_call_id == "c1"
+
+
+def test_interrupted_step_without_progress_commits_nothing() -> None:
+    """既无文本也无已完成调用：整步丢弃，不产生空壳消息。"""
+    assistant = Message.assistant(tool_calls=[_call("c1")])
+
+    assert interrupted_step_messages(assistant, []) == []
+    assert interrupted_step_messages(Message.assistant(content="   "), []) == []

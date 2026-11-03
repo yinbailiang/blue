@@ -5,6 +5,7 @@ description = "分布式 Agent 系统的控制面与共享 SDK"
 readme = "README.md"
 requires-python = ">=3.14"
 dependencies = [
+    "blue-contracts-tool",
     "infinity-agent>=0.2.1",
     "infinity-agent-kit>=1.0.0",
     "infinity-bus[templates]>=6.0.0",
@@ -24,10 +25,15 @@ module-root = "src"
 source-include = ["py.typed"]
 
 [tool.uv.workspace]
-members = ["services/*"]
+members = ["contracts/*", "services/*"]
+
+[tool.uv.sources]
+blue-contracts-session = { workspace = true }
+blue-contracts-tool = { workspace = true }
 
 [dependency-groups]
 dev = [
+    "blue-contracts-session",
     "httpx>=0.28.0",
     "pyright>=1.1.414",
     "pytest>=9.2.0",
@@ -48,6 +54,8 @@ ignore = ["RUF001", "RUF002", "RUF003"]
 include = ["src", "services", "tests"]
 extraPaths = [
     "src",
+    "contracts/tool/src",
+    "contracts/session/src",
     "services/agent/src",
     "services/bus/src",
     "services/chat/src",
@@ -56,6 +64,7 @@ extraPaths = [
     "services/echo/src",
     "services/inspect/src",
     "services/read_file/src",
+    "services/registry/src",
     "services/session/src",
     "services/shell/src",
     "services/text_stats/src",

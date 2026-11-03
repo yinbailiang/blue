@@ -7,6 +7,7 @@ service {
   package = "blue-service-chat"
   module = "blue_service_chat"
   depends_on = ["bus", "agent"]
+  depends_contracts = ["session"]
   restart = "never"
   stop_timeout = 5.0
   startup_timeout = 10.0

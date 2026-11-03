@@ -3,9 +3,9 @@
 from __future__ import annotations
 
 from blue_service_agent.aggregate import AgentAggregate
-from blue_service_agent.config import AgentConfig, RegistryConfig
+from blue_service_agent.config import AgentConfig
 
-__all__ = ["AgentAggregate", "AgentConfig", "RegistryConfig", "main"]
+__all__ = ["AgentAggregate", "AgentConfig", "main"]
 
 CONFIG_MODEL = AgentConfig
 """契约测试使用的运行时配置模型。"""

@@ -4,13 +4,7 @@ from __future__ import annotations
 
 from typing import Protocol
 
-from infinity_agent import Message
-from infinity_bus import EventBus
-from infinity_bus.templates.request import request
-
-from blue.errors import BlueError
-from blue.messages import encode_messages
-from blue.protocol import (
+from blue_contracts_session import (
     SessionAppendEvent,
     SessionAppendReplyEvent,
     SessionAppendResponse,
@@ -22,6 +16,12 @@ from blue.protocol import (
     SessionUpdateReplyEvent,
     SessionUpdateResponse,
 )
+from infinity_agent import Message
+from infinity_bus import EventBus
+from infinity_bus.templates.request import request
+
+from blue.errors import BlueError
+from blue.messages import encode_messages
 
 __all__ = ["BusSessionGateway", "SessionGateway"]
 

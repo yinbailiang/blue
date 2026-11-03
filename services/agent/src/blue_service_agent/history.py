@@ -18,8 +18,63 @@ import json
 from collections.abc import Iterable
 
 from infinity_agent import Message, MessageRole, ToolCall
+from infinity_agent.clients import StreamChunk, TextChunk, ThinkingChunk
 
-__all__ = ["sanitize_history"]
+__all__ = [
+    "STOPPED_NOTE",
+    "interrupted_reply",
+    "interrupted_step_messages",
+    "sanitize_history",
+]
+
+STOPPED_NOTE = "（已停止）"
+"""中断后追加的标记：让界面上残留的半截回复一眼可辨，而不是看着像正常答复。"""
+
+
+def interrupted_reply(chunks: Iterable[StreamChunk]) -> Message | None:
+    """把中断瞬间已流出的增量整理成一条可落库的 assistant 消息。
+
+    :return: 没流出任何文本或思考内容时返回 ``None``——这种一步都不该落库，
+        否则它会在界面上「看不见但存在」，还会混进后续上下文。
+    """
+    text = ""
+    thinking = ""
+    for chunk in chunks:
+        if isinstance(chunk, TextChunk) and chunk.text:
+            text += chunk.text
+        elif isinstance(chunk, ThinkingChunk) and chunk.text:
+            thinking += chunk.text
+    body = text.strip()
+    if not body and not thinking.strip():
+        return None
+    content = f"{body}\n\n{STOPPED_NOTE}" if body else STOPPED_NOTE
+    return Message.assistant(content=content, reasoning_content=thinking or None)
+
+
+def interrupted_step_messages(
+    assistant: Message, tool_messages: Iterable[Message]
+) -> list[Message]:
+    """整理工具执行阶段被中断时应落库的消息。
+
+    只保留已经跑完的 ``tool_calls`` 及其结果——留下「有调用没结果」的残缺配对
+    会被模型接口以 400 拒收。整步既无文本又无已完成调用时返回空列表，代表
+    这一步整体丢弃。
+
+    :return: 待落库的消息序列（assistant 在前，工具结果按序在后）。
+    """
+    results = list(tool_messages)
+    executed = {message.tool_call_id for message in results}
+    calls = [call for call in (assistant.tool_calls or []) if call.id in executed]
+    content = assistant.content if isinstance(assistant.content, str) else ""
+    reasoning = assistant.reasoning_content
+    body = content.strip()
+    if not calls and not body and not (reasoning or "").strip():
+        return []
+    text = f"{body}\n\n{STOPPED_NOTE}" if body else STOPPED_NOTE
+    stopped = assistant.model_copy(
+        update={"content": text, "tool_calls": calls or None}
+    )
+    return [stopped, *results]
 
 
 def _placeholder(call: ToolCall) -> str:

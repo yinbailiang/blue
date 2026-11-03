@@ -14,6 +14,8 @@ import sys
 import time
 from collections.abc import Sequence
 from contextlib import suppress
+from importlib.metadata import PackageNotFoundError
+from importlib.metadata import version as dist_version
 from pathlib import Path
 from typing import cast
 
@@ -26,6 +28,7 @@ from blue.config import (
     write_runtime_configs,
 )
 from blue.control.logs import LogManager
+from blue.control.model import ActualState, ServiceStatus
 from blue.control.reconciler import Supervisor
 from blue.control.runner import ProcessRunner
 from blue.control.state import StateStore
@@ -152,12 +155,16 @@ def _apply(config_path: str, *, wait: bool, timeout: float) -> int:
 
 
 def _status(config_path: str, *, as_json: bool) -> int:
-    """打印 supervisor 与服务状态。"""
+    """打印 supervisor、服务与契约状态。"""
     desired = _try_load(config_path)
     state_dir = desired.supervisor.state_dir if desired is not None else Path(".blue")
     state = StateStore(state_dir)
     actual = state.read_state()
     running, info = state.supervisor_running()
+
+    service_rows = _service_status_rows(desired, actual)
+    contract_rows = _contract_status_rows(desired, actual)
+    blue_version = _blue_version()
 
     if as_json:
         payload = {
@@ -165,7 +172,19 @@ def _status(config_path: str, *, as_json: bool) -> int:
                 "running": running,
                 "pid": info.pid if info is not None else None,
             },
+            "blue_version": blue_version,
+            "contracts": {
+                name: {
+                    "name": name,
+                    "package": package,
+                    "version": version,
+                    "source_hash": source_hash,
+                    "used_by": [] if used_by == "-" else used_by.split(","),
+                }
+                for name, package, version, source_hash, used_by in contract_rows
+            },
             "state": actual.model_dump(mode="json") if actual is not None else None,
+            "desired_generation": desired.generation if desired is not None else None,
         }
         print(json.dumps(payload, ensure_ascii=False, indent=2))
         return 0
@@ -174,29 +193,133 @@ def _status(config_path: str, *, as_json: bool) -> int:
         print(f"supervisor: running (pid={info.pid})")
     else:
         print("supervisor: stopped")
+    print(f"blue       : {blue_version}")
 
-    if actual is None:
+    if actual is None and desired is None:
         print("尚无状态快照（supervisor 可能未运行）")
         return 0
-    if actual.config_error:
-        print(f"配置错误：{actual.config_error}")
-    print(
-        f"generation={actual.generation[:12]}  "
-        f"updated={_format_time(actual.updated_at)}"
-    )
+    if actual is not None:
+        if actual.config_error:
+            print(f"配置错误：{actual.config_error}")
+        print(
+            f"generation : {actual.generation[:12]}  "
+            f"updated={_format_time(actual.updated_at)}"
+        )
+        if desired is not None and desired.generation != actual.generation:
+            print(
+                f"desired    : {desired.generation[:12]}  "
+                "（配置已变化，执行 blue apply）"
+            )
+        if not actual.services and desired is not None:
+            print("尚无运行快照；显示期望状态")
+    elif desired is not None:
+        print(f"generation : {desired.generation[:12]}  （期望状态）")
+
+    print(f"services   : {len(service_rows)}")
     print(
         f"{'NAME':<18}{'KIND':<8}{'VERSION':<10}{'STATUS':<18}"
         f"{'PID':>8}{'RESTARTS':>10}  MESSAGE"
     )
-    for service in sorted(actual.services.values(), key=lambda item: item.name):
-        pid = str(service.pid) if service.pid is not None else "-"
-        version = service.package_version or "-"
-        message = service.last_error or ""
+    for name, kind, version, status, pid, restarts, message in service_rows:
         print(
-            f"{service.name:<18}{service.kind:<8}{version:<10}{service.status:<18}"
-            f"{pid:>8}{service.restarts:>10}  {message}"
+            f"{name:<18}{kind:<8}{version:<10}{status:<18}"
+            f"{pid:>8}{restarts:>10}  {message}"
         )
+
+    print(f"contracts  : {len(contract_rows)}")
+    if contract_rows:
+        print(f"{'NAME':<18}{'PACKAGE':<26}{'VERSION':<10}{'SOURCE':<14}USED BY")
+        for name, package, version, source_hash, used_by in contract_rows:
+            print(
+                f"{name:<18}{package:<26}{version or '-':<10}"
+                f"{source_hash[:12]:<14}{used_by}"
+            )
     return 0
+
+
+def _blue_version() -> str:
+    """控制面包版本；开发环境下读已安装分布。"""
+    try:
+        return dist_version("blue")
+    except PackageNotFoundError:
+        return "unknown"
+
+
+def _service_status_rows(
+    desired: DesiredState | None, actual: ActualState | None
+) -> list[tuple[str, str, str, str, str, str, str]]:
+    """服务展示行：实际快照优先，缺失时回退到期望状态。"""
+    if actual is not None and actual.services:
+        rows: list[tuple[str, str, str, str, str, str, str]] = []
+        for service in actual.services.values():
+            version = service.package_version
+            if not version and desired is not None:
+                desired_service = desired.services.get(service.name)
+                version = desired_service.package_version if desired_service else ""
+            rows.append(
+                (
+                    service.name,
+                    service.kind,
+                    version or "-",
+                    service.status.value,
+                    str(service.pid) if service.pid is not None else "-",
+                    str(service.restarts),
+                    service.last_error or "",
+                )
+            )
+        return sorted(rows)
+    if desired is None:
+        return []
+    return sorted(
+        (
+            name,
+            service.meta.kind,
+            service.package_version or "-",
+            ServiceStatus.STOPPED.value,
+            "-",
+            "0",
+            "",
+        )
+        for name, service in desired.services.items()
+    )
+
+
+def _contract_status_rows(
+    desired: DesiredState | None, actual: ActualState | None
+) -> list[tuple[str, str, str, str, str]]:
+    """契约展示行：name/package/version/source/used_by。"""
+    usage: dict[str, list[str]] = {}
+    if desired is not None:
+        for service_name, service in desired.services.items():
+            for contract in service.meta.depends_contracts:
+                usage.setdefault(contract, []).append(service_name)
+
+    rows: list[tuple[str, str, str, str, str]] = []
+    if actual is not None and actual.contracts:
+        for contract in actual.contracts.values():
+            used_by = ",".join(sorted(usage.get(contract.name, []))) or "-"
+            rows.append(
+                (
+                    contract.name,
+                    contract.package,
+                    contract.package_version,
+                    contract.source_hash,
+                    used_by,
+                )
+            )
+    elif desired is not None:
+        for contract in desired.contracts.values():
+            used_by = ",".join(sorted(usage.get(contract.meta.name, []))) or "-"
+            rows.append(
+                (
+                    contract.meta.name,
+                    contract.meta.package,
+                    contract.package_version,
+                    contract.source_hash,
+                    used_by,
+                )
+            )
+    return sorted(rows)
 
 
 def _logs(config_path: str, *, name: str, tail: int, follow: bool) -> int:
@@ -262,11 +385,20 @@ def _config_check(config_path: str, *, write: bool) -> int:
         service = desired.services[name]
         meta = service.meta
         deps = ",".join(meta.depends_on) or "-"
+        contracts = ",".join(meta.depends_contracts) or "-"
         version = service.package_version or "-"
         print(
             f"  - {name:<18} kind={meta.kind:<6} restart={meta.restart:<10} "
-            f"deps={deps:<18} version={version:<10} "
+            f"deps={deps:<18} contracts={contracts:<14} version={version:<10} "
             f"config={service.config_hash[:12]}"
+        )
+    print(f"contracts  : {len(desired.contracts)}")
+    for name in sorted(desired.contracts):
+        contract = desired.contracts[name]
+        print(
+            f"  - {name:<18} package={contract.meta.package:<24} "
+            f"version={contract.package_version or '-':<10} "
+            f"source={contract.source_hash[:12]}"
         )
     if write:
         changed = write_runtime_configs(desired, only_changed=False)

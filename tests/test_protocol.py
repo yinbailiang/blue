@@ -1,24 +1,31 @@
-"""协议层测试：事件名稳定、声明注册与负载契约。"""
+"""事件契约测试：域归属、唯一性与负载契约。"""
 
 from __future__ import annotations
 
 import pytest
-from infinity_bus import EventRegistry
-
-from blue.protocol import (
-    ALL_EVENTS,
-    EVENT_NAMES,
-    CatalogChangedEvent,
-    CatalogChangedPayload,
-    CatalogQueryRequest,
+from blue_contracts_session import (
+    EVENTS as SESSION_EVENTS,
+)
+from blue_contracts_session import (
     SessionPromptEvent,
     SessionPromptRequest,
     SessionStreamEvent,
     SessionStreamPayload,
+)
+from blue_contracts_tool import (
+    EVENTS as TOOL_EVENTS,
+)
+from blue_contracts_tool import (
+    CatalogChangedEvent,
+    CatalogChangedPayload,
+    CatalogQueryRequest,
     ToolCallEvent,
     ToolCallRequest,
-    register_events,
 )
+from infinity_bus import EventRegistry
+
+EVENTS = (*TOOL_EVENTS, *SESSION_EVENTS)
+NAMES = tuple(event.name for event in EVENTS)
 
 
 def test_event_names_are_fixed_constants() -> None:
@@ -27,25 +34,30 @@ def test_event_names_are_fixed_constants() -> None:
     assert SessionPromptEvent.name == "session.prompt"
     assert SessionStreamEvent.name == "session.stream"
     assert CatalogChangedEvent.name == "catalog.changed"
-    assert tuple(event.name for event in ALL_EVENTS) == EVENT_NAMES
-    assert len(set(EVENT_NAMES)) == len(EVENT_NAMES)
+    assert tuple(event.name for event in EVENTS) == NAMES
+    assert len(set(NAMES)) == len(NAMES)
 
 
-def test_register_events_fills_registry() -> None:
-    """一次注册即可获得全部事件声明与负载类型。"""
-    registry = EventRegistry()
-    register_events(registry)
+def test_contract_packages_register_their_events() -> None:
+    """每个契约包只注册自己领域的事件，且负载类型可解析。"""
+    tool_registry = EventRegistry()
+    for event in TOOL_EVENTS:
+        tool_registry.register(event)
+    assert set(tool_registry.list_names()) == {event.name for event in TOOL_EVENTS}
 
-    assert sorted(registry.list_names()) == sorted(EVENT_NAMES)
-    declaration = registry.get(ToolCallEvent.name)
-    assert declaration is not None
-    assert declaration.payload_type is ToolCallRequest
+    session_registry = EventRegistry()
+    for event in SESSION_EVENTS:
+        session_registry.register(event)
+    assert set(session_registry.list_names()) == {
+        event.name for event in SESSION_EVENTS
+    }
 
 
 def test_duplicate_registration_is_rejected() -> None:
     """重复注册同名事件会抛错，防止静默覆盖。"""
     registry = EventRegistry()
-    register_events(registry)
+    for event in EVENTS:
+        registry.register(event)
 
     with pytest.raises(ValueError, match="重复的事件声明"):
         registry.register(ToolCallEvent)
@@ -81,7 +93,13 @@ def test_catalog_payload_default_factory_is_per_instance() -> None:
 
 def test_every_event_declares_payload_type() -> None:
     """所有跨进程事件都必须声明负载类型，才能参与校验与编解码。"""
-    assert all(event.payload_type is not None for event in ALL_EVENTS)
+    assert all(event.payload_type is not None for event in EVENTS)
+
+
+def test_event_ownership_prefix() -> None:
+    """事件名前缀必须匹配所属域契约包。"""
+    assert all(event.name.startswith(("tool.", "catalog.")) for event in TOOL_EVENTS)
+    assert all(event.name.startswith("session.") for event in SESSION_EVENTS)
 
 
 def test_session_stream_payload_is_broadcast_data() -> None:

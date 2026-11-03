@@ -6,19 +6,7 @@ import asyncio
 from typing import cast
 
 import pytest
-from blue_service_agent.agent import AgentCore
-from blue_service_agent.catalog import ToolRegistryService
-from blue_service_agent.config import AgentConfig
-from blue_service_echo import echo
-from infinity_agent import FunctionCall, Message, MessageRole, ToolCall
-from infinity_bus import Event, EventBus, EventHandler
-from infinity_bus.templates.request import request
-from pydantic import BaseModel
-from tests.support import ScriptedClient, make_runtime, wait_until
-
-from blue.errors import RuntimeConfigError
-from blue.messages import encode_messages
-from blue.protocol import (
+from blue_contracts_session import (
     SessionPromptEvent,
     SessionPromptRequest,
     SessionReplyEvent,
@@ -27,6 +15,18 @@ from blue.protocol import (
     SessionStreamEvent,
     SessionStreamPayload,
 )
+from blue_service_agent.agent import AgentCore
+from blue_service_agent.config import AgentConfig
+from blue_service_echo import echo
+from blue_service_registry import ToolRegistryService
+from infinity_agent import FunctionCall, Message, MessageRole, ToolCall
+from infinity_bus import Event, EventBus, EventHandler
+from infinity_bus.templates.request import request
+from pydantic import BaseModel
+from tests.support import ScriptedClient, make_runtime, wait_until
+
+from blue.errors import RuntimeConfigError
+from blue.messages import encode_messages
 from blue.transport import MemoryFanout
 from blue.worker import ToolWorker
 

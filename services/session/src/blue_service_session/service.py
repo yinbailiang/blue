@@ -8,10 +8,7 @@ import logging
 import time
 from typing import Protocol
 
-from infinity_bus import Event, EventBus, EventHandler
-from pydantic import BaseModel
-
-from blue.protocol import (
+from blue_contracts_session import (
     SessionAppendEvent,
     SessionAppendReplyEvent,
     SessionAppendRequest,
@@ -35,6 +32,9 @@ from blue.protocol import (
     SessionUpdateRequest,
     SessionUpdateResponse,
 )
+from infinity_bus import Event, EventBus, EventHandler
+from pydantic import BaseModel
+
 from blue.transport import BusRuntime
 from blue_service_session.config import SessionConfig
 from blue_service_session.db import (

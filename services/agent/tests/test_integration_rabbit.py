@@ -17,11 +17,18 @@ import uuid
 from urllib.parse import urlparse
 
 import pytest
-from blue_service_agent.catalog import ToolRegistryService
+from blue_contracts_tool import (
+    EVENTS as TOOL_EVENTS,
+)
+from blue_contracts_tool import (
+    ToolCallEvent,
+    ToolCallResult,
+    ToolResultEvent,
+)
 from blue_service_echo import echo
+from blue_service_registry import ToolRegistryService
 from infinity_bus.templates.request import request
 
-from blue.protocol import ToolCallEvent, ToolCallResult, ToolResultEvent
 from blue.transport import RabbitRuntime
 from blue.worker import ToolWorker
 
@@ -58,14 +65,17 @@ async def _rabbit_roundtrip() -> None:
     registry_runtime = RabbitRuntime(
         url=RABBIT_URL,
         member_id=f"registry.{suffix}",
+        events=TOOL_EVENTS,
     )
     worker_runtime = RabbitRuntime(
         url=RABBIT_URL,
         member_id=f"tool.{suffix}",
+        events=TOOL_EVENTS,
     )
     client_runtime = RabbitRuntime(
         url=RABBIT_URL,
         member_id=f"client.{suffix}",
+        events=TOOL_EVENTS,
     )
     registry = ToolRegistryService(
         runtime=registry_runtime, ttl=5.0, sweep_interval=0.5

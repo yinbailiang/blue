@@ -7,6 +7,13 @@ from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 from typing import Any
 
+from blue_contracts_session import (
+    SessionInfo,
+    SessionReplyResponse,
+    SessionSnapshot,
+    SessionStreamPayload,
+)
+from blue_contracts_tool import CatalogQueryResponse
 from blue_service_webui.app import create_app
 from blue_service_webui.backend import ServiceView, SystemView
 from blue_service_webui.config import WebUIConfig
@@ -14,13 +21,6 @@ from infinity_agent import Message, ToolDefinition
 from starlette.testclient import TestClient
 
 from blue.messages import encode_message
-from blue.protocol import (
-    CatalogQueryResponse,
-    SessionInfo,
-    SessionReplyResponse,
-    SessionSnapshot,
-    SessionStreamPayload,
-)
 
 
 class FakeBackend:

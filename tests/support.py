@@ -6,6 +6,8 @@ import asyncio
 import types
 from collections.abc import AsyncGenerator, Callable
 
+from blue_contracts_session import EVENTS as SESSION_EVENTS
+from blue_contracts_tool import EVENTS as TOOL_EVENTS
 from infinity_agent import (
     DoneChunk,
     FinishChunk,
@@ -22,7 +24,11 @@ from blue.transport import MemoryFanout, MemoryRuntime
 
 def make_runtime(hub: MemoryFanout, member_id: str) -> MemoryRuntime:
     """在共享 hub 上创建一个进程内总线成员。"""
-    return MemoryRuntime(hub=hub, member_id=member_id)
+    return MemoryRuntime(
+        hub=hub,
+        member_id=member_id,
+        events=(*TOOL_EVENTS, *SESSION_EVENTS),
+    )
 
 
 class ScriptedClient(LLMClient):

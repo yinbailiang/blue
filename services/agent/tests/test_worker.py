@@ -5,14 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 
-from blue_service_agent.catalog import ToolRegistryService
-from blue_service_echo import echo
-from blue_service_shell import run_shell
-from blue_service_text_stats import text_stats
-from infinity_bus.templates.request import request
-from tests.support import make_runtime, wait_until
-
-from blue.protocol import (
+from blue_contracts_tool import (
     CatalogQueryEvent,
     CatalogQueryResponse,
     CatalogReplyEvent,
@@ -20,6 +13,13 @@ from blue.protocol import (
     ToolCallResult,
     ToolResultEvent,
 )
+from blue_service_echo import echo
+from blue_service_registry import ToolRegistryService
+from blue_service_shell import run_shell
+from blue_service_text_stats import text_stats
+from infinity_bus.templates.request import request
+from tests.support import make_runtime, wait_until
+
 from blue.transport import MemoryFanout
 from blue.worker import ToolWorker
 

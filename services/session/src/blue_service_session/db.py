@@ -11,11 +11,11 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import aiosqlite
+from blue_contracts_session import SessionInfo
 from infinity_agent import Message
 
 from blue.errors import BlueError
 from blue.messages import encode_message
-from blue.protocol import SessionInfo
 
 __all__ = [
     "SessionDatabase",

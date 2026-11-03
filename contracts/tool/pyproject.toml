@@ -1,0 +1,19 @@
+[project]
+name = "blue-contracts-tool"
+version = "0.1.0"
+description = "blue 工具与目录领域的事件契约"
+requires-python = ">=3.14"
+dependencies = [
+    "infinity-agent>=0.2.1",
+    "infinity-bus[templates]>=6.0.0",
+    "pydantic>=2",
+]
+
+[build-system]
+requires = ["uv_build>=0.9.0,<0.14"]
+build-backend = "uv_build"
+
+[tool.uv.build-backend]
+module-name = "blue_contracts_tool"
+module-root = "src"
+source-include = ["py.typed"]

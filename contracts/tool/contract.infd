@@ -1,0 +1,6 @@
+contract {
+  name = "tool"
+  package = "blue-contracts-tool"
+  module = "blue_contracts_tool"
+  description = "工具与目录领域事件契约"
+}

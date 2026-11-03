@@ -14,7 +14,8 @@ service {
   kind = "agent"
   package = "blue-service-agent"
   module = "blue_service_agent"
-  depends_on = ["bus", "session"]
+  depends_on = ["bus", "session", "registry"]
+  depends_contracts = ["tool", "session"]
   restart = "always"
   stop_timeout = 15.0
   startup_timeout = 30.0

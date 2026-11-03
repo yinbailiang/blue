@@ -7,6 +7,7 @@ service {
   package = "blue-service-write-file"
   module = "blue_service_write_file"
   depends_on = ["bus"]
+  depends_contracts = ["tool"]
   restart = "always"
   stop_timeout = 5.0
   startup_timeout = 30.0

@@ -1,0 +1,43 @@
+"""工具与目录领域的事件契约。"""
+
+from blue_contracts_tool.events import (
+    EVENTS,
+    CatalogChangedEvent,
+    CatalogChangedPayload,
+    CatalogQueryEvent,
+    CatalogQueryRequest,
+    CatalogQueryResponse,
+    CatalogReplyEvent,
+    ToolCallEvent,
+    ToolCallRequest,
+    ToolCallResult,
+    ToolDefinition,
+    ToolHeartbeatEvent,
+    ToolHeartbeatPayload,
+    ToolRegisterEvent,
+    ToolRegisterPayload,
+    ToolResultEvent,
+    ToolUnregisterEvent,
+    ToolUnregisterPayload,
+)
+
+__all__ = [
+    "EVENTS",
+    "CatalogChangedEvent",
+    "CatalogChangedPayload",
+    "CatalogQueryEvent",
+    "CatalogQueryRequest",
+    "CatalogQueryResponse",
+    "CatalogReplyEvent",
+    "ToolCallEvent",
+    "ToolCallRequest",
+    "ToolCallResult",
+    "ToolDefinition",
+    "ToolHeartbeatEvent",
+    "ToolHeartbeatPayload",
+    "ToolRegisterEvent",
+    "ToolRegisterPayload",
+    "ToolResultEvent",
+    "ToolUnregisterEvent",
+    "ToolUnregisterPayload",
+]

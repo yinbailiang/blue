@@ -1,10 +1,11 @@
-"""期望状态加载：编译 ``blue.infd``，合并服务元数据与配置实例。
+"""期望状态加载：编译 ``blue.infd``，合并服务元数据与契约元数据。
 
 配置模型：
 
 - ``blue.infd`` 顶层键 = 服务名，值是 ``ServiceTemplate(...)`` 的实例；
 - ``supervisor`` 是唯一保留的非服务顶层键；
 - 每个服务的元数据来自 ``services/<name>/service.infd`` 的 ``service`` 块；
+- 每个契约包的元数据来自 ``contracts/<name>/contract.infd`` 的 ``contract`` 块。
 - supervisor 把服务配置写入 ``services/<name>/service_runtime_config.json``。
 """
 
@@ -14,6 +15,7 @@ import hashlib
 import json
 import os
 import tomllib
+from collections.abc import Iterable
 from decimal import Decimal
 from pathlib import Path
 from typing import Any, Literal, cast
@@ -22,6 +24,8 @@ from infinity_data import CompilationResult, SandboxConfig, Severity, load
 from pydantic import ValidationError
 
 from blue.control.model import (
+    ContractMeta,
+    DesiredContract,
     DesiredService,
     DesiredState,
     ServiceMeta,
@@ -35,6 +39,7 @@ __all__ = [
     "SECRET_FILES",
     "digest_package",
     "load_desired",
+    "read_package_name",
     "read_package_version",
     "redact_state",
     "remove_runtime_config",
@@ -69,6 +74,7 @@ def load_desired(path: str | Path = DEFAULT_CONFIG_PATH) -> DesiredState:
 
     value = result.value
     supervisor = _load_supervisor(value.get("supervisor"), base_dir)
+    contracts = _load_contracts(base_dir)
 
     services: dict[str, DesiredService] = {}
     for name, config in value.items():
@@ -81,13 +87,15 @@ def load_desired(path: str | Path = DEFAULT_CONFIG_PATH) -> DesiredState:
         services[name] = _load_service(name, cast(dict[str, Any], config), base_dir)
 
     _validate_dependencies(services)
+    _validate_contract_dependencies(services, contracts)
     bus_url, bus_transport = _bus_endpoint(services)
     return DesiredState(
-        generation=_generation(supervisor, services),
+        generation=_generation(supervisor, services, contracts),
         config_path=config_path,
         base_dir=base_dir,
         supervisor=supervisor,
         services=services,
+        contracts=contracts,
         bus_url=bus_url,
         bus_transport=bus_transport,
     )
@@ -182,8 +190,24 @@ def read_package_version(pyproject: Path) -> str:
     return version if isinstance(version, str) else ""
 
 
-def scan_package(service_dir: Path) -> tuple[tuple[str, int, int], ...]:
-    """列出参与源码指纹的文件：``pyproject.toml`` 与 ``src/**/*.py``。
+def read_package_name(pyproject: Path) -> str:
+    """读取 ``pyproject.toml`` 中声明的包名。"""
+    try:
+        with pyproject.open("rb") as handle:
+            data = tomllib.load(handle)
+    except OSError, tomllib.TOMLDecodeError:
+        return ""
+    project = data.get("project")
+    if not isinstance(project, dict):
+        return ""
+    name = cast(dict[str, Any], project).get("name")
+    return name if isinstance(name, str) else ""
+
+
+def scan_package(
+    service_dir: Path, *, extra_files: Iterable[str] = ()
+) -> tuple[tuple[str, int, int], ...]:
+    """列出参与源码指纹的文件：``pyproject.toml``、额外文件与 ``src/**/*.py``。
 
     只做 ``stat``，供调谐循环低成本判断「可能变了」；确认内容是否真的变化
     交给 :func:`digest_package`。
@@ -196,6 +220,14 @@ def scan_package(service_dir: Path) -> tuple[tuple[str, int, int], ...]:
         pass
     else:
         entries.append(("pyproject.toml", stat.st_size, stat.st_mtime_ns))
+
+    for name in extra_files:
+        path = service_dir / name
+        try:
+            stat = path.stat()
+        except OSError:
+            continue
+        entries.append((name, stat.st_size, stat.st_mtime_ns))
 
     src = service_dir / "src"
     if not src.is_dir():
@@ -250,6 +282,14 @@ def render_state(desired: DesiredState, *, redact: bool = True) -> dict[str, Any
             "source_hash": service.source_hash,
             "config_path": str(service.config_path),
         }
+    contracts: dict[str, Any] = {}
+    for name, contract in desired.contracts.items():
+        contracts[name] = {
+            "meta": contract.meta.model_dump(mode="json"),
+            "package_version": contract.package_version,
+            "source_hash": contract.source_hash,
+            "contract_path": str(contract.contract_path),
+        }
     return {
         "generation": desired.generation,
         "config_path": str(desired.config_path),
@@ -257,6 +297,7 @@ def render_state(desired: DesiredState, *, redact: bool = True) -> dict[str, Any
         "supervisor": desired.supervisor.model_dump(mode="json"),
         "bus_url": desired.bus_url,
         "bus_transport": desired.bus_transport,
+        "contracts": contracts,
         "services": services,
     }
 
@@ -281,6 +322,62 @@ def _load_supervisor(raw: object, base_dir: Path) -> SupervisorSettings:
     if not state_dir.is_absolute():
         state_dir = (base_dir / state_dir).resolve()
     return settings.model_copy(update={"state_dir": state_dir})
+
+
+def _load_contracts(base_dir: Path) -> dict[str, DesiredContract]:
+    """加载 ``contracts/*/contract.infd`` 并计算源码指纹。"""
+    root = (base_dir / "contracts").resolve()
+    if not root.is_dir():
+        return {}
+
+    contracts: dict[str, DesiredContract] = {}
+    for directory in sorted(root.iterdir(), key=lambda item: item.name):
+        if not directory.is_dir():
+            continue
+        contract_file = directory / "contract.infd"
+        if not contract_file.is_file():
+            raise ConfigError(
+                f"契约目录 {directory.name!r} 缺少元数据文件：{contract_file}"
+            )
+
+        result = _load_with_env(contract_file, base_dir)
+        if result.has_errors:
+            raise ConfigError(_format_diagnostics(result.diagnostics, contract_file))
+        raw_meta = result.value.get("contract")
+        if not isinstance(raw_meta, dict):
+            raise ConfigError(f"{contract_file} 缺少 contract 元数据块")
+        try:
+            meta = ContractMeta.model_validate(raw_meta)
+        except ValidationError as error:
+            raise ConfigError(
+                f"契约 {directory.name!r} 的 contract 元数据校验失败：{error}"
+            ) from error
+
+        if meta.name != directory.name:
+            raise ConfigError(
+                f"契约名不一致：目录为 {directory.name!r}，"
+                f"{contract_file} 中 contract.name 为 {meta.name!r}"
+            )
+
+        pyproject = directory / "pyproject.toml"
+        if not pyproject.is_file():
+            raise ConfigError(f"契约 {meta.name!r} 缺少 pyproject.toml")
+        actual_package = read_package_name(pyproject)
+        if actual_package and actual_package != meta.package:
+            raise ConfigError(
+                f"契约 {meta.name!r} 包名不一致：contract.package 为 "
+                f"{meta.package!r}，pyproject.toml 为 {actual_package!r}"
+            )
+
+        entries = scan_package(directory, extra_files=("contract.infd",))
+        contracts[meta.name] = DesiredContract(
+            meta=meta,
+            package_version=read_package_version(pyproject),
+            source_hash=digest_package(directory, entries),
+            contract_dir=directory,
+            contract_path=contract_file,
+        )
+    return contracts
 
 
 def _load_service(name: str, config: dict[str, Any], base_dir: Path) -> DesiredService:
@@ -326,6 +423,19 @@ def _validate_dependencies(services: dict[str, DesiredService]) -> None:
     topological_order(services)
 
 
+def _validate_contract_dependencies(
+    services: dict[str, DesiredService], contracts: dict[str, DesiredContract]
+) -> None:
+    for name, service in services.items():
+        seen: set[str] = set()
+        for contract in service.meta.depends_contracts:
+            if contract in seen:
+                raise ConfigError(f"服务 {name!r} 重复声明契约依赖 {contract!r}")
+            seen.add(contract)
+            if contract not in contracts:
+                raise ConfigError(f"服务 {name!r} 依赖不存在的契约 {contract!r}")
+
+
 def _bus_endpoint(
     services: dict[str, DesiredService],
 ) -> tuple[str, Literal["rabbit", "memory"]]:
@@ -351,10 +461,20 @@ def _bus_endpoint(
 
 
 def _generation(
-    supervisor: SupervisorSettings, services: dict[str, DesiredService]
+    supervisor: SupervisorSettings,
+    services: dict[str, DesiredService],
+    contracts: dict[str, DesiredContract],
 ) -> str:
     payload = {
         "supervisor": supervisor.model_dump(mode="json"),
+        "contracts": {
+            name: {
+                "meta": contract.meta.model_dump(mode="json"),
+                "package_version": contract.package_version,
+                "source_hash": contract.source_hash,
+            }
+            for name, contract in sorted(contracts.items())
+        },
         "services": {
             name: {
                 "meta": service.meta.model_dump(mode="json"),
@@ -369,7 +489,7 @@ def _generation(
 
 
 def _load_with_env(path: Path, workspace_root: Path) -> CompilationResult:
-    """编译配置，并按需授权 ``!env`` 变量与 ``services/**`` 模板。"""
+    """编译配置，并按需授权 ``!env`` 变量、``services/**`` 与 ``contracts/**``。"""
     patterns = _sandbox_patterns(workspace_root)
     strict = load(
         path,
@@ -402,7 +522,13 @@ SECRET_FILES = ("secrets.toml", "secrets.json")
 
 def _sandbox_patterns(workspace_root: Path) -> list[str]:
     services = (workspace_root / "services").resolve()
-    patterns = [str(services / "**"), "services/**"]
+    contracts = (workspace_root / "contracts").resolve()
+    patterns = [
+        str(services / "**"),
+        "services/**",
+        str(contracts / "**"),
+        "contracts/**",
+    ]
     for name in SECRET_FILES:
         patterns.append(str(workspace_root / name))
         patterns.append(name)

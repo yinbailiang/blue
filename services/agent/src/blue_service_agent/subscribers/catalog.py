@@ -4,11 +4,10 @@ from __future__ import annotations
 
 from typing import Protocol
 
+from blue_contracts_tool import CatalogChangedEvent, CatalogChangedPayload
 from infinity_agent import ToolDefinition
 from infinity_bus import Event, EventBus, EventHandler
 from pydantic import BaseModel
-
-from blue.protocol import CatalogChangedEvent, CatalogChangedPayload
 
 __all__ = ["CatalogBackend", "CatalogChangedHandler"]
 

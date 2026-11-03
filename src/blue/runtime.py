@@ -10,10 +10,12 @@ from __future__ import annotations
 import asyncio
 import os
 import uuid
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from pathlib import Path
 from typing import Any, TypeVar
 
+from blue_contracts_tool import EVENTS as TOOL_EVENTS
+from infinity_bus import EventDeclaration
 from pydantic import BaseModel
 
 from blue.errors import RuntimeConfigError
@@ -82,16 +84,23 @@ def service_name(default: str = "service") -> str:
     return os.environ.get("BLUE_SERVICE_NAME", default)
 
 
-def build_runtime(role: str, url: str | None = None) -> RabbitRuntime:
+def build_runtime(
+    role: str,
+    events: Iterable[type[EventDeclaration]],
+    url: str | None = None,
+) -> RabbitRuntime:
     """创建一个 RabbitMQ 总线成员。
 
     成员 ID 优先使用 supervisor 注入的 ``BLUE_INSTANCE_ID``，保证重启后
     身份可追踪；手工运行时退化为随机短 ID。
+
+    ``events`` 是该成员需要注册的事件声明；每个进程只注册自己生产/消费的事件。
     """
     instance = os.environ.get("BLUE_INSTANCE_ID") or uuid.uuid4().hex[:8]
     return RabbitRuntime(
         url=url or bus_url(),
         member_id=f"{role}.{instance}",
+        events=events,
     )
 
 
@@ -115,7 +124,7 @@ def run_tool(
     """
     lease = ttl if ttl is not None else float(os.environ.get("BLUE_REGISTRY_TTL", "15"))
     worker = ToolWorker(
-        runtime=build_runtime(f"tool.{name}"),
+        runtime=build_runtime(f"tool.{name}", TOOL_EVENTS),
         tool=tool,
         ttl=lease,
     )

@@ -14,17 +14,25 @@ import sys
 from collections.abc import Sequence
 from typing import cast
 
-from infinity_bus.templates.request import request
-
-from blue.errors import BlueError
-from blue.protocol import (
-    CatalogQueryEvent,
-    CatalogQueryResponse,
-    CatalogReplyEvent,
+from blue_contracts_session import (
+    EVENTS as SESSION_EVENTS,
+)
+from blue_contracts_session import (
     SessionStateEvent,
     SessionStateReplyEvent,
     SessionStateResponse,
 )
+from blue_contracts_tool import (
+    EVENTS as TOOL_EVENTS,
+)
+from blue_contracts_tool import (
+    CatalogQueryEvent,
+    CatalogQueryResponse,
+    CatalogReplyEvent,
+)
+from infinity_bus.templates.request import request
+
+from blue.errors import BlueError
 from blue.runtime import build_runtime
 
 __all__ = ["main"]
@@ -50,7 +58,7 @@ def main(argv: Sequence[str] | None = None) -> int:
 
 async def _run(*, bus_url: str | None, what: str, timeout: float) -> int:
     """按目标查询并打印。"""
-    runtime = build_runtime("ui.inspect", url=bus_url)
+    runtime = build_runtime("ui.inspect", (*TOOL_EVENTS, *SESSION_EVENTS), url=bus_url)
     await runtime.start()
     try:
         proxy = runtime.proxy("ui.inspect")

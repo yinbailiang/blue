@@ -10,6 +10,7 @@
 !file p"secrets.toml" as toml import .agent.api_key as agent_api_key, .bus.password as bus_password
 
 !from p"services/bus/service.infd" import ServiceTemplate as BusService
+!from p"services/registry/service.infd" import ServiceTemplate as RegistryService
 !from p"services/session/service.infd" import ServiceTemplate as SessionService
 !from p"services/agent/service.infd" import ServiceTemplate as AgentService
 !from p"services/webui/service.infd" import ServiceTemplate as WebUIService
@@ -43,6 +44,8 @@ bus = BusService(
   user = "guest",
   password = $bus_password,
 )
+
+registry = RegistryService()
 
 session = SessionService()
 

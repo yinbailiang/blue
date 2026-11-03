@@ -23,8 +23,10 @@ from blue.control.desired import (
 from blue.control.health import readiness_target, wait_ready
 from blue.control.logs import LogManager
 from blue.control.model import (
+    ActualContract,
     ActualService,
     ActualState,
+    DesiredContract,
     DesiredService,
     DesiredState,
     ServiceStatus,
@@ -37,6 +39,23 @@ from blue.errors import BlueError, ConfigError
 logger = logging.getLogger(__name__)
 
 __all__ = ["Supervisor", "build_service_env"]
+
+
+def _changed_contracts(
+    previous: dict[str, DesiredContract], current: dict[str, DesiredContract]
+) -> set[str]:
+    """返回新增、移除或内容/元数据发生变化的契约名。"""
+    changed = set(previous) ^ set(current)
+    for name in set(previous) & set(current):
+        old = previous[name]
+        new = current[name]
+        if (
+            old.meta != new.meta
+            or old.package_version != new.package_version
+            or old.source_hash != new.source_hash
+        ):
+            changed.add(name)
+    return changed
 
 
 def build_service_env(
@@ -257,6 +276,21 @@ class Supervisor:
             logger.error("配置重载失败：%s", self._config_error)
             return False
 
+        changed_contracts = _changed_contracts(
+            self._desired.contracts, desired.contracts
+        )
+        if changed_contracts:
+            affected = sorted(
+                name
+                for name, service in desired.services.items()
+                if set(service.meta.depends_contracts) & changed_contracts
+            )
+            logger.info(
+                "契约已变化：%s；将重启：%s",
+                ", ".join(sorted(changed_contracts)),
+                ", ".join(affected) or "无",
+            )
+
         try:
             write_runtime_configs(desired)
         except OSError as error:
@@ -274,6 +308,7 @@ class Supervisor:
                 runtime.desired.meta != service.meta
                 or runtime.desired.config_hash != service.config_hash
                 or runtime.desired.source_hash != service.source_hash
+                or bool(set(service.meta.depends_contracts) & changed_contracts)
             ):
                 runtime.desired = service
                 runtime.restart_pending = True
@@ -517,6 +552,17 @@ class Supervisor:
             updated_at=time.time(),
             config_error=self._config_error,
             services=services,
+            contracts={
+                name: ActualContract(
+                    name=name,
+                    package=contract.meta.package,
+                    module=contract.meta.module,
+                    description=contract.meta.description,
+                    package_version=contract.package_version,
+                    source_hash=contract.source_hash,
+                )
+                for name, contract in self._desired.contracts.items()
+            },
         )
         try:
             self._state.write_state(state)

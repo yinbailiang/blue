@@ -1,0 +1,26 @@
+[project]
+name = "blue-service-registry"
+version = "0.1.0"
+description = "blue 工具运行时注册中心"
+requires-python = ">=3.14"
+dependencies = [
+    "blue",
+    "blue-contracts-tool",
+    "infinity-bus[templates]>=6.0.0",
+    "pydantic>=2",
+]
+
+[tool.uv.sources]
+blue = { workspace = true }
+blue-contracts-tool = { workspace = true }
+
+[build-system]
+requires = ["uv_build>=0.9.0,<0.14"]
+build-backend = "uv_build"
+
+[tool.uv.build-backend]
+module-name = "blue_service_registry"
+module-root = "src"
+
+[project.scripts]
+blue-service-registry = "blue_service_registry:main"

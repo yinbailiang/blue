@@ -13,19 +13,19 @@ from __future__ import annotations
 
 import asyncio
 from abc import ABC, abstractmethod
+from collections.abc import Iterable
 from typing import Literal
 
 from infinity_bus import (
     Event,
     EventBus,
+    EventDeclaration,
     EventHandler,
     EventHandlerRegistry,
     EventQueue,
     EventRegistry,
 )
 from infinity_bus.templates.queues import RabbitFanoutQueue
-
-from blue.protocol import register_events
 
 __all__ = [
     "BusRuntime",
@@ -37,14 +37,23 @@ __all__ = [
 
 
 class BusRuntime(ABC):
-    """总线成员运行时：统一事件注册、处理器注册与生命周期。"""
+    """总线成员运行时：统一事件注册、处理器注册与生命周期。
 
-    def __init__(self, *, member_id: str) -> None:
+    每个成员只注册自己生产/消费的事件声明；不再有全局事件清单。
+    """
+
+    def __init__(
+        self,
+        *,
+        member_id: str,
+        events: Iterable[type[EventDeclaration]],
+    ) -> None:
         if not member_id.strip():
             raise ValueError("member_id 不能为空")
         self._member_id = member_id
         self._events = EventRegistry()
-        register_events(self._events)
+        for event in events:
+            self._events.register(event)
         self._handlers = EventHandlerRegistry()
         self._bus: EventBus | None = None
 
@@ -116,9 +125,10 @@ class RabbitRuntime(BusRuntime):
         *,
         url: str,
         member_id: str,
+        events: Iterable[type[EventDeclaration]],
         strategy: Literal["restart", "offline"] = "restart",
     ) -> None:
-        super().__init__(member_id=member_id)
+        super().__init__(member_id=member_id, events=events)
         self._url = url
         self._strategy: Literal["restart", "offline"] = strategy
         self._queue: RabbitFanoutQueue | None = None
@@ -218,8 +228,9 @@ class MemoryRuntime(BusRuntime):
         *,
         hub: MemoryFanout,
         member_id: str,
+        events: Iterable[type[EventDeclaration]],
     ) -> None:
-        super().__init__(member_id=member_id)
+        super().__init__(member_id=member_id, events=events)
         self._hub = hub
         self._queue: MemoryMemberQueue | None = None
 

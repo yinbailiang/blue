@@ -10,10 +10,7 @@ from __future__ import annotations
 
 from typing import Protocol
 
-from infinity_bus import Event, EventBus, EventHandler
-from pydantic import BaseModel
-
-from blue.protocol import (
+from blue_contracts_session import (
     SessionCancelEvent,
     SessionCancelReplyEvent,
     SessionCancelRequest,
@@ -23,6 +20,8 @@ from blue.protocol import (
     SessionReplyEvent,
     SessionReplyResponse,
 )
+from infinity_bus import Event, EventBus, EventHandler
+from pydantic import BaseModel
 
 __all__ = ["SessionBackend", "SessionHandler"]
 

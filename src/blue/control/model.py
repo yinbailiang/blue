@@ -9,8 +9,11 @@ from typing import Any, Literal
 from pydantic import BaseModel, ConfigDict, Field
 
 __all__ = [
+    "ActualContract",
     "ActualService",
     "ActualState",
+    "ContractMeta",
+    "DesiredContract",
     "DesiredService",
     "DesiredState",
     "ReadinessProbe",
@@ -39,6 +42,9 @@ class ServiceMeta(BaseModel):
         default=(), description="自定义启动命令；为空时使用 uv run"
     )
     depends_on: tuple[str, ...] = Field(default=(), description="依赖的服务名")
+    depends_contracts: tuple[str, ...] = Field(
+        default=(), description="依赖的事件契约名"
+    )
     restart: RestartPolicy = Field(default="on-failure", description="重启策略")
     stop_timeout: float = Field(default=10.0, gt=0, description="优雅停止超时（秒）")
     startup_timeout: float = Field(default=30.0, gt=0, description="启动就绪超时（秒）")
@@ -94,6 +100,29 @@ class DesiredService(BaseModel):
     config_path: Path
 
 
+class ContractMeta(BaseModel):
+    """`contract.infd` 中的契约元数据。"""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    name: str = Field(pattern=r"^[a-z][a-z0-9_]*$", description="契约名 / 目录名")
+    package: str = Field(description="uv workspace 包名")
+    module: str = Field(description="Python 模块名")
+    description: str = Field(default="", description="契约说明")
+
+
+class DesiredContract(BaseModel):
+    """一个契约包：元数据 + 包版本 + 内容指纹。"""
+
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+
+    meta: ContractMeta
+    package_version: str = ""
+    source_hash: str = ""
+    contract_dir: Path
+    contract_path: Path
+
+
 class DesiredState(BaseModel):
     """一次配置编译得到的完整期望状态。"""
 
@@ -104,6 +133,7 @@ class DesiredState(BaseModel):
     base_dir: Path
     supervisor: SupervisorSettings
     services: dict[str, DesiredService]
+    contracts: dict[str, DesiredContract] = Field(default_factory=dict)
     bus_url: str
     bus_transport: Literal["rabbit", "memory"]
 
@@ -145,6 +175,19 @@ class ActualService(BaseModel):
     log_path: Path | None = None
 
 
+class ActualContract(BaseModel):
+    """一个契约包的实际快照（非进程，只用于展示与变更追踪）。"""
+
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+
+    name: str
+    package: str
+    module: str
+    description: str = ""
+    package_version: str = ""
+    source_hash: str = ""
+
+
 class ActualState(BaseModel):
     """supervisor 写入 `.blue/state.json` 的实际状态。"""
 
@@ -157,3 +200,4 @@ class ActualState(BaseModel):
     updated_at: float
     config_error: str | None = None
     services: dict[str, ActualService] = Field(default_factory=dict)
+    contracts: dict[str, ActualContract] = Field(default_factory=dict)

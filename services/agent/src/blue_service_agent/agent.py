@@ -16,6 +16,18 @@ import json
 import logging
 from typing import Any
 
+from blue_contracts_session import (
+    SessionPromptRequest,
+    SessionReplyResponse,
+    SessionStreamEvent,
+    SessionStreamPayload,
+    StreamToolCall,
+)
+from blue_contracts_tool import (
+    ToolCallEvent,
+    ToolCallResult,
+    ToolResultEvent,
+)
 from infinity_agent import Message, StreamChunk, ToolCall, ToolDefinition
 from infinity_agent.clients import (
     DeepSeekConfig,
@@ -33,20 +45,14 @@ from infinity_bus.templates.request import request
 
 from blue.errors import ConfigError
 from blue.messages import decode_messages
-from blue.protocol import (
-    SessionPromptRequest,
-    SessionReplyResponse,
-    SessionStreamEvent,
-    SessionStreamPayload,
-    StreamToolCall,
-    ToolCallEvent,
-    ToolCallResult,
-    ToolResultEvent,
-)
 from blue.transport import BusRuntime
 from blue_service_agent.catalog import ToolCatalogClient
 from blue_service_agent.config import AgentConfig
-from blue_service_agent.history import sanitize_history
+from blue_service_agent.history import (
+    interrupted_reply,
+    interrupted_step_messages,
+    sanitize_history,
+)
 from blue_service_agent.session_gateway import BusSessionGateway, SessionGateway
 from blue_service_agent.subscribers.session import SessionHandler
 
@@ -284,55 +290,47 @@ class AgentCore:
             )
             tools = await self._tools_for(bus_proxy)
             chunks: list[StreamChunk] = []
-            async for chunk in self._require_client().stream_chat(
-                messages,
-                self._request_config(tools),
-            ):
-                chunks.append(chunk)
-                await self._forward_chunk(
-                    bus_proxy, session_id, request_id, steps, chunk
-                )
+            try:
+                async for chunk in self._require_client().stream_chat(
+                    messages,
+                    self._request_config(tools),
+                ):
+                    chunks.append(chunk)
+                    await self._forward_chunk(
+                        bus_proxy, session_id, request_id, steps, chunk
+                    )
+            except asyncio.CancelledError:
+                await self._commit_interrupted_stream(bus_proxy, session_id, chunks)
+                raise
             assistant = self._require_client().chunks_to_message(chunks)
             messages.append(assistant)
-            await self._sessions.append(bus_proxy, session_id, [assistant])
             if isinstance(assistant.content, str) and assistant.content.strip():
                 reply = assistant.content.strip()
             if not assistant.tool_calls:
+                await self._sessions.append(bus_proxy, session_id, [assistant])
                 break
-            for tool_call in assistant.tool_calls:
-                stream_call = StreamToolCall(
-                    id=tool_call.id,
-                    name=tool_call.function.name,
-                    arguments=tool_call.function.arguments,
-                )
-                await self._stream_event(
+            tool_messages: list[Message] = []
+            try:
+                await self._run_tools(
                     bus_proxy,
-                    SessionStreamPayload(
-                        session_id=session_id,
-                        request_id=request_id,
-                        kind="tool_start",
-                        step=steps,
-                        tool_call=stream_call,
-                    ),
+                    session_id,
+                    request_id,
+                    steps,
+                    assistant,
+                    messages,
+                    tools,
+                    tool_messages,
                 )
-                content = await self._invoke_tool(
-                    bus_proxy, session_id, tool_call, tools
+            except asyncio.CancelledError:
+                await self._commit_interrupted_step(
+                    bus_proxy, session_id, assistant, tool_messages
                 )
-                await self._stream_event(
-                    bus_proxy,
-                    SessionStreamPayload(
-                        session_id=session_id,
-                        request_id=request_id,
-                        kind="tool_result",
-                        step=steps,
-                        text=content,
-                        tool_call=stream_call,
-                        success=True,
-                    ),
-                )
-                tool_message = Message.tool(content=content, tool_call_id=tool_call.id)
-                messages.append(tool_message)
-                await self._sessions.append(bus_proxy, session_id, [tool_message])
+                raise
+            # assistant 与其全部工具结果一次提交：
+            # 中断不会卡在「有 tool_calls 没结果」的中间态
+            await self._sessions.append(
+                bus_proxy, session_id, [assistant, *tool_messages]
+            )
         else:
             notice = f"（已达到最大步数 {self._settings.max_steps}，任务可能未完成）"
             reply = f"{reply}\n\n{notice}".strip() if reply else notice
@@ -347,6 +345,75 @@ class AgentCore:
             ),
         )
         return reply, steps
+
+    async def _run_tools(
+        self,
+        bus_proxy: EventBus.Proxy,
+        session_id: str,
+        request_id: str,
+        step: int,
+        assistant: Message,
+        messages: list[Message],
+        tools: list[ToolDefinition],
+        tool_messages: list[Message],
+    ) -> None:
+        """按序执行 assistant 消息里的工具调用，结果累积到 ``tool_messages``。
+
+        结果不即时落库：与 assistant 消息一起提交，中断时不会留下没有结果的
+        ``tool_call``。``tool_messages`` 由调用方持有，中断后仍能拿到已完成的部分。
+        """
+        for tool_call in assistant.tool_calls or []:
+            stream_call = StreamToolCall(
+                id=tool_call.id,
+                name=tool_call.function.name,
+                arguments=tool_call.function.arguments,
+            )
+            await self._stream_event(
+                bus_proxy,
+                SessionStreamPayload(
+                    session_id=session_id,
+                    request_id=request_id,
+                    kind="tool_start",
+                    step=step,
+                    tool_call=stream_call,
+                ),
+            )
+            content = await self._invoke_tool(bus_proxy, session_id, tool_call, tools)
+            await self._stream_event(
+                bus_proxy,
+                SessionStreamPayload(
+                    session_id=session_id,
+                    request_id=request_id,
+                    kind="tool_result",
+                    step=step,
+                    text=content,
+                    tool_call=stream_call,
+                    success=True,
+                ),
+            )
+            tool_message = Message.tool(content=content, tool_call_id=tool_call.id)
+            messages.append(tool_message)
+            tool_messages.append(tool_message)
+
+    async def _commit_interrupted_stream(
+        self, bus_proxy: EventBus.Proxy, session_id: str, chunks: list[StreamChunk]
+    ) -> None:
+        """生成阶段被中断：落库已经流出的内容；什么都没流出就一条都不写。"""
+        message = interrupted_reply(chunks)
+        if message is not None:
+            await self._sessions.append(bus_proxy, session_id, [message])
+
+    async def _commit_interrupted_step(
+        self,
+        bus_proxy: EventBus.Proxy,
+        session_id: str,
+        assistant: Message,
+        tool_messages: list[Message],
+    ) -> None:
+        """工具执行阶段被中断：只落库已完成的调用与结果。"""
+        messages = interrupted_step_messages(assistant, tool_messages)
+        if messages:
+            await self._sessions.append(bus_proxy, session_id, messages)
 
     async def _forward_chunk(
         self,

@@ -16,7 +16,41 @@ from blue.control.state import StateStore
 FIXTURE = Path(__file__).parent / "fixtures" / "fake_service.py"
 
 
-def _write_workspace(root: Path, value: str) -> Path:
+def _write_workspace(root: Path, value: str, *, contract_value: str = "a") -> Path:
+    contract_dir = root / "contracts" / "demo"
+    (contract_dir / "src" / "demo_contracts").mkdir(parents=True, exist_ok=True)
+    (contract_dir / "contract.infd").write_text(
+        """
+contract {
+  name = "demo"
+  package = "demo-contracts"
+  module = "demo_contracts"
+  description = "demo contract"
+}
+""",
+        encoding="utf-8",
+    )
+    (contract_dir / "pyproject.toml").write_text(
+        """
+[project]
+name = "demo-contracts"
+version = "0.1.0"
+requires-python = ">=3.14"
+
+[build-system]
+requires = ["uv_build>=0.9.0,<0.14"]
+build-backend = "uv_build"
+
+[tool.uv.build-backend]
+module-name = "demo_contracts"
+module-root = "src"
+""",
+        encoding="utf-8",
+    )
+    (contract_dir / "src" / "demo_contracts" / "__init__.py").write_text(
+        f'VALUE = "{contract_value}"\n', encoding="utf-8"
+    )
+
     service_dir = root / "services" / "demo"
     service_dir.mkdir(parents=True, exist_ok=True)
     command = [sys.executable, str(FIXTURE), "--mode", "sleep"]
@@ -34,6 +68,7 @@ service {{
   module = "demo"
   command = [{rendered}]
   depends_on = []
+  depends_contracts = ["demo"]
   restart = "always"
   stop_timeout = 2.0
   startup_timeout = 2.0
@@ -76,9 +111,67 @@ async def _wait_ready(state: StateStore, timeout: float = 5.0) -> None:
     raise AssertionError("服务未在超时内就绪")
 
 
+async def _wait_ready_pid(
+    state: StateStore, old_pid: int | None, timeout: float = 5.0
+) -> None:
+    """等待服务以新 PID 进入 Ready（证明发生了重启）。"""
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout
+    while loop.time() < deadline:
+        snapshot = state.read_state()
+        service = snapshot.services.get("demo") if snapshot is not None else None
+        if (
+            service is not None
+            and service.status is ServiceStatus.READY
+            and service.pid != old_pid
+        ):
+            return
+        await asyncio.sleep(0.05)
+    raise AssertionError("服务未在超时内以新 PID 就绪")
+
+
 def test_reload_rewrites_config_and_restarts(tmp_path: Path) -> None:
     """修改 blue.infd 后 reload 会重写运行时配置并重启服务。"""
     asyncio.run(_reload(tmp_path))
+
+
+def test_contract_change_restarts_dependent_service(tmp_path: Path) -> None:
+    """契约源码变化时，声明 depends_contracts 的服务会被重启。"""
+    asyncio.run(_contract_reload(tmp_path))
+
+
+async def _contract_reload(tmp_path: Path) -> None:
+    config = _write_workspace(tmp_path, "a", contract_value="v1")
+    before = load_desired(config)
+    assert set(before.contracts) == {"demo"}
+
+    state = StateStore(before.supervisor.state_dir)
+    logs = LogManager(state.log_dir)
+    runner = ProcessRunner(logs, uv_frozen=False)
+    supervisor = Supervisor(
+        config_path=config,
+        desired=before,
+        state=state,
+        logs=logs,
+        runner=runner,
+    )
+    await supervisor.start()
+    try:
+        await _wait_ready(state)
+        snapshot = state.read_state()
+        assert snapshot is not None
+        old_pid = snapshot.services["demo"].pid
+
+        _write_workspace(tmp_path, "a", contract_value="v2")
+        after = load_desired(config)
+        assert (
+            after.contracts["demo"].source_hash != before.contracts["demo"].source_hash
+        )
+
+        assert await supervisor.reload() is True
+        await _wait_ready_pid(state, old_pid)
+    finally:
+        await supervisor.stop()
 
 
 async def _reload(tmp_path: Path) -> None:

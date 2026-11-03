@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-from blue_service_agent.catalog import ToolRegistryState
-from infinity_agent import ToolDefinition
+from blue_contracts_tool import ToolDefinition
+from blue_service_registry import ToolRegistryState
 
 
 def _tool(name: str, description: str = "") -> ToolDefinition:

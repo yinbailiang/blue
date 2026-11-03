@@ -1,0 +1,16 @@
+
+~ServiceTemplate {
+}
+
+service {
+  name = "registry"
+  kind = "infra"
+  package = "blue-service-registry"
+  module = "blue_service_registry"
+  depends_on = ["bus"]
+  depends_contracts = ["tool"]
+  restart = "always"
+  stop_timeout = 5.0
+  startup_timeout = 15.0
+  readiness = "process"
+}

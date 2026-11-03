@@ -1,37 +1,18 @@
-"""总线协议：**固定**的跨进程事件名与负载模型。
+"""会话领域的事件契约。
 
-事件名是稳定常量（如 ``tool.call``），不随配置变化——运维查看 broker、抓包、
-写告警时可以直接引用；代码里通过事件声明类的 ``name`` 使用，可被 IDE 跳转与
-``grep`` 直接定位。
-
-多目标/多实例靠**载荷字段**区分，接收方自行过滤：
-
-- ``tool.call`` → ``ToolCallRequest.tool``（工具进程只响应对应工具名）；
-- RPC 请求/响应 → ``session_id`` + ``request_id``（``infinity_bus`` 自动注入并匹配）；
-- 工具进程生命周期 → ``worker_id``。
-
-若需要在一套 broker 上隔离多套部署，使用 RabbitMQ 的 vhost / 用户隔离，
-不要把隔离维度编码进事件名。
+本模块只依赖 ``pydantic`` / ``infinity_bus``，不依赖 ``blue`` 或任何服务实现。
 """
 
 from __future__ import annotations
 
 from typing import Any, Literal
 
-from infinity_agent import ToolDefinition
-from infinity_bus import EventDeclaration, EventRegistry
+from infinity_bus import EventDeclaration
 from infinity_bus.templates.request import RequestProtocol, ResponseProtocol
 from pydantic import BaseModel, Field
 
 __all__ = [
-    "ALL_EVENTS",
-    "EVENT_NAMES",
-    "CatalogChangedEvent",
-    "CatalogChangedPayload",
-    "CatalogQueryEvent",
-    "CatalogQueryRequest",
-    "CatalogQueryResponse",
-    "CatalogReplyEvent",
+    "EVENTS",
     "SessionAppendEvent",
     "SessionAppendReplyEvent",
     "SessionAppendRequest",
@@ -65,147 +46,7 @@ __all__ = [
     "SessionUpdateRequest",
     "SessionUpdateResponse",
     "StreamToolCall",
-    "ToolCallEvent",
-    "ToolCallRequest",
-    "ToolCallResult",
-    "ToolHeartbeatEvent",
-    "ToolHeartbeatPayload",
-    "ToolRegisterEvent",
-    "ToolRegisterPayload",
-    "ToolResultEvent",
-    "ToolUnregisterEvent",
-    "ToolUnregisterPayload",
-    "register_events",
 ]
-
-
-# ---------------------------------------------------------------------------
-# 工具注册中心
-# ---------------------------------------------------------------------------
-
-
-class ToolRegisterPayload(BaseModel):
-    """工具进程上线：把自己登记到注册中心。"""
-
-    worker_id: str = Field(description="工具进程唯一标识")
-    tool: ToolDefinition = Field(description="工具定义（由函数签名自动推断）")
-    ttl: float = Field(description="租约时长（秒），超时未续约即被清除")
-
-
-class ToolHeartbeatPayload(BaseModel):
-    """工具进程续约。"""
-
-    worker_id: str = Field(description="工具进程唯一标识")
-
-
-class ToolUnregisterPayload(BaseModel):
-    """工具进程主动下线。"""
-
-    worker_id: str = Field(description="工具进程唯一标识")
-
-
-class CatalogChangedPayload(BaseModel):
-    """工具目录变更广播。"""
-
-    version: int = Field(description="目录版本号，单调递增")
-    tools: list[ToolDefinition] = Field(
-        default_factory=list[ToolDefinition], description="当前可用工具定义"
-    )
-
-
-class ToolRegisterEvent(EventDeclaration):
-    """工具进程自我登记。"""
-
-    name = "tool.register"
-    payload_type = ToolRegisterPayload
-
-
-class ToolHeartbeatEvent(EventDeclaration):
-    """工具进程续约。"""
-
-    name = "tool.heartbeat"
-    payload_type = ToolHeartbeatPayload
-
-
-class ToolUnregisterEvent(EventDeclaration):
-    """工具进程主动下线。"""
-
-    name = "tool.unregister"
-    payload_type = ToolUnregisterPayload
-
-
-class CatalogChangedEvent(EventDeclaration):
-    """工具目录变更广播。"""
-
-    name = "catalog.changed"
-    payload_type = CatalogChangedPayload
-
-
-# ---------------------------------------------------------------------------
-# 工具调用（RPC）
-# ---------------------------------------------------------------------------
-
-
-class ToolCallRequest(RequestProtocol):
-    """Agent 发起的工具调用请求。
-
-    ``tool`` 即目标：扇出到所有工具进程后，只有同名进程执行，其余直接忽略。
-    """
-
-    tool: str = Field(description="目标工具名")
-    arguments: dict[str, Any] = Field(default_factory=dict, description="工具参数")
-
-
-class ToolCallResult(ResponseProtocol):
-    """工具进程返回的调用结果。"""
-
-    content: str = Field(default="", description="工具输出（字符串或 JSON 文本）")
-
-
-class ToolCallEvent(EventDeclaration):
-    """工具调用请求事件。"""
-
-    name = "tool.call"
-    payload_type = ToolCallRequest
-
-
-class ToolResultEvent(EventDeclaration):
-    """工具调用结果事件。"""
-
-    name = "tool.result"
-    payload_type = ToolCallResult
-
-
-# ---------------------------------------------------------------------------
-# 工具目录查询（RPC）
-# ---------------------------------------------------------------------------
-
-
-class CatalogQueryRequest(RequestProtocol):
-    """查询当前工具目录。"""
-
-
-class CatalogQueryResponse(ResponseProtocol):
-    """工具目录快照。"""
-
-    version: int = Field(default=0, description="目录版本号")
-    tools: list[ToolDefinition] = Field(
-        default_factory=list[ToolDefinition], description="可用工具定义"
-    )
-
-
-class CatalogQueryEvent(EventDeclaration):
-    """目录查询请求事件。"""
-
-    name = "catalog.query"
-    payload_type = CatalogQueryRequest
-
-
-class CatalogReplyEvent(EventDeclaration):
-    """目录查询响应事件。"""
-
-    name = "catalog.reply"
-    payload_type = CatalogQueryResponse
 
 
 # ---------------------------------------------------------------------------
@@ -463,15 +304,7 @@ class SessionStateReplyEvent(EventDeclaration):
     payload_type = SessionStateResponse
 
 
-ALL_EVENTS: tuple[type[EventDeclaration], ...] = (
-    ToolRegisterEvent,
-    ToolHeartbeatEvent,
-    ToolUnregisterEvent,
-    CatalogChangedEvent,
-    ToolCallEvent,
-    ToolResultEvent,
-    CatalogQueryEvent,
-    CatalogReplyEvent,
+EVENTS: tuple[type[EventDeclaration], ...] = (
     SessionPromptEvent,
     SessionReplyEvent,
     SessionCancelEvent,
@@ -488,13 +321,4 @@ ALL_EVENTS: tuple[type[EventDeclaration], ...] = (
     SessionUpdateReplyEvent,
     SessionStreamEvent,
 )
-"""全部跨进程事件声明（各进程注册同一份集合即可互通）。"""
-
-EVENT_NAMES: tuple[str, ...] = tuple(event.name for event in ALL_EVENTS)
-"""全部事件名的只读清单（便于运维脚本与文档引用）。"""
-
-
-def register_events(registry: EventRegistry) -> None:
-    """把全部事件声明注册到事件注册表。"""
-    for event in ALL_EVENTS:
-        registry.register(event)
+"""会话领域全部跨进程事件声明。"""

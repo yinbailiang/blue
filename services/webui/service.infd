@@ -12,7 +12,8 @@ service {
   kind = "ui"
   package = "blue-service-webui"
   module = "blue_service_webui"
-  depends_on = ["bus", "session", "agent"]
+  depends_on = ["bus", "session", "agent", "registry"]
+  depends_contracts = ["tool", "session"]
   restart = "always"
   stop_timeout = 10.0
   startup_timeout = 20.0

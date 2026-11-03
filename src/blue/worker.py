@@ -25,16 +25,7 @@ from collections.abc import Callable
 from contextlib import suppress
 from typing import Any, cast
 
-from infinity_agent import (
-    FunctionCall,
-    MessageContent,
-    ToolCall,
-    ToolDefinition,
-)
-from infinity_agent.tools import ToolRegistry
-from infinity_bus import EventBus
-
-from blue.protocol import (
+from blue_contracts_tool import (
     ToolCallRequest,
     ToolCallResult,
     ToolHeartbeatEvent,
@@ -45,6 +36,15 @@ from blue.protocol import (
     ToolUnregisterEvent,
     ToolUnregisterPayload,
 )
+from infinity_agent import (
+    FunctionCall,
+    MessageContent,
+    ToolCall,
+    ToolDefinition,
+)
+from infinity_agent.tools import ToolRegistry
+from infinity_bus import EventBus
+
 from blue.subscribers.tool_call import ToolCallHandler
 from blue.transport import BusRuntime
 

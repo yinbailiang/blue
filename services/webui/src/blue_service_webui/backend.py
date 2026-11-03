@@ -9,17 +9,7 @@ from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from pathlib import Path
 from typing import Any, Protocol
 
-from infinity_agent import Message
-from infinity_bus import Event, EventBus, EventHandler
-from infinity_bus.templates.request import ResponseProtocol, request
-from pydantic import BaseModel, Field, ValidationError
-
-from blue.control.model import ActualState
-from blue.errors import BlueError
-from blue.protocol import (
-    CatalogQueryEvent,
-    CatalogQueryResponse,
-    CatalogReplyEvent,
+from blue_contracts_session import (
     SessionCancelEvent,
     SessionCancelReplyEvent,
     SessionCancelResponse,
@@ -40,6 +30,18 @@ from blue.protocol import (
     SessionStreamEvent,
     SessionStreamPayload,
 )
+from blue_contracts_tool import (
+    CatalogQueryEvent,
+    CatalogQueryResponse,
+    CatalogReplyEvent,
+)
+from infinity_agent import Message
+from infinity_bus import Event, EventBus, EventHandler
+from infinity_bus.templates.request import ResponseProtocol, request
+from pydantic import BaseModel, Field, ValidationError
+
+from blue.control.model import ActualState
+from blue.errors import BlueError
 from blue.transport import BusRuntime
 
 __all__ = [

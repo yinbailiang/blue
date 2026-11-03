@@ -8,11 +8,52 @@ from pathlib import Path
 import pytest
 
 from blue.cli import main
+from blue.control.model import (
+    ActualContract,
+    ActualService,
+    ActualState,
+    ServiceStatus,
+)
+from blue.control.state import StateStore
 
 ROOT = Path(__file__).resolve().parents[1]
 
 
 def _config(root: Path) -> Path:
+    contract_dir = root / "contracts" / "demo"
+    (contract_dir / "src" / "demo_contracts").mkdir(parents=True, exist_ok=True)
+    (contract_dir / "contract.infd").write_text(
+        """
+contract {
+  name = "demo"
+  package = "demo-contracts"
+  module = "demo_contracts"
+  description = "demo contract"
+}
+""",
+        encoding="utf-8",
+    )
+    (contract_dir / "pyproject.toml").write_text(
+        """
+[project]
+name = "demo-contracts"
+version = "0.1.0"
+requires-python = ">=3.14"
+
+[build-system]
+requires = ["uv_build>=0.9.0,<0.14"]
+build-backend = "uv_build"
+
+[tool.uv.build-backend]
+module-name = "demo_contracts"
+module-root = "src"
+""",
+        encoding="utf-8",
+    )
+    (contract_dir / "src" / "demo_contracts" / "__init__.py").write_text(
+        "", encoding="utf-8"
+    )
+
     service_dir = root / "services" / "demo"
     service_dir.mkdir(parents=True, exist_ok=True)
     (service_dir / "service.infd").write_text(
@@ -27,6 +68,7 @@ service {
   package = "demo"
   module = "demo"
   depends_on = []
+  depends_contracts = ["demo"]
 }
 """,
         encoding="utf-8",
@@ -51,11 +93,12 @@ demo = DemoService(value = "hello")
 def test_config_check_prints_services(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """config-check 输出服务摘要。"""
+    """config-check 输出服务与契约摘要。"""
     code = main(["--config", str(_config(tmp_path)), "config-check"])
     output = capsys.readouterr().out
     assert code == 0
     assert "services   : 1" in output
+    assert "contracts  : 1" in output
     assert "demo" in output
 
 
@@ -72,11 +115,71 @@ def test_render_outputs_json(
 def test_status_without_supervisor(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """没有 supervisor 时 status 正常退出并显示 stopped。"""
+    """没有 supervisor 时 status 回退到期望状态，并展示契约版本。"""
     code = main(["--config", str(_config(tmp_path)), "status"])
     output = capsys.readouterr().out
     assert code == 0
     assert "stopped" in output
+    assert "services   : 1" in output
+    assert "contracts  : 1" in output
+    assert "demo-contracts" in output
+    assert "0.1.0" in output
+
+
+def test_status_json_includes_contracts(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """status --json 暴露契约版本与使用方。"""
+    code = main(["--config", str(_config(tmp_path)), "status", "--json"])
+    payload = json.loads(capsys.readouterr().out)
+    assert code == 0
+    assert payload["state"] is None
+    assert payload["contracts"]["demo"]["version"] == "0.1.0"
+    assert payload["contracts"]["demo"]["used_by"] == ["demo"]
+
+
+def test_status_reads_actual_contracts(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """有实际快照时优先展示实际版本。"""
+    config = _config(tmp_path)
+    state = StateStore(tmp_path / ".blue")
+    state.write_state(
+        ActualState(
+            generation="gen-1",
+            supervisor_pid=1,
+            started_at=0.0,
+            updated_at=0.0,
+            services={
+                "demo": ActualService(
+                    name="demo",
+                    kind="tool",
+                    status=ServiceStatus.READY,
+                    pid=123,
+                    package_version="9.9.9",
+                )
+            },
+            contracts={
+                "demo": ActualContract(
+                    name="demo",
+                    package="demo-contracts",
+                    module="demo_contracts",
+                    package_version="1.2.3",
+                    source_hash="abc123",
+                )
+            },
+        )
+    )
+
+    code = main(["--config", str(config), "status"])
+    output = capsys.readouterr().out
+    assert code == 0
+    assert "9.9.9" in output
+    assert "1.2.3" in output
+    assert "demo-contracts" in output
+    assert "Ready" in output
+    assert "desired    :" in output
+    assert "blue apply" in output
 
 
 def test_apply_without_supervisor_returns_error(tmp_path: Path) -> None:

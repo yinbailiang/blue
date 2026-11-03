@@ -5,14 +5,7 @@ from __future__ import annotations
 import asyncio
 from pathlib import Path
 
-from blue_service_session.config import SessionConfig
-from blue_service_session.service import SessionService
-from infinity_agent import Message, MessageRole
-from infinity_bus.templates.request import request
-from tests.support import make_runtime
-
-from blue.messages import decode_messages, encode_message
-from blue.protocol import (
+from blue_contracts_session import (
     SessionAppendEvent,
     SessionAppendReplyEvent,
     SessionAppendResponse,
@@ -29,6 +22,13 @@ from blue.protocol import (
     SessionUpdateReplyEvent,
     SessionUpdateResponse,
 )
+from blue_service_session.config import SessionConfig
+from blue_service_session.service import SessionService
+from infinity_agent import Message, MessageRole
+from infinity_bus.templates.request import request
+from tests.support import make_runtime
+
+from blue.messages import decode_messages, encode_message
 from blue.transport import MemoryFanout
 
 

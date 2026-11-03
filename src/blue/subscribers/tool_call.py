@@ -4,10 +4,9 @@ from __future__ import annotations
 
 from typing import Protocol
 
+from blue_contracts_tool import ToolCallEvent, ToolCallRequest
 from infinity_bus import Event, EventBus, EventHandler
 from pydantic import BaseModel
-
-from blue.protocol import ToolCallEvent, ToolCallRequest
 
 __all__ = ["ToolCallBackend", "ToolCallHandler"]
 

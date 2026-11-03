@@ -7,6 +7,7 @@ import contextlib
 from pathlib import Path
 from typing import Any, cast
 
+from blue_contracts_session import SessionInfo
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
@@ -14,7 +15,6 @@ from infinity_agent import ToolDefinition
 from pydantic import BaseModel, Field, ValidationError
 
 from blue.errors import BlueError
-from blue.protocol import SessionInfo
 from blue_service_webui.backend import (
     SessionView,
     SystemView,

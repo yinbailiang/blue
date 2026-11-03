@@ -5,15 +5,12 @@ from __future__ import annotations
 import logging
 from typing import Protocol
 
-from infinity_agent import ToolDefinition
-from infinity_bus import Event, EventBus, EventHandler
-from pydantic import BaseModel
-
-from blue.protocol import (
+from blue_contracts_tool import (
     CatalogQueryEvent,
     CatalogQueryRequest,
     CatalogQueryResponse,
     CatalogReplyEvent,
+    ToolDefinition,
     ToolHeartbeatEvent,
     ToolHeartbeatPayload,
     ToolRegisterEvent,
@@ -21,6 +18,8 @@ from blue.protocol import (
     ToolUnregisterEvent,
     ToolUnregisterPayload,
 )
+from infinity_bus import Event, EventBus, EventHandler
+from pydantic import BaseModel
 
 logger = logging.getLogger(__name__)
 

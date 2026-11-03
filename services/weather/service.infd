@@ -10,6 +10,7 @@ service {
   package = "blue-service-weather"
   module = "blue_service_weather"
   depends_on = ["bus"]
+  depends_contracts = ["tool"]
   restart = "always"
   stop_timeout = 5.0
   startup_timeout = 30.0

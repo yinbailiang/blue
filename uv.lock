@@ -5,6 +5,8 @@ requires-python = ">=3.14"
 [manifest]
 members = [
     "blue",
+    "blue-contracts-session",
+    "blue-contracts-tool",
     "blue-service-agent",
     "blue-service-bus",
     "blue-service-chat",
@@ -13,6 +15,7 @@ members = [
     "blue-service-edit-file",
     "blue-service-inspect",
     "blue-service-read-file",
+    "blue-service-registry",
     "blue-service-session",
     "blue-service-shell",
     "blue-service-text-stats",
@@ -231,6 +234,7 @@ name = "blue"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [
+    { name = "blue-contracts-tool" },
     { name = "infinity-agent" },
     { name = "infinity-agent-kit" },
     { name = "infinity-bus", extra = ["templates"] },
@@ -239,6 +243,7 @@ dependencies = [
 
 [package.dev-dependencies]
 dev = [
+    { name = "blue-contracts-session" },
     { name = "httpx" },
     { name = "pyright" },
     { name = "pytest" },
@@ -247,6 +252,7 @@ dev = [
 
 [package.metadata]
 requires-dist = [
+    { name = "blue-contracts-tool", editable = "contracts/tool" },
     { name = "infinity-agent", specifier = ">=0.2.1" },
     { name = "infinity-agent-kit", specifier = ">=1.0.0" },
     { name = "infinity-bus", extras = ["templates"], specifier = ">=6.0.0" },
@@ -255,10 +261,43 @@ requires-dist = [
 
 [package.metadata.requires-dev]
 dev = [
+    { name = "blue-contracts-session", editable = "contracts/session" },
     { name = "httpx", specifier = ">=0.28.0" },
     { name = "pyright", specifier = ">=1.1.414" },
     { name = "pytest", specifier = ">=9.2.0" },
     { name = "ruff", specifier = ">=0.17.3" },
+]
+
+[[package]]
+name = "blue-contracts-session"
+version = "0.1.0"
+source = { editable = "contracts/session" }
+dependencies = [
+    { name = "infinity-bus", extra = ["templates"] },
+    { name = "pydantic" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "infinity-bus", extras = ["templates"], specifier = ">=6.0.0" },
+    { name = "pydantic", specifier = ">=2" },
+]
+
+[[package]]
+name = "blue-contracts-tool"
+version = "0.1.0"
+source = { editable = "contracts/tool" }
+dependencies = [
+    { name = "infinity-agent" },
+    { name = "infinity-bus", extra = ["templates"] },
+    { name = "pydantic" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "infinity-agent", specifier = ">=0.2.1" },
+    { name = "infinity-bus", extras = ["templates"], specifier = ">=6.0.0" },
+    { name = "pydantic", specifier = ">=2" },
 ]
 
 [[package]]
@@ -267,18 +306,30 @@ version = "0.1.0"
 source = { editable = "services/agent" }
 dependencies = [
     { name = "blue" },
+    { name = "blue-contracts-session" },
+    { name = "blue-contracts-tool" },
     { name = "infinity-agent" },
     { name = "infinity-bus", extra = ["templates"] },
     { name = "pydantic" },
 ]
 
+[package.dev-dependencies]
+dev = [
+    { name = "blue-service-registry" },
+]
+
 [package.metadata]
 requires-dist = [
     { name = "blue", editable = "." },
+    { name = "blue-contracts-session", editable = "contracts/session" },
+    { name = "blue-contracts-tool", editable = "contracts/tool" },
     { name = "infinity-agent", specifier = ">=0.2.1" },
     { name = "infinity-bus", extras = ["templates"], specifier = ">=6.0.0" },
     { name = "pydantic", specifier = ">=2" },
 ]
+
+[package.metadata.requires-dev]
+dev = [{ name = "blue-service-registry", editable = "services/registry" }]
 
 [[package]]
 name = "blue-service-bus"
@@ -301,12 +352,16 @@ version = "0.1.0"
 source = { editable = "services/chat" }
 dependencies = [
     { name = "blue" },
+    { name = "blue-contracts-session" },
+    { name = "blue-contracts-tool" },
     { name = "infinity-bus", extra = ["templates"] },
 ]
 
 [package.metadata]
 requires-dist = [
     { name = "blue", editable = "." },
+    { name = "blue-contracts-session", editable = "contracts/session" },
+    { name = "blue-contracts-tool", editable = "contracts/tool" },
     { name = "infinity-bus", extras = ["templates"], specifier = ">=6.0.0" },
 ]
 
@@ -361,12 +416,16 @@ version = "0.1.0"
 source = { editable = "services/inspect" }
 dependencies = [
     { name = "blue" },
+    { name = "blue-contracts-session" },
+    { name = "blue-contracts-tool" },
     { name = "infinity-bus", extra = ["templates"] },
 ]
 
 [package.metadata]
 requires-dist = [
     { name = "blue", editable = "." },
+    { name = "blue-contracts-session", editable = "contracts/session" },
+    { name = "blue-contracts-tool", editable = "contracts/tool" },
     { name = "infinity-bus", extras = ["templates"], specifier = ">=6.0.0" },
 ]
 
@@ -386,12 +445,32 @@ requires-dist = [
 ]
 
 [[package]]
+name = "blue-service-registry"
+version = "0.1.0"
+source = { editable = "services/registry" }
+dependencies = [
+    { name = "blue" },
+    { name = "blue-contracts-tool" },
+    { name = "infinity-bus", extra = ["templates"] },
+    { name = "pydantic" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "blue", editable = "." },
+    { name = "blue-contracts-tool", editable = "contracts/tool" },
+    { name = "infinity-bus", extras = ["templates"], specifier = ">=6.0.0" },
+    { name = "pydantic", specifier = ">=2" },
+]
+
+[[package]]
 name = "blue-service-session"
 version = "0.1.0"
 source = { editable = "services/session" }
 dependencies = [
     { name = "aiosqlite" },
     { name = "blue" },
+    { name = "blue-contracts-session" },
     { name = "infinity-agent" },
     { name = "infinity-bus", extra = ["templates"] },
     { name = "pydantic" },
@@ -401,6 +480,7 @@ dependencies = [
 requires-dist = [
     { name = "aiosqlite", specifier = ">=0.22.0" },
     { name = "blue", editable = "." },
+    { name = "blue-contracts-session", editable = "contracts/session" },
     { name = "infinity-agent", specifier = ">=0.2.1" },
     { name = "infinity-bus", extras = ["templates"], specifier = ">=6.0.0" },
     { name = "pydantic", specifier = ">=2" },
@@ -459,7 +539,10 @@ version = "0.1.0"
 source = { editable = "services/webui" }
 dependencies = [
     { name = "blue" },
+    { name = "blue-contracts-session" },
+    { name = "blue-contracts-tool" },
     { name = "fastapi" },
+    { name = "infinity-agent" },
     { name = "infinity-bus", extra = ["templates"] },
     { name = "pydantic" },
     { name = "uvicorn" },
@@ -469,7 +552,10 @@ dependencies = [
 [package.metadata]
 requires-dist = [
     { name = "blue", editable = "." },
+    { name = "blue-contracts-session", editable = "contracts/session" },
+    { name = "blue-contracts-tool", editable = "contracts/tool" },
     { name = "fastapi", specifier = ">=0.115.0" },
+    { name = "infinity-agent", specifier = ">=0.2.1" },
     { name = "infinity-bus", extras = ["templates"], specifier = ">=6.0.0" },
     { name = "pydantic", specifier = ">=2" },
     { name = "uvicorn", specifier = ">=0.30.0" },

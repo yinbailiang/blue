@@ -4,24 +4,27 @@ from __future__ import annotations
 
 import asyncio
 
+from blue_contracts_session import (
+    SessionPromptEvent,
+    SessionReplyEvent,
+    SessionReplyResponse,
+    SessionSnapshot,
+)
+from blue_contracts_tool import (
+    CatalogQueryEvent,
+    CatalogQueryResponse,
+    CatalogReplyEvent,
+)
 from blue_service_agent.aggregate import AgentAggregate
-from blue_service_agent.config import AgentConfig, RegistryConfig
+from blue_service_agent.config import AgentConfig
 from blue_service_echo import echo
+from blue_service_registry import ToolRegistryService
 from infinity_agent import Message
 from infinity_bus import EventBus
 from infinity_bus.templates.request import request
 from tests.support import ScriptedClient, make_runtime, wait_until
 
 from blue.messages import encode_messages
-from blue.protocol import (
-    CatalogQueryEvent,
-    CatalogQueryResponse,
-    CatalogReplyEvent,
-    SessionPromptEvent,
-    SessionReplyEvent,
-    SessionReplyResponse,
-    SessionSnapshot,
-)
 from blue.transport import MemoryFanout
 from blue.worker import ToolWorker
 
@@ -60,28 +63,33 @@ class _MemorySessionGateway:
         del bus_proxy, session_id, steps
 
 
-def test_aggregate_hosts_sessions_and_catalog() -> None:
-    """聚合既应答目录查询，也处理会话消息。"""
+def test_agent_and_registry_are_separate_services() -> None:
+    """目录由独立 registry 应答，会话由 agent 应答。"""
     asyncio.run(_scenario())
 
 
 async def _scenario() -> None:
     hub = MemoryFanout()
+    registry = ToolRegistryService(
+        runtime=make_runtime(hub, "registry"),
+        ttl=5.0,
+        sweep_interval=0.05,
+    )
     aggregate = AgentAggregate(
         runtime=make_runtime(hub, "core"),
         agent=AgentConfig(api_key="sk-test", max_steps=2),
-        registry=RegistryConfig(ttl=5.0, sweep_interval=0.05),
         client=ScriptedClient([Message.assistant(content="聚合可用")]),
         session_gateway=_MemorySessionGateway(),
     )
     worker = ToolWorker(runtime=make_runtime(hub, "tool.echo"), tool=echo, ttl=5.0)
     ui = make_runtime(hub, "ui")
 
+    await registry.start()
     await aggregate.start()
     await worker.start()
     await ui.start()
     try:
-        await wait_until(lambda: aggregate.registry.state.worker_count == 1)
+        await wait_until(lambda: registry.state.worker_count == 1)
 
         catalog = await request(
             ui.proxy(),
@@ -108,5 +116,6 @@ async def _scenario() -> None:
         await ui.stop()
         await worker.stop()
         await aggregate.stop()
+        await registry.stop()
 
     assert not aggregate.is_running

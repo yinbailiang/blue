@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
-import os
+from blue_contracts_session import EVENTS as SESSION_EVENTS
+from blue_contracts_tool import EVENTS as TOOL_EVENTS
 
 from blue.runtime import build_runtime, load_runtime_config, run_service
 from blue_service_agent.aggregate import AgentAggregate
-from blue_service_agent.config import AgentConfig, RegistryConfig
+from blue_service_agent.config import AgentConfig
 
 __all__ = ["main"]
 
@@ -14,14 +15,9 @@ __all__ = ["main"]
 def main() -> int:
     """进程入口。"""
     config = load_runtime_config(AgentConfig)
-    registry = RegistryConfig(
-        ttl=float(os.environ.get("BLUE_REGISTRY_TTL", "15")),
-        sweep_interval=float(os.environ.get("BLUE_REGISTRY_SWEEP_INTERVAL", "2")),
-    )
     aggregate = AgentAggregate(
-        runtime=build_runtime("agent"),
+        runtime=build_runtime("agent", (*TOOL_EVENTS, *SESSION_EVENTS)),
         agent=config,
-        registry=registry,
     )
     return run_service(aggregate)
 
