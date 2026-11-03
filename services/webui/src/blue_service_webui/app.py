@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse
@@ -175,20 +175,35 @@ async def _stream_prompt(
     *,
     poll_interval: float,
 ) -> None:
-    """执行一轮 prompt，并把 Agent 实时流、最终回复与快照推给浏览器。"""
+    """执行一轮 prompt，并把 Agent 实时流、最终回复与快照推给浏览器。
+
+    期间并发监听客户端帧：收到 ``{"type": "cancel"}`` 就向 Agent 请求中断，
+    完成后再补一帧 ``cancelled`` 与最新快照。
+    """
     await websocket.send_json(
         {"type": "status", "phase": "thinking", "label": "Agent 正在思考…"}
     )
     async with backend.subscribe(session_id) as stream:
         prompt_task = asyncio.create_task(backend.prompt(session_id, text))
         stream_task = asyncio.create_task(stream.get())
+        receive_task = asyncio.create_task(websocket.receive_json())
+        cancelled = False
         try:
             while True:
                 done, _ = await asyncio.wait(
-                    {prompt_task, stream_task},
+                    {prompt_task, stream_task, receive_task},
                     timeout=max(poll_interval * 5.0, 2.0),
                     return_when=asyncio.FIRST_COMPLETED,
                 )
+                if receive_task in done:
+                    frame: object = receive_task.result()
+                    receive_task = asyncio.create_task(websocket.receive_json())
+                    if (
+                        isinstance(frame, dict)
+                        and cast(dict[str, object], frame).get("type") == "cancel"
+                    ):
+                        with contextlib.suppress(BlueError):
+                            cancelled = await backend.cancel(session_id)
                 if stream_task in done:
                     payload = stream_task.result()
                     await websocket.send_json(
@@ -222,15 +237,19 @@ async def _stream_prompt(
                             }
                         )
                     break
-            reply = await prompt_task
-            await websocket.send_json(
-                {
-                    "type": "reply",
-                    "success": reply.success,
-                    "text": reply.text,
-                    "steps": reply.steps,
-                }
-            )
+
+            if cancelled:
+                await websocket.send_json({"type": "cancelled"})
+            else:
+                reply = await prompt_task
+                await websocket.send_json(
+                    {
+                        "type": "reply",
+                        "success": reply.success,
+                        "text": reply.text,
+                        "steps": reply.steps,
+                    }
+                )
             with contextlib.suppress(BlueError):
                 snapshot = await backend.snapshot(session_id)
                 if snapshot is not None:
@@ -247,7 +266,9 @@ async def _stream_prompt(
         except (BlueError, TimeoutError) as error:
             await websocket.send_json({"type": "error", "message": str(error)})
         finally:
-            for task in (stream_task, prompt_task):
+            for task in (receive_task, stream_task, prompt_task):
                 if not task.done():
                     task.cancel()
-            await asyncio.gather(stream_task, prompt_task, return_exceptions=True)
+            await asyncio.gather(
+                receive_task, stream_task, prompt_task, return_exceptions=True
+            )

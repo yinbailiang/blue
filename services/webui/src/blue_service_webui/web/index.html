@@ -26,6 +26,11 @@
         <path d="M4 12L20 4l-5 16-3.5-6.5L4 12z" />
         <path d="M11.5 13.5L20 4" />
       </symbol>
+      <symbol id="i-target" viewBox="0 0 24 24">
+        <circle cx="12" cy="12" r="7.4" />
+        <circle cx="12" cy="12" r="2.6" />
+        <path d="M12 2.2v3.4M12 18.4v3.4M2.2 12h3.4M18.4 12h3.4" />
+      </symbol>
       <symbol id="i-menu" viewBox="0 0 24 24">
         <path d="M4 7h16M4 12h16M4 17h16" />
       </symbol>
@@ -220,8 +225,8 @@
                 Enter 发送 · Shift + Enter 换行
               </span>
               <button class="send-button" id="send" type="submit" aria-label="发送消息">
-                <svg><use href="#i-send"></use></svg>
-                <span>发送</span>
+                <svg><use href="#i-send" id="send-icon"></use></svg>
+                <span id="send-label">发送</span>
               </button>
             </div>
           </form>

@@ -1588,8 +1588,19 @@ details[open] > summary > .chevron {
   stroke-width: 2;
 }
 
+/* 生成中：图标换成瞄准标记并缓慢呼吸，按钮转为可点击的「停止」态 */
+.send-button.loading {
+  border-color: rgba(255, 150, 122, 0.45);
+  background: linear-gradient(135deg, #ff8f6b, #e2553c);
+  box-shadow: 0 7px 20px rgba(226, 85, 60, 0.3);
+}
+
 .send-button.loading svg {
-  animation: slowSpin 1s linear infinite;
+  animation: breathe 1.8s ease-in-out infinite;
+}
+
+.send-button.loading:hover:not(:disabled) {
+  filter: brightness(1.1);
 }
 
 .disclaimer {

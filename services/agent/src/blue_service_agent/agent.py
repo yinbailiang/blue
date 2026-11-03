@@ -14,6 +14,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+from typing import Any
 
 from infinity_agent import Message, StreamChunk, ToolCall, ToolDefinition
 from infinity_agent.clients import (
@@ -45,6 +46,7 @@ from blue.protocol import (
 from blue.transport import BusRuntime
 from blue_service_agent.catalog import ToolCatalogClient
 from blue_service_agent.config import AgentConfig
+from blue_service_agent.history import sanitize_history
 from blue_service_agent.session_gateway import BusSessionGateway, SessionGateway
 from blue_service_agent.subscribers.session import SessionHandler
 
@@ -107,6 +109,8 @@ class AgentCore:
             timeout=settings.session_timeout
         )
         self._session_locks: dict[str, asyncio.Lock] = {}
+        self._active_turns: dict[str, asyncio.Task[Any]] = {}
+        self._cancelling: set[str] = set()
         self._catalog: ToolCatalogClient = catalog or ToolCatalogClient(runtime=runtime)
 
     @property
@@ -154,7 +158,35 @@ class AgentCore:
     async def handle_prompt(
         self, payload: SessionPromptRequest, bus_proxy: EventBus.Proxy
     ) -> SessionReplyResponse:
-        """处理一条用户消息：串行执行该会话的完整推理-调用循环。"""
+        """处理一条用户消息，并把这次 turn 登记为可被 :meth:`cancel` 中断。"""
+        task = asyncio.current_task()
+        if task is not None:
+            self._active_turns[payload.session_id] = task
+        try:
+            return await self._run_prompt(payload, bus_proxy)
+        finally:
+            if self._active_turns.get(payload.session_id) is task:
+                self._active_turns.pop(payload.session_id, None)
+
+    def cancel(self, session_id: str) -> bool:
+        """请求中断某个会话正在进行的回复。
+
+        取消是协作式的：真正停下发生在下一个 ``await`` 点。
+
+        :return: 是否确实存在进行中的 turn。
+        """
+        task = self._active_turns.get(session_id)
+        if task is None or task.done():
+            return False
+        self._cancelling.add(session_id)
+        task.cancel()
+        logger.info("已请求中断会话 %s 的回复", session_id)
+        return True
+
+    async def _run_prompt(
+        self, payload: SessionPromptRequest, bus_proxy: EventBus.Proxy
+    ) -> SessionReplyResponse:
+        """串行执行该会话的完整推理-调用循环。"""
         lock = self._session_locks.setdefault(payload.session_id, asyncio.Lock())
         steps = 0
         async with lock:
@@ -163,7 +195,9 @@ class AgentCore:
                     bus_proxy, payload.session_id, self._settings.system_prompt
                 )
                 steps = snapshot.steps
-                messages = decode_messages(snapshot.messages)
+                # 历史可能带着进程中断遗留的悬空 tool_calls，
+                # 直接回灌会被模型接口以 400 拒收
+                messages = sanitize_history(decode_messages(snapshot.messages))
                 user_message = Message.user(payload.text)
                 messages.append(user_message)
                 await self._sessions.append(
@@ -178,6 +212,29 @@ class AgentCore:
                     logger.warning(
                         "会话 %s 步数更新失败", payload.session_id, exc_info=True
                     )
+            except asyncio.CancelledError:
+                # 只有显式 cancel 才吞掉取消，进程关闭等系统级取消继续上抛
+                if payload.session_id not in self._cancelling:
+                    raise
+                self._cancelling.discard(payload.session_id)
+                logger.info("会话 %s 的回复已被中断", payload.session_id)
+                await self._stream_event(
+                    bus_proxy,
+                    SessionStreamPayload(
+                        session_id=payload.session_id,
+                        request_id=payload.request_id,
+                        kind="cancelled",
+                        step=steps,
+                        text="已中断",
+                    ),
+                )
+                return SessionReplyResponse(
+                    session_id=payload.session_id,
+                    request_id=payload.request_id,
+                    success=False,
+                    error_msg="已中断",
+                    steps=steps,
+                )
             except Exception as error:
                 logger.exception("会话 %s 处理失败", payload.session_id)
                 await self._stream_event(
@@ -258,7 +315,9 @@ class AgentCore:
                         tool_call=stream_call,
                     ),
                 )
-                content = await self._invoke_tool(bus_proxy, session_id, tool_call)
+                content = await self._invoke_tool(
+                    bus_proxy, session_id, tool_call, tools
+                )
                 await self._stream_event(
                     bus_proxy,
                     SessionStreamPayload(
@@ -361,11 +420,41 @@ class AgentCore:
             return tools
         return await self._catalog.refresh(bus_proxy)
 
+    async def _available_tool_names(
+        self, bus_proxy: EventBus.Proxy, tools: list[ToolDefinition], name: str
+    ) -> set[str]:
+        """可调用工具名集合；``name`` 已在缓存中时不再拉取目录。
+
+        目录为空说明注册中心尚未就绪，此时返回空集合，调用方据此跳过存在性
+        拦截，避免把所有工具误判为不存在。
+        """
+        known = {tool.function.name for tool in tools}
+        if not known or name in known:
+            return known
+        refreshed = await self._catalog.refresh(bus_proxy)
+        return {tool.function.name for tool in refreshed}
+
     async def _invoke_tool(
-        self, bus_proxy: EventBus.Proxy, session_id: str, tool_call: ToolCall
+        self,
+        bus_proxy: EventBus.Proxy,
+        session_id: str,
+        tool_call: ToolCall,
+        tools: list[ToolDefinition],
     ) -> str:
         """通过总线调用一个工具进程，任何失败都转成工具错误文本回灌模型。"""
         name = tool_call.function.name
+        available = await self._available_tool_names(bus_proxy, tools, name)
+        if available and name not in available:
+            # 不存在的工具没有任何进程会应答，照常发起只会一直等到 tool_timeout
+            logger.warning(
+                "模型请求了不存在的工具 %s，已直接回灌错误（可用：%s）",
+                name,
+                "、".join(sorted(available)),
+            )
+            return _error(
+                f"工具 {name} 不存在（可用工具：{'、'.join(sorted(available))}），"
+                "请改用可用工具或直接回答"
+            )
         try:
             response = await request(
                 bus_proxy,

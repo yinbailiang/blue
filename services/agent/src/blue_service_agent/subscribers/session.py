@@ -1,6 +1,9 @@
-"""会话消息处理器：只负责 ``session.prompt``。
+"""会话消息处理器：负责 ``session.prompt`` 与 ``session.cancel``。
 
 会话重置与状态查询已迁到独立的 session 服务。
+
+两个事件由总线以独立任务并发派发，因此「中断」不会排在漫长的 prompt
+后面——这正是取消能生效的前提。
 """
 
 from __future__ import annotations
@@ -11,6 +14,10 @@ from infinity_bus import Event, EventBus, EventHandler
 from pydantic import BaseModel
 
 from blue.protocol import (
+    SessionCancelEvent,
+    SessionCancelReplyEvent,
+    SessionCancelRequest,
+    SessionCancelResponse,
     SessionPromptEvent,
     SessionPromptRequest,
     SessionReplyEvent,
@@ -29,6 +36,10 @@ class SessionBackend(Protocol):
         """处理一条用户消息。"""
         ...
 
+    def cancel(self, session_id: str) -> bool:
+        """请求中断该会话正在进行的回复；返回是否确有进行中的 turn。"""
+        ...
+
 
 class SessionHandler(EventHandler):
     """会话消息入口。
@@ -39,7 +50,7 @@ class SessionHandler(EventHandler):
 
     def __init__(self, backend: SessionBackend) -> None:
         super().__init__(
-            subscriptions=[SessionPromptEvent.name],
+            subscriptions=[SessionPromptEvent.name, SessionCancelEvent.name],
             handle_timeout=None,
         )
         self._backend = backend
@@ -54,3 +65,13 @@ class SessionHandler(EventHandler):
         if isinstance(payload, SessionPromptRequest):
             reply = await self._backend.handle_prompt(payload, bus_proxy)
             await bus_proxy.publish(SessionReplyEvent.name, reply)
+        elif isinstance(payload, SessionCancelRequest):
+            cancelled = self._backend.cancel(payload.session_id)
+            await bus_proxy.publish(
+                SessionCancelReplyEvent.name,
+                SessionCancelResponse(
+                    session_id=payload.session_id,
+                    request_id=payload.request_id,
+                    cancelled=cancelled,
+                ),
+            )

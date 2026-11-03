@@ -26,6 +26,8 @@
     composer: document.getElementById("composer"),
     prompt: document.getElementById("prompt"),
     send: document.getElementById("send"),
+    sendIcon: document.getElementById("send-icon"),
+    sendLabel: document.getElementById("send-label"),
     socketPill: document.getElementById("socket-pill"),
     toastRegion: document.getElementById("toast-region"),
   };
@@ -170,11 +172,15 @@
     els.typing.hidden = !busy;
     els.typingLabel.textContent = label;
     els.send.classList.toggle("loading", busy);
+    els.sendIcon.setAttribute("href", busy ? "#i-target" : "#i-send");
+    els.sendLabel.textContent = busy ? "停止" : "发送";
+    els.send.setAttribute("aria-label", busy ? "停止生成" : "发送消息");
     updateSendState();
   }
 
   function updateSendState() {
-    els.send.disabled = state.busy || !els.prompt.value.trim();
+    // 生成中按钮用于中断，此时即使输入框为空也应可点
+    els.send.disabled = state.busy ? false : !els.prompt.value.trim();
   }
 
   function setSocketOnline(online, label) {
@@ -951,6 +957,20 @@
     }
   }
 
+  function cancelPrompt() {
+    if (!state.busy) return;
+    const socket = state.socket;
+    if (!socket || socket.readyState !== WebSocket.OPEN) {
+      toast("实时连接不可用，无法中断", "error");
+      setBusy(false);
+      return;
+    }
+    socket.send(
+      JSON.stringify({ type: "cancel", session_id: state.sessionId || "" }),
+    );
+    els.typingLabel.textContent = "正在中断…";
+  }
+
   /* ------------------------------------------------------------------ */
   /* WebSocket                                                          */
   /* ------------------------------------------------------------------ */
@@ -1140,6 +1160,14 @@
         setBusy(true, "正在调用工具…");
       return;
     }
+    if (frame.type === "cancelled") {
+      if (state.liveMessage?.live) state.liveMessage.live = false;
+      state.liveMessage = null;
+      setBusy(false);
+      toast("已中断生成", "info");
+      renderMessages({ scroll: true, force: state.stickToBottom });
+      return;
+    }
     if (frame.type === "reply") {
       setBusy(false);
       if (frame.success === false) {
@@ -1237,6 +1265,10 @@
 
     els.composer.addEventListener("submit", (event) => {
       event.preventDefault();
+      if (state.busy) {
+        cancelPrompt();
+        return;
+      }
       void sendPrompt(els.prompt.value);
     });
 
@@ -1244,6 +1276,10 @@
     els.prompt.addEventListener("keydown", (event) => {
       if (event.key === "Enter" && !event.shiftKey) {
         event.preventDefault();
+        if (state.busy) {
+          cancelPrompt();
+          return;
+        }
         void sendPrompt(els.prompt.value);
       }
     });

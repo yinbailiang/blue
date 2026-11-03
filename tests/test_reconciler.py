@@ -210,7 +210,7 @@ def _current_pid(state: StateStore, name: str) -> int | None:
 
 
 def test_supervisor_restarts_when_package_version_changes(tmp_path: Path) -> None:
-    """配置不变但服务包版本变化时，进程应被重新加载。"""
+    """显式 reload 时，服务包版本变化会重启进程。"""
     asyncio.run(_package_version_reload(tmp_path))
 
 
@@ -230,6 +230,7 @@ async def _package_version_reload(tmp_path: Path) -> None:
         (tmp_path / "services" / "echo" / "pyproject.toml").write_text(
             '[project]\nname = "demo-echo"\nversion = "0.2.0"\n', encoding="utf-8"
         )
+        assert await supervisor.reload() is True
 
         await _wait_for(
             lambda: (
@@ -245,7 +246,7 @@ async def _package_version_reload(tmp_path: Path) -> None:
 
 
 def test_supervisor_restarts_when_source_changes(tmp_path: Path) -> None:
-    """版本号不变、仅源码变化时也应重新加载。"""
+    """源码变化不会自动重启，显式 reload 时才会扫描并重启。"""
     asyncio.run(_source_change_reload(tmp_path))
 
 
@@ -263,6 +264,12 @@ async def _source_change_reload(tmp_path: Path) -> None:
         module = tmp_path / "services" / "echo" / "src" / "demo_echo" / "__init__.py"
         module.write_text("VALUE = 2000\n# 改动但未升版本\n", encoding="utf-8")
 
+        # 没有 apply/reload 时，调谐循环不应读取源码或重启服务。
+        await asyncio.sleep(0.2)
+        assert _current_pid(state, "echo") == first_pid
+        assert _status(state, "echo") is ServiceStatus.READY
+
+        assert await supervisor.reload() is True
         await _wait_for(
             lambda: (
                 _current_pid(state, "echo") not in (None, first_pid)

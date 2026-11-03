@@ -42,6 +42,16 @@ blue CLI
 Agent 在模型流式输出期间同时发布 `session.stream`，携思考增量、文本增量、
 工具调用与工具结果；WebUI 通过 WebSocket 即时转发给浏览器。
 
+会话按写前日志落库：assistant 消息（含 `tool_calls`）先入会话库，工具结果再
+逐条追加。进程若死在两者之间，历史里会留下没有结果的 `tool_call`，此后每次
+请求都会被模型接口以 400「insufficient tool messages」拒收。因此 agent 在把
+历史交给模型前先做一次内存自愈（`blue_service_agent.history.sanitize_history`）：
+为缺失结果的调用补写占位工具结果、丢弃孤儿 `tool` 消息与空 assistant 消息，
+持久化数据本身不改动。
+
+模型若请求了工具目录里不存在的工具，agent 立即回灌错误文本（附可用工具清单），
+不再空等到 `tool_timeout`——没有进程会应答这类调用。
+
 工具进程启动时发布 `tool.register`，周期补发注册并发布 `tool.heartbeat`，
 退出时发布 `tool.unregister`；agent 按 TTL 回收失联工具。
 
@@ -273,6 +283,11 @@ WebUI 通过 WebSocket 调用 Agent，并订阅 `session.stream` 实时展示模
 可折叠卡片，默认折叠、点击展开，摘要行常驻显示工具名、参数预览或输出首行；
 展开状态在后续增量更新中保留。
 
+**中断**：生成期间发送按钮变为「停止」（瞄准图标），点击后 WebSocket 发送
+`cancel` 帧，WebUI 转而向总线请求 `session.cancel`；Agent 协作式取消当前 turn
+（在下一个 `await` 点生效），广播 `session.stream` 的 `cancelled` 事件并返回
+`success=false` 的回复。WebUI 回推 `cancelled` 帧与最新快照，前端复位按钮。
+
 消息正文按 **GFM** 渲染（表格、任务列表、删除线、自动链接等）；**LaTeX 公式**
 支持 `$...$` 行内、`$$...$$` 块级，以及 `\(...\)` / `\[...\]` 两种写法，由 KaTeX
 排版（含 `htmlAndMathml` 双输出，便于无障碍读取）。代码块内的 `$` 不会被当作
@@ -360,15 +375,14 @@ Ready / Running → Stopping → Stopped
 - **孤儿清理**：重启 supervisor 时，按 `BLUE_INSTANCE_ID` 核对
   `/proc/<pid>/environ` 后清理旧进程；RabbitMQ 子进程带 `PR_SET_PDEATHSIG`。
 - **单实例**：`.blue/supervisor.lock` 防止重复启动 supervisor。
-- **版本与源码重载**：每个服务的 `package_version` 取自
+- **版本与源码扫描**：每个服务的 `package_version` 取自
   `services/<name>/pyproject.toml` 的 `[project].version`；`source_hash` 是
   「版本声明 + `src/**/*.py` 内容」的 SHA-256 指纹。两者都写进 `state.json`，
-  版本在 `blue status` / `config-check` 中可见。调谐循环每轮用 `stat` 签名
-  （路径 + 大小 + mtime）做低成本比对，只有疑似变化时才读文件内容算指纹；
-  指纹与期望状态不一致就重新编译 `blue.infd` 并重启对应服务——**即使配置和
-  版本号都没变，只改了源码也会重新加载**。指纹参与 `generation` 计算，
-  因此 `blue apply --wait` 也能等到刷新完成。
-  （`uv run` 在源码变化时会自动重建并重装该 workspace 包，所以重启即生效。）
+  版本在 `blue status` / `config-check` 中可见。源码/版本扫描只在显式
+  `blue apply`（或 `SIGHUP`/`reload()`）时执行：重新编译 `blue.infd`、计算
+  指纹并重启发生变化的服务。supervisor 不会持续 watch 源码，也不会因为保存
+  文件自动重启服务。
+  （`uv run` 在源码变化时会自动重建并重装该 workspace 包，所以 apply 重启即生效。）
 
 ## 内置服务
 
@@ -376,7 +390,7 @@ Ready / Running → Stopping → Stopped
 | --- | --- |
 | `bus` | 管理 RabbitMQ、vhost/用户/权限配置，可选 AMQP TCP 代理 |
 | `session` | SQLite（WAL）会话持久化，独立进程、支持重启后恢复 |
-| `agent` | 模型推理 + 工具注册中心，本身不保存会话正文 |
+| `agent` | 模型推理 + 工具注册中心，本身不保存会话正文；加载历史时自愈悬空 `tool_calls`，未知工具立即失败 |
 | `webui` | FastAPI + 静态单页 Chat UI，WebSocket 实时进度，托管在 supervisor 中 |
 | `clock` / `echo` / `text_stats` | 基础工具 |
 | `read_file` / `write_file` / `edit_file` | 文件读写与精确替换 |
@@ -432,6 +446,7 @@ uv run pytest -q
 事件名是固定常量：`tool.register` / `tool.heartbeat` / `tool.unregister` /
 `catalog.changed` / `tool.call` / `tool.result` / `catalog.query` /
 `catalog.reply` / `session.prompt` / `session.reply` / `session.stream` /
+`session.cancel` / `session.cancel.reply` /
 `session.get` / `session.get.reply` / `session.append` /
 `session.append.reply` / `session.update` / `session.update.reply` /
 `session.reset` / `session.reset.reply` / `session.state` /

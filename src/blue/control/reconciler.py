@@ -15,10 +15,8 @@ from pathlib import Path
 
 from blue.control.backoff import Backoff, should_restart
 from blue.control.desired import (
-    digest_package,
     load_desired,
     remove_runtime_config,
-    scan_package,
     topological_order,
     write_runtime_configs,
 )
@@ -116,10 +114,6 @@ class Supervisor:
         self._config_error: str | None = None
         self._dirty = True
         self._stopped = False
-        # 服务名 → (上次扫描的 stat 签名, 上次算出的内容指纹)
-        self._source_probes: dict[
-            str, tuple[tuple[tuple[str, int, int], ...], str]
-        ] = {}
 
     @property
     def desired(self) -> DesiredState:
@@ -213,9 +207,6 @@ class Supervisor:
         if self._reload_requested:
             self._reload_requested = False
             await self._reload_locked()
-        elif self._revision_stale():
-            logger.info("检测到服务包内容变化，重新加载期望状态")
-            await self._reload_locked()
 
         for runtime in list(self._runtimes.values()):
             handle = runtime.handle
@@ -250,31 +241,6 @@ class Supervisor:
         if self._dirty:
             self._write_state()
             self._dirty = False
-
-    def _revision_stale(self) -> bool:
-        """服务包内容是否已偏离当前期望状态。
-
-        配置不变时也据此重载：包版本升级或源码改动都意味着进程需要重启才能
-        加载新的模块实现。先用 ``stat`` 签名做低成本比对，只有疑似变化时才
-        读取文件内容计算指纹。
-        """
-        for name, runtime in self._runtimes.items():
-            service = runtime.desired
-            scan = scan_package(service.service_dir)
-            cached = self._source_probes.get(name)
-            if cached is not None and cached[0] == scan:
-                continue
-            digest = digest_package(service.service_dir, scan)
-            self._source_probes[name] = (scan, digest)
-            if digest == service.source_hash:
-                continue
-            logger.info(
-                "服务 %s 的包内容变化（版本 %s），重新加载",
-                service.meta.name,
-                service.package_version or "(未声明)",
-            )
-            return True
-        return False
 
     async def _reload_locked(self) -> bool:
         try:

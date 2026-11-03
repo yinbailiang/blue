@@ -36,6 +36,10 @@ __all__ = [
     "SessionAppendReplyEvent",
     "SessionAppendRequest",
     "SessionAppendResponse",
+    "SessionCancelEvent",
+    "SessionCancelReplyEvent",
+    "SessionCancelRequest",
+    "SessionCancelResponse",
     "SessionGetEvent",
     "SessionGetReplyEvent",
     "SessionGetRequest",
@@ -222,6 +226,16 @@ class SessionReplyResponse(ResponseProtocol):
     steps: int = Field(default=0, description="本次处理消耗的模型步数")
 
 
+class SessionCancelRequest(RequestProtocol):
+    """中断某个会话正在进行的回复。"""
+
+
+class SessionCancelResponse(ResponseProtocol):
+    """中断结果。"""
+
+    cancelled: bool = Field(default=False, description="是否确有进行中的回复被中断")
+
+
 class SessionResetRequest(RequestProtocol):
     """清空某个会话的历史。"""
 
@@ -278,6 +292,7 @@ class SessionStreamPayload(BaseModel):
         "tool_start",
         "tool_result",
         "done",
+        "cancelled",
         "error",
     ] = Field(description="流式事件类型")
     step: int = Field(default=0, description="当前模型步骤序号")
@@ -406,6 +421,20 @@ class SessionReplyEvent(EventDeclaration):
     payload_type = SessionReplyResponse
 
 
+class SessionCancelEvent(EventDeclaration):
+    """会话中断请求事件。"""
+
+    name = "session.cancel"
+    payload_type = SessionCancelRequest
+
+
+class SessionCancelReplyEvent(EventDeclaration):
+    """会话中断响应事件。"""
+
+    name = "session.cancel.reply"
+    payload_type = SessionCancelResponse
+
+
 class SessionResetEvent(EventDeclaration):
     """会话重置请求事件。"""
 
@@ -445,6 +474,8 @@ ALL_EVENTS: tuple[type[EventDeclaration], ...] = (
     CatalogReplyEvent,
     SessionPromptEvent,
     SessionReplyEvent,
+    SessionCancelEvent,
+    SessionCancelReplyEvent,
     SessionResetEvent,
     SessionResetReplyEvent,
     SessionStateEvent,

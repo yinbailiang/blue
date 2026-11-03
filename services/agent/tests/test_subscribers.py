@@ -16,6 +16,7 @@ from blue.protocol import (
     CatalogChangedEvent,
     CatalogChangedPayload,
     CatalogQueryEvent,
+    SessionCancelEvent,
     SessionPromptEvent,
     SessionPromptRequest,
     SessionReplyResponse,
@@ -151,11 +152,18 @@ def test_session_handler_has_no_timeout() -> None:
                 text=payload.text,
             )
 
+        def cancel(self, session_id: str) -> bool:
+            del session_id
+            return False
+
     handler = SessionHandler(FakeSessions())
 
     assert handler.handle_timeout is None
-    assert list(handler.subscriptions.patterns) == [SessionPromptEvent.name]
-    assert len(handler.subscriptions) == 1
+    assert list(handler.subscriptions.patterns) == [
+        SessionPromptEvent.name,
+        SessionCancelEvent.name,
+    ]
+    assert len(handler.subscriptions) == 2
 
 
 def test_tool_call_handler_subscribes_tool_call() -> None:

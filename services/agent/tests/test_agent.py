@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from typing import cast
 
 import pytest
 from blue_service_agent.agent import AgentCore
@@ -19,6 +20,7 @@ from blue.errors import RuntimeConfigError
 from blue.messages import encode_messages
 from blue.protocol import (
     SessionPromptEvent,
+    SessionPromptRequest,
     SessionReplyEvent,
     SessionReplyResponse,
     SessionSnapshot,
@@ -235,3 +237,179 @@ def test_resolve_api_key_requires_secret(monkeypatch: pytest.MonkeyPatch) -> Non
 def test_resolve_api_key_uses_configured_value() -> None:
     """配置了密钥就使用配置值。"""
     assert AgentConfig(api_key="sk-test").resolve_api_key() == "sk-test"
+
+
+def test_agent_rejects_unknown_tool_without_waiting() -> None:
+    """模型请求不存在的工具时立即回灌错误，不再等满 tool_timeout。"""
+    asyncio.run(_agent_rejects_unknown_tool())
+
+
+async def _agent_rejects_unknown_tool() -> None:
+    hub = MemoryFanout()
+    registry = ToolRegistryService(
+        runtime=make_runtime(hub, "registry"),
+        ttl=5.0,
+        sweep_interval=0.05,
+    )
+    worker = ToolWorker(runtime=make_runtime(hub, "tool.echo"), tool=echo, ttl=5.0)
+    ghost = ToolCall(
+        id="call-ghost",
+        function=FunctionCall(name="shell_placeholder", arguments={"command": "ls"}),
+    )
+    client = ScriptedClient(
+        [
+            Message.assistant(tool_calls=[ghost]),
+            Message.assistant(content="改用可用工具"),
+        ]
+    )
+    core = AgentCore(
+        runtime=make_runtime(hub, "agent"),
+        settings=AgentConfig(api_key="sk-test", max_steps=4, tool_timeout=600.0),
+        client=client,
+        session_gateway=MemorySessionGateway(),
+    )
+    chat = make_runtime(hub, "chat")
+
+    await registry.start()
+    await worker.start()
+    await core.start()
+    await chat.start()
+    try:
+        await wait_until(lambda: registry.state.worker_count == 1)
+        response = await asyncio.wait_for(
+            request(
+                chat.proxy(),
+                SessionPromptEvent.name,
+                {"text": "用 shell_placeholder 跑一下"},
+                SessionReplyEvent.name,
+                session_id="session-ghost",
+                timeout=30.0,
+            ),
+            timeout=30.0,
+        )
+        assert isinstance(response, SessionReplyResponse)
+        assert response.success is True
+        assert response.text == "改用可用工具"
+    finally:
+        await chat.stop()
+        await core.stop()
+        await worker.stop()
+        await registry.stop()
+
+    tool_messages = [
+        message for message in client.calls[-1] if message.role == MessageRole.TOOL
+    ]
+    assert len(tool_messages) == 1
+    assert tool_messages[0].tool_call_id == "call-ghost"
+    assert isinstance(tool_messages[0].content, str)
+    assert "不存在" in tool_messages[0].content
+    assert "echo" in tool_messages[0].content
+
+
+def test_agent_repairs_dangling_tool_call_from_history() -> None:
+    """历史上遗留的悬空 tool_calls 在发送给模型前被补成可接受的消息序列。"""
+    asyncio.run(_agent_repairs_dangling_tool_call_from_history())
+
+
+async def _agent_repairs_dangling_tool_call_from_history() -> None:
+    hub = MemoryFanout()
+    gateway = MemorySessionGateway()
+    gateway.messages["session-broken"] = [
+        Message.system("sys"),
+        Message.user("去查一下"),
+        Message.assistant(
+            tool_calls=[
+                ToolCall(
+                    id="call-lost",
+                    function=FunctionCall(name="echo", arguments={"text": "ping"}),
+                )
+            ]
+        ),
+    ]
+    client = ScriptedClient([Message.assistant(content="继续完成")])
+    core = AgentCore(
+        runtime=make_runtime(hub, "agent"),
+        settings=AgentConfig(api_key="sk-test", max_steps=4),
+        client=client,
+        session_gateway=gateway,
+    )
+    chat = make_runtime(hub, "chat")
+
+    await core.start()
+    await chat.start()
+    try:
+        response = await request(
+            chat.proxy(),
+            SessionPromptEvent.name,
+            {"text": "继续"},
+            SessionReplyEvent.name,
+            session_id="session-broken",
+            timeout=10.0,
+        )
+        assert isinstance(response, SessionReplyResponse)
+        assert response.success is True
+        assert response.text == "继续完成"
+    finally:
+        await chat.stop()
+        await core.stop()
+
+    sent = client.calls[0]
+    assert [message.role for message in sent] == [
+        MessageRole.SYSTEM,
+        MessageRole.USER,
+        MessageRole.ASSISTANT,
+        MessageRole.TOOL,
+        MessageRole.USER,
+    ]
+    placeholder = sent[3]
+    assert placeholder.tool_call_id == "call-lost"
+    assert isinstance(placeholder.content, str)
+    assert "call-lost" not in placeholder.content
+    assert "echo" in placeholder.content
+
+
+def test_cancel_without_active_turn_returns_false() -> None:
+    """没有进行中的 turn 时，cancel() 直接返回 False。"""
+    core = AgentCore(
+        runtime=make_runtime(MemoryFanout(), "agent"),
+        settings=AgentConfig(api_key="sk-test"),
+        client=ScriptedClient([]),
+    )
+
+    assert core.cancel("no-such-session") is False
+
+
+def test_cancel_interrupts_active_turn(monkeypatch: pytest.MonkeyPatch) -> None:
+    """cancel() 会取消该会话正在运行的 turn。"""
+    asyncio.run(_cancel_active_turn(monkeypatch))
+
+
+async def _cancel_active_turn(monkeypatch: pytest.MonkeyPatch) -> None:
+    core = AgentCore(
+        runtime=make_runtime(MemoryFanout(), "agent"),
+        settings=AgentConfig(api_key="sk-test"),
+        client=ScriptedClient([]),
+    )
+    started = asyncio.Event()
+
+    async def blocking_run(
+        payload: SessionPromptRequest, bus_proxy: EventBus.Proxy
+    ) -> SessionReplyResponse:
+        del bus_proxy
+        started.set()
+        await asyncio.sleep(30)
+        return SessionReplyResponse(
+            session_id=payload.session_id,
+            request_id=payload.request_id,
+        )
+
+    monkeypatch.setattr(core, "_run_prompt", blocking_run)
+
+    payload = SessionPromptRequest(session_id="s1", request_id="req", text="hi")
+    task = asyncio.create_task(core.handle_prompt(payload, cast(EventBus.Proxy, None)))
+    await started.wait()
+
+    assert core.cancel("s1") is True
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert core.cancel("s1") is False

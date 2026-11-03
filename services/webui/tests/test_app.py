@@ -28,6 +28,7 @@ class FakeBackend:
 
     def __init__(self) -> None:
         self.reset_calls: list[str] = []
+        self.cancel_calls: list[str] = []
         self.stream_queue: asyncio.Queue[SessionStreamPayload] | None = None
 
     async def start(self) -> None:
@@ -35,6 +36,10 @@ class FakeBackend:
 
     async def stop(self) -> None:
         return
+
+    async def cancel(self, session_id: str) -> bool:
+        self.cancel_calls.append(session_id)
+        return False
 
     async def sessions(self) -> list[SessionInfo]:
         return [
@@ -233,3 +238,44 @@ def test_chat_websocket_streams_reply() -> None:
     reply = next(frame for frame in frames if frame["type"] == "reply")
     assert reply["text"] == "收到：ping"
     assert frames[-1]["session"]["session_id"] == "s1"
+
+
+def test_websocket_cancel_interrupts_running_prompt() -> None:
+    """流式期间收到 cancel 帧会请求中断，并回推 cancelled。"""
+
+    class BlockingBackend(FakeBackend):
+        """prompt 一直挂起到收到 cancel 为止。"""
+
+        def __init__(self) -> None:
+            super().__init__()
+            self.released = asyncio.Event()
+            self.cancelled_sessions: list[str] = []
+
+        async def prompt(self, session_id: str, text: str) -> SessionReplyResponse:
+            del text
+            await self.released.wait()
+            return SessionReplyResponse(
+                session_id=session_id,
+                request_id="req",
+                success=False,
+                error_msg="已中断",
+            )
+
+        async def cancel(self, session_id: str) -> bool:
+            self.cancelled_sessions.append(session_id)
+            self.released.set()
+            return True
+
+    backend = BlockingBackend()
+    app = create_app(backend=backend, config=WebUIConfig(poll_interval=0.01))
+    client: Any = TestClient(app)
+
+    with client.websocket_connect("/ws/chat") as socket:
+        assert socket.receive_json()["type"] == "ready"
+        socket.send_json({"type": "prompt", "session_id": "s1", "text": "你好"})
+        assert socket.receive_json()["type"] == "status"
+        socket.send_json({"type": "cancel", "session_id": "s1"})
+        frame: dict[str, Any] = socket.receive_json()
+
+    assert frame["type"] == "cancelled"
+    assert backend.cancelled_sessions == ["s1"]

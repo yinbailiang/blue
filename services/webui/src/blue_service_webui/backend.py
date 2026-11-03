@@ -20,6 +20,9 @@ from blue.protocol import (
     CatalogQueryEvent,
     CatalogQueryResponse,
     CatalogReplyEvent,
+    SessionCancelEvent,
+    SessionCancelReplyEvent,
+    SessionCancelResponse,
     SessionGetEvent,
     SessionGetReplyEvent,
     SessionGetResponse,
@@ -164,6 +167,10 @@ class WebBackend(Protocol):
         """删除会话历史。"""
         ...
 
+    async def cancel(self, session_id: str) -> bool:
+        """中断该会话正在进行的回复；返回是否确有进行中的 turn。"""
+        ...
+
     async def tools(self) -> CatalogQueryResponse:
         """查询工具目录。"""
         ...
@@ -289,6 +296,24 @@ class BusBackend:
         if not response.success:
             raise WebUIError(response.error_msg or "会话重置失败")
         return True
+
+    async def cancel(self, session_id: str) -> bool:
+        """请求中断该会话正在进行的回复。
+
+        中断是协作式的：真正停下发生在 Agent 下一个 ``await`` 点，因此这里返回
+        ``True`` 只表示请求已送达并且确有进行中的 turn。
+        """
+        response = await self._request(
+            SessionCancelEvent.name,
+            {},
+            SessionCancelReplyEvent.name,
+            session_id=session_id,
+        )
+        if not isinstance(response, SessionCancelResponse):
+            raise WebUIError("收到非预期的中断响应")
+        if not response.success:
+            raise WebUIError(response.error_msg or "中断失败")
+        return response.cancelled
 
     async def tools(self) -> CatalogQueryResponse:
         """读取工具目录。"""
