@@ -230,20 +230,22 @@
                 <span class="hint-dot"></span>
                 Enter 发送 · Shift + Enter 换行 · 可粘贴或拖入图片
               </span>
-              <input
-                type="file"
-                id="attachment-input"
-                accept="image/png,image/jpeg,image/gif,image/webp"
-                multiple
-                hidden
-              />
-              <button class="attach-button" id="attach" type="button" aria-label="添加图片">
-                <svg><use href="#i-image"></use></svg>
-              </button>
-              <button class="send-button" id="send" type="submit" aria-label="发送消息">
-                <svg><use href="#i-send" id="send-icon"></use></svg>
-                <span id="send-label">发送</span>
-              </button>
+              <div class="composer-actions">
+                <input
+                  type="file"
+                  id="attachment-input"
+                  accept="image/png,image/jpeg,image/gif,image/webp"
+                  multiple
+                  hidden
+                />
+                <button class="attach-button" id="attach" type="button" aria-label="添加图片">
+                  <svg><use href="#i-image"></use></svg>
+                </button>
+                <button class="send-button" id="send" type="submit" aria-label="发送消息">
+                  <svg><use href="#i-send" id="send-icon"></use></svg>
+                  <span id="send-label">发送</span>
+                </button>
+              </div>
             </div>
           </form>
           <p class="disclaimer">Agent 可能会读取文件或执行命令，请在可信工作区中使用。</p>
