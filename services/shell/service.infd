@@ -1,0 +1,15 @@
+~ServiceTemplate {
+  workdir: <str?> = null
+}
+
+service {
+  name = "shell"
+  kind = "tool"
+  package = "blue-service-shell"
+  module = "blue_service_shell"
+  depends_on = ["bus"]
+  restart = "always"
+  stop_timeout = 5.0
+  startup_timeout = 30.0
+  readiness = "process"
+}

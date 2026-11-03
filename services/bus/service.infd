@@ -1,0 +1,30 @@
+
+
+~ServiceTemplate {
+  transport: in("rabbit") = "rabbit"
+  url: str = "amqp://guest:guest@127.0.0.1:5672/blue"
+  mode: in("managed", "external") = "managed"
+  rabbitmq_bin: str = "rabbitmq-server"
+  rabbitmqctl_bin: str = "rabbitmqctl"
+  data_dir: str = "rabbitmq"
+  vhost: str = "blue"
+  user: str = "guest"
+  password_env: str = "RABBITMQ_PASSWORD"
+  configure: bool = true
+  proxy: bool = false
+  proxy_listen: str = "amqp://127.0.0.1:5673/blue"
+  startup_timeout: <float, positive> = 60.0
+  stop_timeout: <float, positive> = 30.0
+}
+
+service {
+  name = "bus"
+  kind = "infra"
+  package = "blue-service-bus"
+  module = "blue_service_bus"
+  depends_on = []
+  restart = "always"
+  stop_timeout = 30.0
+  startup_timeout = 60.0
+  readiness = "tcp"
+}

@@ -1,0 +1,14 @@
+~ServiceTemplate {
+}
+
+service {
+  name = "chat"
+  kind = "ui"
+  package = "blue-service-chat"
+  module = "blue_service_chat"
+  depends_on = ["bus", "agent"]
+  restart = "never"
+  stop_timeout = 5.0
+  startup_timeout = 10.0
+  readiness = "none"
+}

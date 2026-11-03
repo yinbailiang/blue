@@ -1,0 +1,14 @@
+~ServiceTemplate {
+}
+
+service {
+  name = "clock"
+  kind = "tool"
+  package = "blue-service-clock"
+  module = "blue_service_clock"
+  depends_on = ["bus"]
+  restart = "always"
+  stop_timeout = 5.0
+  startup_timeout = 30.0
+  readiness = "process"
+}

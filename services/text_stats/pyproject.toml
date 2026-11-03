@@ -1,0 +1,20 @@
+[project]
+name = "blue-service-text-stats"
+version = "0.1.0"
+description = "blue text statistics tool service"
+requires-python = ">=3.14"
+dependencies = ["blue", "pydantic>=2"]
+
+[tool.uv.sources]
+blue = { workspace = true }
+
+[build-system]
+requires = ["uv_build>=0.9.0,<0.14"]
+build-backend = "uv_build"
+
+[tool.uv.build-backend]
+module-name = "blue_service_text_stats"
+module-root = "src"
+
+[project.scripts]
+blue-service-text-stats = "blue_service_text_stats:main"

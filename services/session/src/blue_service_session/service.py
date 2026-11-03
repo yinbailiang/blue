@@ -1,0 +1,304 @@
+"""session 服务：把会话持久化能力暴露为总线 RPC。"""
+
+from __future__ import annotations
+
+import asyncio
+import contextlib
+import logging
+import time
+from typing import Protocol
+
+from infinity_bus import Event, EventBus, EventHandler
+from pydantic import BaseModel
+
+from blue.protocol import (
+    SessionAppendEvent,
+    SessionAppendReplyEvent,
+    SessionAppendRequest,
+    SessionAppendResponse,
+    SessionGetEvent,
+    SessionGetReplyEvent,
+    SessionGetRequest,
+    SessionGetResponse,
+    SessionInfo,
+    SessionResetEvent,
+    SessionResetReplyEvent,
+    SessionResetRequest,
+    SessionResetResponse,
+    SessionSnapshot,
+    SessionStateEvent,
+    SessionStateReplyEvent,
+    SessionStateRequest,
+    SessionStateResponse,
+    SessionUpdateEvent,
+    SessionUpdateReplyEvent,
+    SessionUpdateRequest,
+    SessionUpdateResponse,
+)
+from blue.transport import BusRuntime
+from blue_service_session.config import SessionConfig
+from blue_service_session.db import (
+    SessionDatabase,
+    SessionMeta,
+    SessionNotFoundError,
+    SessionRecord,
+)
+
+logger = logging.getLogger(__name__)
+
+__all__ = ["SessionBackend", "SessionRpcHandler", "SessionService"]
+
+
+class SessionBackend(Protocol):
+    """RPC 处理器依赖的会话存储能力。"""
+
+    async def ensure(self, session_id: str, system_prompt: str) -> SessionRecord:
+        """取/建会话。"""
+        ...
+
+    async def append(self, session_id: str, payloads: list[str]) -> SessionMeta:
+        """追加消息。"""
+        ...
+
+    async def update(
+        self, session_id: str, steps: int | None, touch: bool
+    ) -> SessionMeta:
+        """更新元信息。"""
+        ...
+
+    async def reset(self, session_id: str) -> bool:
+        """删除会话。"""
+        ...
+
+    async def state(self) -> list[SessionInfo]:
+        """列出会话。"""
+        ...
+
+
+class SessionService:
+    """会话数据库 + 总线成员。"""
+
+    def __init__(self, *, config: SessionConfig, runtime: BusRuntime) -> None:
+        self._config = config
+        self._runtime = runtime
+        self._db = SessionDatabase(
+            config.resolve_database_path(),
+            max_sessions=config.max_sessions,
+            idle_ttl=config.idle_ttl,
+            busy_timeout_ms=config.busy_timeout_ms,
+        )
+        self._pruner: asyncio.Task[None] | None = None
+
+    @property
+    def database(self) -> SessionDatabase:
+        """会话数据库。"""
+        return self._db
+
+    async def start(self) -> None:
+        """连接数据库、启动总线、注册 RPC 处理器与过期回收任务。"""
+        await self._db.connect()
+        try:
+            await self._runtime.start()
+            await self._runtime.register(SessionRpcHandler(self))
+        except Exception:
+            await self._runtime.stop()
+            await self._db.close()
+            raise
+        self._pruner = asyncio.create_task(self._prune_loop(), name="session.pruner")
+        logger.info("session 服务已启动（%s）", self._db.path)
+
+    async def stop(self) -> None:
+        """停止回收任务、总线与数据库。"""
+        pruner, self._pruner = self._pruner, None
+        if pruner is not None:
+            pruner.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await pruner
+        await self._runtime.stop()
+        await self._db.close()
+
+    async def ensure(self, session_id: str, system_prompt: str) -> SessionRecord:
+        """取/建会话。"""
+        return await self._db.ensure(session_id, system_prompt, now=time.time())
+
+    async def append(self, session_id: str, payloads: list[str]) -> SessionMeta:
+        """追加消息。"""
+        return await self._db.append(session_id, payloads, now=time.time())
+
+    async def update(
+        self, session_id: str, steps: int | None, touch: bool
+    ) -> SessionMeta:
+        """更新会话步数/活动时间。"""
+        return await self._db.update(
+            session_id, steps=steps, touch=touch, now=time.time()
+        )
+
+    async def reset(self, session_id: str) -> bool:
+        """删除会话。"""
+        return await self._db.reset(session_id)
+
+    async def state(self) -> list[SessionInfo]:
+        """列出会话。"""
+        return await self._db.state()
+
+    async def _prune_loop(self) -> None:
+        interval = self._config.prune_interval
+        while True:
+            await asyncio.sleep(interval)
+            try:
+                removed = await self._db.prune(now=time.time())
+            except Exception:
+                logger.warning("会话过期回收失败", exc_info=True)
+                continue
+            if removed:
+                logger.info("已回收会话：%s", ", ".join(removed))
+
+
+class SessionRpcHandler(EventHandler):
+    """会话 RPC 事件入口。"""
+
+    def __init__(self, backend: SessionBackend) -> None:
+        super().__init__(
+            subscriptions=[
+                SessionGetEvent.name,
+                SessionAppendEvent.name,
+                SessionUpdateEvent.name,
+                SessionResetEvent.name,
+                SessionStateEvent.name,
+            ],
+            handle_timeout=15.0,
+        )
+        self._backend = backend
+
+    async def handle(
+        self,
+        payload: BaseModel | None,
+        bus_proxy: EventBus.Proxy,
+        raw_event: Event,
+    ) -> None:
+        del raw_event
+        if isinstance(payload, SessionGetRequest):
+            await self._handle_get(payload, bus_proxy)
+        elif isinstance(payload, SessionAppendRequest):
+            await self._handle_append(payload, bus_proxy)
+        elif isinstance(payload, SessionUpdateRequest):
+            await self._handle_update(payload, bus_proxy)
+        elif isinstance(payload, SessionResetRequest):
+            await self._handle_reset(payload, bus_proxy)
+        elif isinstance(payload, SessionStateRequest):
+            await self._handle_state(payload, bus_proxy)
+
+    async def _handle_get(
+        self, payload: SessionGetRequest, bus_proxy: EventBus.Proxy
+    ) -> None:
+        try:
+            record = await self._backend.ensure(
+                payload.session_id, payload.system_prompt
+            )
+            reply = SessionGetResponse(
+                session_id=payload.session_id,
+                request_id=payload.request_id,
+                session=_snapshot(record),
+            )
+        except SessionNotFoundError as error:
+            reply = SessionGetResponse(
+                session_id=payload.session_id,
+                request_id=payload.request_id,
+                success=False,
+                error_msg=str(error),
+            )
+        await bus_proxy.publish(SessionGetReplyEvent.name, reply)
+
+    async def _handle_append(
+        self, payload: SessionAppendRequest, bus_proxy: EventBus.Proxy
+    ) -> None:
+        try:
+            meta = await self._backend.append(payload.session_id, payload.messages)
+            reply = SessionAppendResponse(
+                session_id=payload.session_id,
+                request_id=payload.request_id,
+                message_count=meta.message_count,
+                updated_at=meta.updated_at,
+            )
+        except SessionNotFoundError as error:
+            reply = SessionAppendResponse(
+                session_id=payload.session_id,
+                request_id=payload.request_id,
+                success=False,
+                error_msg=str(error),
+            )
+        await bus_proxy.publish(SessionAppendReplyEvent.name, reply)
+
+    async def _handle_update(
+        self, payload: SessionUpdateRequest, bus_proxy: EventBus.Proxy
+    ) -> None:
+        try:
+            meta = await self._backend.update(
+                payload.session_id, payload.steps, payload.touch
+            )
+            reply = SessionUpdateResponse(
+                session_id=payload.session_id,
+                request_id=payload.request_id,
+                steps=meta.steps,
+                message_count=meta.message_count,
+                updated_at=meta.updated_at,
+            )
+        except SessionNotFoundError as error:
+            reply = SessionUpdateResponse(
+                session_id=payload.session_id,
+                request_id=payload.request_id,
+                success=False,
+                error_msg=str(error),
+            )
+        await bus_proxy.publish(SessionUpdateReplyEvent.name, reply)
+
+    async def _handle_reset(
+        self, payload: SessionResetRequest, bus_proxy: EventBus.Proxy
+    ) -> None:
+        try:
+            await self._backend.reset(payload.session_id)
+            reply = SessionResetResponse(
+                session_id=payload.session_id,
+                request_id=payload.request_id,
+            )
+        except Exception as error:
+            logger.warning("重置会话失败：%s", error, exc_info=True)
+            reply = SessionResetResponse(
+                session_id=payload.session_id,
+                request_id=payload.request_id,
+                success=False,
+                error_msg=str(error),
+            )
+        await bus_proxy.publish(SessionResetReplyEvent.name, reply)
+
+    async def _handle_state(
+        self, payload: SessionStateRequest, bus_proxy: EventBus.Proxy
+    ) -> None:
+        try:
+            sessions = await self._backend.state()
+            reply = SessionStateResponse(
+                session_id=payload.session_id,
+                request_id=payload.request_id,
+                sessions=sessions,
+            )
+        except Exception as error:
+            logger.warning("读取会话状态失败：%s", error, exc_info=True)
+            reply = SessionStateResponse(
+                session_id=payload.session_id,
+                request_id=payload.request_id,
+                success=False,
+                error_msg=str(error),
+            )
+        await bus_proxy.publish(SessionStateReplyEvent.name, reply)
+
+
+def _snapshot(record: SessionRecord) -> SessionSnapshot:
+    meta = record.meta
+    return SessionSnapshot(
+        session_id=meta.session_id,
+        messages=record.messages,
+        created_at=meta.created_at,
+        updated_at=meta.updated_at,
+        steps=meta.steps,
+        message_count=meta.message_count,
+    )

@@ -1,0 +1,14 @@
+~ServiceTemplate {
+}
+
+service {
+  name = "edit_file"
+  kind = "tool"
+  package = "blue-service-edit-file"
+  module = "blue_service_edit_file"
+  depends_on = ["bus"]
+  restart = "always"
+  stop_timeout = 5.0
+  startup_timeout = 30.0
+  readiness = "process"
+}

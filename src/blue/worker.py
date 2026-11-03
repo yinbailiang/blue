@@ -5,7 +5,11 @@
 1. 用 ``infinity_agent.ToolRegistry`` 从函数签名推断 :class:`ToolDefinition`；
 2. 连上总线，订阅 ``tool.call``，只处理属于自己的调用；
 3. 发布 ``tool.register`` 把自己登记到工具注册中心；
-4. 周期性发送 ``tool.heartbeat`` 续约，进程退出时发布 ``tool.unregister``。
+4. 周期性补发注册并发送 ``tool.heartbeat`` 续约，进程退出时发布
+   ``tool.unregister``。
+
+周期补发注册可以覆盖「工具先于 Agent 启动」的竞态；注册中心按 worker_id
+幂等处理。
 
 这样工具既不需要知道 Agent 在哪，也不需要被 Agent 静态导入——注册中心
 把目录广播给所有 Agent，Agent 按名字发起调用。
@@ -165,12 +169,21 @@ class ToolWorker:
         )
 
     async def _heartbeat_loop(self) -> None:
-        """周期性续约；单次失败不影响后续。"""
+        """周期性补发注册并续约；单次失败不影响后续。"""
         interval = max(self._ttl / 3.0, 0.1)
         while True:
             await asyncio.sleep(interval)
             try:
-                await self._runtime.proxy().publish(
+                proxy = self._runtime.proxy()
+                await proxy.publish(
+                    ToolRegisterEvent.name,
+                    ToolRegisterPayload(
+                        worker_id=self._worker_id,
+                        tool=self._definition,
+                        ttl=self._ttl,
+                    ),
+                )
+                await proxy.publish(
                     ToolHeartbeatEvent.name,
                     ToolHeartbeatPayload(worker_id=self._worker_id),
                 )

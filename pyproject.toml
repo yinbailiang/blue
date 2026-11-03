@@ -1,7 +1,7 @@
 [project]
 name = "blue"
 version = "0.1.0"
-description = "Add your description here"
+description = "分布式 Agent 系统的控制面与共享 SDK"
 readme = "README.md"
 requires-python = ">=3.14"
 dependencies = [
@@ -21,9 +21,14 @@ build-backend = "uv_build"
 [tool.uv.build-backend]
 module-name = "blue"
 module-root = "src"
+source-include = ["py.typed"]
+
+[tool.uv.workspace]
+members = ["services/*"]
 
 [dependency-groups]
 dev = [
+    "httpx>=0.28.0",
     "pyright>=1.1.414",
     "pytest>=9.2.0",
     "ruff>=0.17.3",
@@ -32,7 +37,7 @@ dev = [
 [tool.ruff]
 target-version = "py314"
 line-length = 88
-src = ["src", "handlers", "tests"]
+src = ["src", "services", "tests"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B", "SIM", "RUF"]
@@ -40,9 +45,26 @@ select = ["E", "F", "I", "UP", "B", "SIM", "RUF"]
 ignore = ["RUF001", "RUF002", "RUF003"]
 
 [tool.pyright]
-include = ["src", "handlers", "tests"]
+include = ["src", "services", "tests"]
+extraPaths = [
+    "src",
+    "services/agent/src",
+    "services/bus/src",
+    "services/chat/src",
+    "services/clock/src",
+    "services/edit_file/src",
+    "services/echo/src",
+    "services/inspect/src",
+    "services/read_file/src",
+    "services/session/src",
+    "services/shell/src",
+    "services/text_stats/src",
+    "services/webui/src",
+    "services/write_file/src",
+]
 typeCheckingMode = "strict"
 
 [tool.pytest.ini_options]
-testpaths = ["tests"]
+testpaths = ["tests", "services"]
 pythonpath = ["src", "."]
+filterwarnings = ["ignore::starlette.exceptions.StarletteDeprecationWarning"]

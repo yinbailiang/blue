@@ -1,0 +1,14 @@
+~ServiceTemplate {
+}
+
+service {
+  name = "text_stats"
+  kind = "tool"
+  package = "blue-service-text-stats"
+  module = "blue_service_text_stats"
+  depends_on = ["bus"]
+  restart = "always"
+  stop_timeout = 5.0
+  startup_timeout = 30.0
+  readiness = "process"
+}

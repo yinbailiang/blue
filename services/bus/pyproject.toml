@@ -1,0 +1,20 @@
+[project]
+name = "blue-service-bus"
+version = "0.1.0"
+description = "blue RabbitMQ management and AMQP proxy service"
+requires-python = ">=3.14"
+dependencies = ["blue", "pydantic>=2"]
+
+[tool.uv.sources]
+blue = { workspace = true }
+
+[build-system]
+requires = ["uv_build>=0.9.0,<0.14"]
+build-backend = "uv_build"
+
+[tool.uv.build-backend]
+module-name = "blue_service_bus"
+module-root = "src"
+
+[project.scripts]
+blue-service-bus = "blue_service_bus:main"

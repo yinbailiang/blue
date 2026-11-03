@@ -1,0 +1,14 @@
+~ServiceTemplate {
+}
+
+service {
+  name = "read_file"
+  kind = "tool"
+  package = "blue-service-read-file"
+  module = "blue_service_read_file"
+  depends_on = ["bus"]
+  restart = "always"
+  stop_timeout = 5.0
+  startup_timeout = 30.0
+  readiness = "process"
+}

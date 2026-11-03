@@ -1,0 +1,19 @@
+~ServiceTemplate {
+  database_path: str = "sessions.db"
+  max_sessions: <int, range(1, 100000)> = 512
+  idle_ttl: <float, positive> = 7200.0
+  prune_interval: <float, positive> = 60.0
+  busy_timeout_ms: <int, range(100, 60000)> = 5000
+}
+
+service {
+  name = "session"
+  kind = "session"
+  package = "blue-service-session"
+  module = "blue_service_session"
+  depends_on = ["bus"]
+  restart = "always"
+  stop_timeout = 10.0
+  startup_timeout = 15.0
+  readiness = "process"
+}

@@ -1,0 +1,21 @@
+~ServiceTemplate {
+  host: str = "127.0.0.1"
+  port: <int, range(1, 65536)> = 8787
+  title: str = "Blue Agent Studio"
+  request_timeout: <float, positive> = 600.0
+  poll_interval: <float, positive> = 0.9
+  startup_timeout: <float, positive> = 15.0
+}
+
+service {
+  name = "webui"
+  kind = "ui"
+  package = "blue-service-webui"
+  module = "blue_service_webui"
+  depends_on = ["bus", "session", "agent"]
+  restart = "always"
+  stop_timeout = 10.0
+  startup_timeout = 20.0
+  readiness = "tcp"
+  ready_tcp = "127.0.0.1:8787"
+}

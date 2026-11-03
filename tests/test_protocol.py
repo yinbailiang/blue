@@ -13,6 +13,8 @@ from blue.protocol import (
     CatalogQueryRequest,
     SessionPromptEvent,
     SessionPromptRequest,
+    SessionStreamEvent,
+    SessionStreamPayload,
     ToolCallEvent,
     ToolCallRequest,
     register_events,
@@ -23,6 +25,7 @@ def test_event_names_are_fixed_constants() -> None:
     """事件名是稳定常量，不含命名空间前缀。"""
     assert ToolCallEvent.name == "tool.call"
     assert SessionPromptEvent.name == "session.prompt"
+    assert SessionStreamEvent.name == "session.stream"
     assert CatalogChangedEvent.name == "catalog.changed"
     assert tuple(event.name for event in ALL_EVENTS) == EVENT_NAMES
     assert len(set(EVENT_NAMES)) == len(EVENT_NAMES)
@@ -79,3 +82,18 @@ def test_catalog_payload_default_factory_is_per_instance() -> None:
 def test_every_event_declares_payload_type() -> None:
     """所有跨进程事件都必须声明负载类型，才能参与校验与编解码。"""
     assert all(event.payload_type is not None for event in ALL_EVENTS)
+
+
+def test_session_stream_payload_is_broadcast_data() -> None:
+    """流式事件是广播数据，不要求 RPC 字段，但保留 session_id/request_id。"""
+    payload = SessionStreamPayload(
+        session_id="s1",
+        request_id="r1",
+        kind="text",
+        step=2,
+        text="你好",
+    )
+
+    assert payload.kind == "text"
+    assert payload.text == "你好"
+    assert SessionStreamEvent.payload_type is SessionStreamPayload

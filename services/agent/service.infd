@@ -1,0 +1,23 @@
+~ServiceTemplate {
+  provider: in("deepseek", "openai") = "deepseek"
+  model: str = "deepseek-v4-flash"
+  api_key: str = ""
+  api_key_env: str = "DEEPSEEK_API_KEY"
+  base_url: <str?> = null
+  system_prompt: str = "你是 blue，一个通过工具完成任务的智能体。需要外部能力时调用工具，不要臆测结果。"
+  max_steps: <int, range(32, )> = 512
+  tool_timeout: <float, positive> = 30.0
+  session_timeout: <float, positive> = 10.0
+}
+
+service {
+  name = "agent"
+  kind = "agent"
+  package = "blue-service-agent"
+  module = "blue_service_agent"
+  depends_on = ["bus", "session"]
+  restart = "always"
+  stop_timeout = 15.0
+  startup_timeout = 30.0
+  readiness = "process"
+}

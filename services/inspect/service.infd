@@ -1,0 +1,14 @@
+~ServiceTemplate {
+}
+
+service {
+  name = "inspect"
+  kind = "ui"
+  package = "blue-service-inspect"
+  module = "blue_service_inspect"
+  depends_on = ["bus", "agent"]
+  restart = "never"
+  stop_timeout = 5.0
+  startup_timeout = 10.0
+  readiness = "none"
+}

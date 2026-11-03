@@ -1,0 +1,238 @@
+<!doctype html>
+<html lang="zh-CN" data-theme="dark">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="theme-color" content="#070b14" />
+    <meta
+      name="description"
+      content="Blue Agent Studio —— 通过工具完成任务的智能体控制台"
+    />
+    <title>Blue Agent Studio</title>
+    <link rel="icon" href="/static/favicon.svg" type="image/svg+xml" />
+    <link rel="stylesheet" href="/static/vendor/katex/katex.min.css" />
+    <link rel="stylesheet" href="/static/styles.css" />
+  </head>
+  <body>
+    <svg class="sprite" aria-hidden="true">
+      <symbol id="i-spark" viewBox="0 0 24 24">
+        <path d="M12 2l1.9 6.1L20 10l-6.1 1.9L12 18l-1.9-6.1L4 10l6.1-1.9L12 2z" />
+        <path d="M19 16l.8 2.2L22 19l-2.2.8L19 22l-.8-2.2L16 19l2.2-.8L19 16z" />
+      </symbol>
+      <symbol id="i-plus" viewBox="0 0 24 24">
+        <path d="M12 5v14M5 12h14" />
+      </symbol>
+      <symbol id="i-send" viewBox="0 0 24 24">
+        <path d="M4 12L20 4l-5 16-3.5-6.5L4 12z" />
+        <path d="M11.5 13.5L20 4" />
+      </symbol>
+      <symbol id="i-menu" viewBox="0 0 24 24">
+        <path d="M4 7h16M4 12h16M4 17h16" />
+      </symbol>
+      <symbol id="i-moon" viewBox="0 0 24 24">
+        <path d="M20 15.5A8.5 8.5 0 018.5 4 8.5 8.5 0 1020 15.5z" />
+      </symbol>
+      <symbol id="i-sun" viewBox="0 0 24 24">
+        <circle cx="12" cy="12" r="4.2" />
+        <path d="M12 2v2.2M12 19.8V22M2 12h2.2M19.8 12H22M5 5l1.6 1.6M17.4 17.4L19 19M19 5l-1.6 1.6M6.6 17.4L5 19" />
+      </symbol>
+      <symbol id="i-refresh" viewBox="0 0 24 24">
+        <path d="M20 11a8 8 0 10-2.3 6.5" />
+        <path d="M20 4v7h-7" />
+      </symbol>
+      <symbol id="i-trash" viewBox="0 0 24 24">
+        <path d="M4 7h16M9 7V4h6v3M7 7l1 13h8l1-13" />
+        <path d="M10 11v5M14 11v5" />
+      </symbol>
+      <symbol id="i-copy" viewBox="0 0 24 24">
+        <rect x="8" y="8" width="11" height="12" rx="2" />
+        <path d="M16 8V6a2 2 0 00-2-2H6a2 2 0 00-2 2v9a2 2 0 002 2h2" />
+      </symbol>
+      <symbol id="i-check" viewBox="0 0 24 24">
+        <path d="M5 12.5l4.5 4.5L19 7.5" />
+      </symbol>
+      <symbol id="i-tool" viewBox="0 0 24 24">
+        <path d="M14.5 6.5a4 4 0 00-5.3 5.3L4 17l3 3 5.2-5.2a4 4 0 005.3-5.3l-2.6 2.6-3.3-3.3 2.9-2.3z" />
+      </symbol>
+      <symbol id="i-database" viewBox="0 0 24 24">
+        <ellipse cx="12" cy="5.5" rx="7.5" ry="3" />
+        <path d="M4.5 5.5v6c0 1.7 3.4 3 7.5 3s7.5-1.3 7.5-3v-6M4.5 11.5v6c0 1.7 3.4 3 7.5 3s7.5-1.3 7.5-3v-6" />
+      </symbol>
+      <symbol id="i-chevron" viewBox="0 0 24 24">
+        <path d="M9 6l6 6-6 6" />
+      </symbol>
+      <symbol id="i-user" viewBox="0 0 24 24">
+        <circle cx="12" cy="8" r="3.5" />
+        <path d="M5 20c.8-3.6 3.2-5.5 7-5.5s6.2 1.9 7 5.5" />
+      </symbol>
+      <symbol id="i-logo" viewBox="0 0 40 40">
+        <circle cx="20" cy="20" r="14" />
+        <circle cx="20" cy="20" r="6" />
+        <path d="M20 2v10M20 28v10M2 20h10M28 20h10" />
+      </symbol>
+    </svg>
+
+    <div class="ambient" aria-hidden="true">
+      <span class="ambient-orb ambient-orb-a"></span>
+      <span class="ambient-orb ambient-orb-b"></span>
+      <span class="ambient-grid"></span>
+    </div>
+
+    <div class="app-shell">
+      <aside class="sidebar" id="sidebar">
+        <div class="brand">
+          <div class="brand-mark">
+            <svg><use href="#i-logo"></use></svg>
+          </div>
+          <div class="brand-copy">
+            <strong>BLUE</strong>
+            <span>Agent Studio</span>
+          </div>
+          <span class="brand-pulse" title="WebUI 在线"></span>
+        </div>
+
+        <button class="new-chat" id="new-chat" type="button">
+          <span class="new-chat-icon"><svg><use href="#i-plus"></use></svg></span>
+          <span>新对话</span>
+          <kbd>⌘ K</kbd>
+        </button>
+
+        <div class="side-section-head">
+          <span>会话记录</span>
+          <button class="icon-button" id="refresh-sessions" type="button" aria-label="刷新会话">
+            <svg><use href="#i-refresh"></use></svg>
+          </button>
+        </div>
+        <div class="session-list" id="session-list"></div>
+
+        <div class="side-tools">
+          <div class="side-section-head">
+            <span>可用工具</span>
+            <span class="count-badge" id="tool-count">0</span>
+          </div>
+          <div class="tool-list" id="tool-list"></div>
+        </div>
+
+        <div class="side-footer">
+          <div class="system-line" id="system-line">
+            <span class="status-dot" id="system-dot"></span>
+            <span id="system-text">正在连接控制面…</span>
+          </div>
+          <button class="theme-toggle" id="theme-toggle" type="button" aria-label="切换主题">
+            <svg class="theme-icon-moon"><use href="#i-moon"></use></svg>
+            <svg class="theme-icon-sun"><use href="#i-sun"></use></svg>
+            <span>切换主题</span>
+          </button>
+        </div>
+      </aside>
+
+      <div class="overlay" id="overlay"></div>
+
+      <main class="workspace">
+        <header class="topbar">
+          <button class="icon-button menu-button" id="menu-toggle" type="button" aria-label="打开侧栏">
+            <svg><use href="#i-menu"></use></svg>
+          </button>
+          <div class="topbar-title">
+            <span class="eyebrow">BLUE / AGENT STUDIO</span>
+            <h1 id="chat-title">新对话</h1>
+          </div>
+          <div class="topbar-actions">
+            <span class="socket-pill" id="socket-pill"><span class="status-dot"></span>离线</span>
+            <span class="model-pill">
+              <svg><use href="#i-spark"></use></svg>
+              DeepSeek V4 Flash
+            </span>
+            <button class="icon-button danger-hover" id="reset-chat" type="button" aria-label="清空当前会话">
+              <svg><use href="#i-trash"></use></svg>
+            </button>
+          </div>
+        </header>
+
+        <section class="chat-scroll" id="chat-scroll">
+          <div class="welcome" id="welcome">
+            <div class="welcome-badge">
+              <span class="badge-dot"></span>
+              <span>工具已接入 · 随时可执行</span>
+            </div>
+            <h2>把想法交给 <span class="gradient-text">Blue</span></h2>
+            <p class="welcome-sub">
+              让 Agent 读取项目、运行命令、编辑文件。你只需要描述目标，
+              剩下的交给工具链完成。
+            </p>
+            <div class="suggestions">
+              <button class="suggestion" type="button" data-prompt="先看一下当前项目结构，简要说明各目录的职责。">
+                <span class="suggestion-icon"><svg><use href="#i-database"></use></svg></span>
+                <span>
+                  <strong>了解项目</strong>
+                  <small>梳理目录与职责边界</small>
+                </span>
+                <svg class="suggestion-arrow"><use href="#i-chevron"></use></svg>
+              </button>
+              <button class="suggestion" type="button" data-prompt="运行测试并分析失败的用例，给出修复建议。">
+                <span class="suggestion-icon"><svg><use href="#i-check"></use></svg></span>
+                <span>
+                  <strong>运行测试</strong>
+                  <small>执行测试并分析失败原因</small>
+                </span>
+                <svg class="suggestion-arrow"><use href="#i-chevron"></use></svg>
+              </button>
+              <button class="suggestion" type="button" data-prompt="检查最近的代码变更，指出潜在的风险和改进点。">
+                <span class="suggestion-icon"><svg><use href="#i-spark"></use></svg></span>
+                <span>
+                  <strong>审阅变更</strong>
+                  <small>聚焦风险与可维护性</small>
+                </span>
+                <svg class="suggestion-arrow"><use href="#i-chevron"></use></svg>
+              </button>
+            </div>
+            <div class="welcome-meta">
+              <span><kbd>Enter</kbd> 发送</span>
+              <span><kbd>Shift</kbd> + <kbd>Enter</kbd> 换行</span>
+              <span class="meta-separator"></span>
+              <span id="welcome-tools">工具目录加载中…</span>
+            </div>
+          </div>
+
+          <div class="message-list" id="message-list" aria-live="polite"></div>
+
+          <div class="typing-row" id="typing" hidden>
+            <div class="avatar avatar-agent"><svg><use href="#i-spark"></use></svg></div>
+            <div class="typing-bubble">
+              <span class="typing-dots"><i></i><i></i><i></i></span>
+              <span id="typing-label">Agent 正在思考</span>
+            </div>
+          </div>
+        </section>
+
+        <footer class="composer-wrap">
+          <form class="composer" id="composer">
+            <textarea
+              id="prompt"
+              rows="1"
+              maxlength="100000"
+              placeholder="描述你想完成的任务…"
+              aria-label="输入消息"
+            ></textarea>
+            <div class="composer-bottom">
+              <span class="composer-hint" id="composer-hint">
+                <span class="hint-dot"></span>
+                Enter 发送 · Shift + Enter 换行
+              </span>
+              <button class="send-button" id="send" type="submit" aria-label="发送消息">
+                <svg><use href="#i-send"></use></svg>
+                <span>发送</span>
+              </button>
+            </div>
+          </form>
+          <p class="disclaimer">Agent 可能会读取文件或执行命令，请在可信工作区中使用。</p>
+        </footer>
+      </main>
+    </div>
+
+    <div class="toast-region" id="toast-region" aria-live="assertive"></div>
+    <script src="/static/vendor/marked/marked.min.js" defer></script>
+    <script src="/static/vendor/katex/katex.min.js" defer></script>
+    <script src="/static/app.js" defer></script>
+  </body>
+</html>

@@ -2,7 +2,7 @@
 
 ## 项目概述
 
-**blue** — Add your description here。
+**blue** — 基于 infinity 家族的分布式 Agent 系统控制面与共享 SDK。
 
 ## 开发工具链
 

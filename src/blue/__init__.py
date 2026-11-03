@@ -1,19 +1,21 @@
-"""blue —— 基于 infinity-agent / infinity-bus / infinity-data 的分布式 Agent 核心。"""
+"""blue —— 分布式 Agent 系统的控制面与共享 SDK。"""
 
-from blue.agent import AgentCore, build_client
-from blue.aggregate import AgentAggregate
-from blue.catalog import ToolCatalogClient, ToolRegistryService, ToolRegistryState
 from blue.config import (
-    AgentSettings,
-    BlueSettings,
-    BusSettings,
+    DEFAULT_CONFIG_PATH,
     ConfigError,
-    RegistrySettings,
-    load_settings,
+    DesiredState,
+    SupervisorSettings,
+    load_desired,
 )
-from blue.errors import BlueError
+from blue.control import Supervisor, render_state, write_runtime_configs
+from blue.errors import BlueError, RuntimeConfigError, SupervisorError
 from blue.protocol import ALL_EVENTS, EVENT_NAMES, register_events
-from blue.session import Session, SessionStore
+from blue.runtime import (
+    build_runtime,
+    load_runtime_config,
+    run_service,
+    run_tool,
+)
 from blue.transport import (
     BusRuntime,
     MemoryFanout,
@@ -24,26 +26,26 @@ from blue.worker import ToolWorker
 
 __all__ = [
     "ALL_EVENTS",
+    "DEFAULT_CONFIG_PATH",
     "EVENT_NAMES",
-    "AgentAggregate",
-    "AgentCore",
-    "AgentSettings",
     "BlueError",
-    "BlueSettings",
     "BusRuntime",
-    "BusSettings",
     "ConfigError",
+    "DesiredState",
     "MemoryFanout",
     "MemoryRuntime",
     "RabbitRuntime",
-    "RegistrySettings",
-    "Session",
-    "SessionStore",
-    "ToolCatalogClient",
-    "ToolRegistryService",
-    "ToolRegistryState",
+    "RuntimeConfigError",
+    "Supervisor",
+    "SupervisorError",
+    "SupervisorSettings",
     "ToolWorker",
-    "build_client",
-    "load_settings",
+    "build_runtime",
+    "load_desired",
+    "load_runtime_config",
     "register_events",
+    "render_state",
+    "run_service",
+    "run_tool",
+    "write_runtime_configs",
 ]

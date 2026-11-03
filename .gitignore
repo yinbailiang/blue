@@ -24,3 +24,7 @@ result-*
 .agents/TEMP_FILES/tmps/*
 !.agents/MEMORY/memorys/.gitkeep
 !.agents/TEMP_FILES/tmps/.gitkeep
+
+# Supervisor 运行时状态、日志与生成配置
+.blue/
+services/*/service_runtime_config.json

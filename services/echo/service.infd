@@ -1,0 +1,14 @@
+~ServiceTemplate {
+}
+
+service {
+  name = "echo"
+  kind = "tool"
+  package = "blue-service-echo"
+  module = "blue_service_echo"
+  depends_on = ["bus"]
+  restart = "always"
+  stop_timeout = 5.0
+  startup_timeout = 30.0
+  readiness = "process"
+}
