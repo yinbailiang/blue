@@ -153,11 +153,31 @@
               <svg><use href="#i-spark"></use></svg>
               DeepSeek V4 Flash
             </span>
+            <button class="icon-button" id="index-toggle" type="button" aria-label="会话搜索与定位" title="会话搜索 / 定位">
+              <svg><use href="#i-target"></use></svg>
+            </button>
             <button class="icon-button danger-hover" id="reset-chat" type="button" aria-label="清空当前会话">
               <svg><use href="#i-trash"></use></svg>
             </button>
           </div>
         </header>
+
+        <aside class="index-rail" id="index-rail" aria-label="会话搜索与定位">
+          <div class="index-head">
+            <input
+              id="index-search"
+              type="search"
+              placeholder="搜索这段对话…"
+              autocomplete="off"
+              aria-label="搜索消息"
+            />
+            <button class="index-close" id="index-close" type="button" aria-label="收起定位列">
+              <svg><use href="#i-chevron"></use></svg>
+            </button>
+          </div>
+          <div class="index-meta" id="index-meta"></div>
+          <div class="index-list" id="index-list" role="list"></div>
+        </aside>
 
         <section class="chat-scroll" id="chat-scroll">
           <div class="welcome" id="welcome">

@@ -34,6 +34,13 @@
     sendLabel: document.getElementById("send-label"),
     socketPill: document.getElementById("socket-pill"),
     toastRegion: document.getElementById("toast-region"),
+    workspace: document.querySelector(".workspace"),
+    indexRail: document.getElementById("index-rail"),
+    indexSearch: document.getElementById("index-search"),
+    indexList: document.getElementById("index-list"),
+    indexMeta: document.getElementById("index-meta"),
+    indexToggle: document.getElementById("index-toggle"),
+    indexClose: document.getElementById("index-close"),
   };
 
   /*
@@ -82,6 +89,7 @@
       heights: new Map(),
       renderFrom: 0,
       renderTo: 0,
+      indexedCount: -1,
     };
   }
 
@@ -1290,6 +1298,11 @@
     // 只量一次：估算值下一轮自然收敛，不再同一轮反复改留白（那会造成漂移）
     measureHeights(messages);
 
+    if (session.indexedCount !== all.length) {
+      session.indexedCount = all.length;
+      scheduleIndexRender();
+    }
+
     refreshTyping();
   }
 
@@ -2212,6 +2225,158 @@
   }
 
   /* ------------------------------------------------------------------ */
+  /* 定位列：会话搜索与快速跳转                                          */
+  /* ------------------------------------------------------------------ */
+
+  /** 一句话摘要：折叠空白，超长截断。 */
+  function snippet(text, limit = 60) {
+    const flat = String(text || "").replace(/\s+/g, " ").trim();
+    if (!flat) return "（空消息）";
+    return flat.length > limit ? `${flat.slice(0, limit)}…` : flat;
+  }
+
+  /**
+   * 搜索框为空时：按顺序列出每一轮提问，作为「目录」；
+   * 有搜索词时：在用户/助手正文里做大小写不敏感的子串搜索。
+   */
+  function indexEntries(query) {
+    const all = visibleMessages();
+    const keyword = query.trim().toLowerCase();
+    if (!keyword) {
+      const anchors = [];
+      for (const message of all) {
+        if (message.role !== "user") continue;
+        const node = message.id ? nodeFor(message) : null;
+        anchors.push({ message, label: node ? node.label : "" });
+      }
+      return anchors;
+    }
+    const hits = [];
+    for (const message of all) {
+      if (message.role !== "user" && message.role !== "assistant") continue;
+      const text = String(message.content || "");
+      const at = text.toLowerCase().indexOf(keyword);
+      if (at < 0) continue;
+      hits.push({ message, at, text });
+      if (hits.length >= 80) break;
+    }
+    return hits;
+  }
+
+  /** 命中片段：截取命中点附近一小段，关键词包成 <mark>。 */
+  function highlightSnippet(text, at, length) {
+    const full = String(text || "");
+    const start = Math.max(0, at - 18);
+    const raw = full.slice(start, start + 58);
+    const local = at - start;
+    const before = escapeHtml(raw.slice(0, local));
+    const hit = escapeHtml(raw.slice(local, local + length));
+    const after = escapeHtml(raw.slice(local + length));
+    const lead = start > 0 ? "…" : "";
+    const tail = start + 58 < full.length ? "…" : "";
+    return `${lead}${before}<mark>${hit}</mark>${after}${tail}`;
+  }
+
+  function renderIndex() {
+    if (!els.indexList) return;
+    const query = els.indexSearch ? els.indexSearch.value : "";
+    const entries = indexEntries(query);
+    const keyword = query.trim();
+    els.indexList.textContent = "";
+    els.indexMeta.textContent = keyword
+      ? `${entries.length} 条匹配${entries.length >= 80 ? "（只显示前 80）" : ""}`
+      : `${entries.length} 轮对话 · 点击跳转`;
+
+    if (!entries.length) {
+      const empty = document.createElement("div");
+      empty.className = "index-empty";
+      empty.textContent = keyword ? "没有匹配的消息" : "还没有消息";
+      els.indexList.appendChild(empty);
+      return;
+    }
+
+    entries.forEach((entry, index) => {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = "index-item";
+      button.dataset.key = messageKey(entry.message);
+      if (entry.message.role === "user") button.classList.add("role-user");
+      button.setAttribute("role", "listitem");
+      const role = document.createElement("span");
+      role.className = "index-role";
+      role.textContent = entry.message.role === "user" ? "YOU" : "BLUE";
+      const text = document.createElement("span");
+      text.className = "index-text";
+      if (entry.at === undefined) {
+        text.textContent = `${index + 1}. ${snippet(entry.message.content)}`;
+      } else {
+        text.innerHTML = highlightSnippet(entry.text, entry.at, keyword.length);
+      }
+      button.append(role, text);
+      if (entry.label) {
+        const label = document.createElement("span");
+        label.className = "index-label";
+        label.textContent = entry.label;
+        button.appendChild(label);
+      }
+      els.indexList.appendChild(button);
+    });
+  }
+
+  /** 流式追加会让它变频繁，合并到下一帧再画。 */
+  let indexFrame = 0;
+
+  function scheduleIndexRender() {
+    if (indexFrame) return;
+    indexFrame = requestAnimationFrame(() => {
+      indexFrame = 0;
+      renderIndex();
+    });
+  }
+
+  function setIndexOpen(open) {
+    els.workspace.classList.toggle("with-index", open);
+    try {
+      localStorage.setItem("blue.indexOpen", open ? "1" : "0");
+    } catch {
+      /* ignore */
+    }
+    if (open) {
+      renderIndex();
+      els.indexSearch?.focus();
+    }
+  }
+
+  /** 跳到某条消息：先按高度缓存算位置，渲染后再用实测位置校正一次。 */
+  function jumpToMessage(key) {
+    const all = visibleMessages();
+    const index = all.findIndex((message) => messageKey(message) === key);
+    if (index < 0) return;
+    const scroller = els.chatScroll;
+    const metrics = listMetrics();
+    const offsets = offsetsOf(messageSlots(all, messageGap()));
+    state.stickToBottom = false;
+    state.suppressScrollSync = true;
+    scroller.scrollTop = Math.max(0, metrics.padTop + offsets[index] - 12);
+    syncMessages();
+
+    const node = view.byKey.get(key);
+    if (!node) return;
+    const delta =
+      node.getBoundingClientRect().top -
+      scroller.getBoundingClientRect().top -
+      12;
+    if (Math.abs(delta) > 1) {
+      state.suppressScrollSync = true;
+      scroller.scrollTop += delta;
+    }
+    node.classList.remove("flash");
+    void node.offsetWidth;
+    node.classList.add("flash");
+    window.setTimeout(() => node.classList.remove("flash"), 1200);
+  }
+
+  /* ------------------------------------------------------------------ */
   /* WebSocket                                                          */
   /* ------------------------------------------------------------------ */
   /** 断线后自动重连（1s→2s→4s，上限 8s）；重连成功会重新订阅会话并拉一次快照。 */
@@ -2767,6 +2932,25 @@
       }
     });
 
+    els.indexToggle?.addEventListener("click", () => {
+      setIndexOpen(!els.workspace.classList.contains("with-index"));
+    });
+    els.indexClose?.addEventListener("click", () => setIndexOpen(false));
+    els.indexSearch?.addEventListener("input", () => renderIndex());
+    els.indexSearch?.addEventListener("keydown", (event) => {
+      if (event.key === "Escape") {
+        els.indexSearch.value = "";
+        renderIndex();
+      } else if (event.key === "Enter") {
+        const first = els.indexList?.querySelector(".index-item");
+        if (first) jumpToMessage(first.dataset.key || "");
+      }
+    });
+    els.indexList?.addEventListener("click", (event) => {
+      const item = event.target.closest(".index-item");
+      if (item) jumpToMessage(item.dataset.key || "");
+    });
+
     els.chatScroll.addEventListener("scroll", () => {
       state.stickToBottom = isSourceNearBottom();
       scheduleWindowSync();
@@ -3038,6 +3222,8 @@
     els.chatTitle.textContent = "新对话";
     renderSessions();
     renderTools();
+    // 定位列默认展开；用户收起过就按记忆来
+    setIndexOpen(localStorage.getItem("blue.indexOpen") !== "0");
 
     await Promise.allSettled([loadTools(), loadSystem(), refreshSessions()]);
     const saved = localStorage.getItem("blue.session");
