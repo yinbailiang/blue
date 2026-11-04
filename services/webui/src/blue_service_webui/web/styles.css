@@ -830,7 +830,9 @@ input.rename::placeholder {
   min-height: 0;
   overflow-y: auto;
   overscroll-behavior: contain;
-  scroll-behavior: smooth;
+  /* 注意：不要在这里开 scroll-behavior: smooth —— 虚拟滚动要靠即时 scrollTop
+     写入来定位，动画化会连续触发 scroll 事件，导致窗口反复重算、列表漂移 */
+  scroll-behavior: auto;
 }
 
 .chat-scroll::-webkit-scrollbar,
@@ -1008,9 +1010,7 @@ input.rename::placeholder {
 
 /* Messages --------------------------------------------------------- */
 .message-list {
-  display: flex;
-  flex-direction: column;
-  gap: 19px;
+  display: block;
   width: min(920px, calc(100% - 56px));
   margin: 0 auto;
   padding: 34px 0 22px;
@@ -1023,6 +1023,8 @@ input.rename::placeholder {
 .message {
   display: flex;
   gap: 12px;
+  /* 消息间距用 margin 而不是列表的 flex gap：虚拟滚动要能逐条量出「占位高度」 */
+  margin-bottom: 19px;
   animation: messageIn 360ms cubic-bezier(0.2, 0.8, 0.2, 1) both;
 }
 
@@ -2209,8 +2211,11 @@ details[open] > summary > .chevron {
   }
 
   .message-list {
-    gap: 15px;
     padding-top: 22px;
+  }
+
+  .message {
+    margin-bottom: 15px;
   }
 
   .message {

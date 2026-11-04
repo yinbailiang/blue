@@ -53,6 +53,8 @@
     socket: null,
     socketPromise: null,
     stickToBottom: true,
+    suppressScrollSync: false,
+    listMetrics: null,
     streamRenderTimer: null,
   };
 
@@ -450,13 +452,6 @@
     els.socketPill.innerHTML = `<span class="status-dot ${online ? "ok" : ""}"></span>${escapeHtml(
       label || (online ? "实时连接" : "离线"),
     )}`;
-  }
-
-  function scrollToBottom(force = false) {
-    if (!force && !state.stickToBottom) return;
-    requestAnimationFrame(() => {
-      els.chatScroll.scrollTop = els.chatScroll.scrollHeight;
-    });
   }
 
   function isSourceNearBottom() {
@@ -1088,8 +1083,11 @@
 
   /** 一次渲染的尾部条数；更早的消息由「加载更早」按需追加。 */
   /*
-   * 虚拟滚动：整段历史用「估算高度」撑出滚动条，只把视口附近的消息挂到 DOM。
-   * 实测高度回填到 session.heights，估算值很快收敛成真值。
+   * 虚拟滚动：整段历史用「估算高度 + 消息间距」撑出滚动条，只把视口附近挂到 DOM。
+   *
+   * 定位用**锚点还原**而不是估算补偿：渲染前记住「第一条可见消息」相对视口的偏移，
+   * 渲染后按它的真实位置把 scrollTop 补回去。这样位置只取决于实测几何，
+   * 不会被估算误差来回拉扯（那正是列表上下跳 / 缓慢漂移的根源）。
    */
   const VIRTUAL = {
     estimate: 96,
@@ -1098,30 +1096,50 @@
     maxItems: 200,
   };
 
+  /** 列表自身的上下 padding：建列表时读一次 CSS（之后内联值会覆盖，不能反复读）。 */
+  function listMetrics() {
+    if (state.listMetrics) return state.listMetrics;
+    const style = getComputedStyle(els.messageList);
+    state.listMetrics = {
+      padTop: Number.parseFloat(style.paddingTop || "0") || 0,
+      padBottom: Number.parseFloat(style.paddingBottom || "0") || 0,
+    };
+    return state.listMetrics;
+  }
+
+  /** 消息间距：从每条消息的 margin-bottom 读，窄屏下 CSS 会变小，所以每次现读。 */
+  function messageGap() {
+    const sample = els.messageList.querySelector(".message");
+    if (!sample) return 19;
+    const value = Number.parseFloat(getComputedStyle(sample).marginBottom || "0");
+    return Number.isFinite(value) ? value : 19;
+  }
+
   /** 参与渲染的消息（system 不进正文）。 */
   function visibleMessages() {
     return cur().messages.filter((message) => message.role !== "system");
   }
 
-  /** 每条消息用的高度：有实测用实测，没有就先用估算。 */
-  function messageHeights(all) {
-    const list = [];
+  /** 每条消息「占多高」：实测高度（没有就估算）+ 间距。 */
+  function messageSlots(all, gap) {
+    const slots = [];
     for (const message of all) {
-      list.push(cur().heights.get(messageKey(message)) || VIRTUAL.estimate);
+      const height = cur().heights.get(messageKey(message)) || VIRTUAL.estimate;
+      slots.push(height + gap);
     }
-    return list;
+    return slots;
   }
 
   /** 前缀和：offsets[i] 是第 i 条消息的顶部位置。 */
-  function offsetsOf(heights) {
+  function offsetsOf(slots) {
     const offsets = [0];
-    for (let index = 0; index < heights.length; index += 1) {
-      offsets.push(offsets[index] + heights[index]);
+    for (let index = 0; index < slots.length; index += 1) {
+      offsets.push(offsets[index] + slots[index]);
     }
     return offsets;
   }
 
-  /** 由当前滚动位置算出要挂载的区间。 */
+  /** 由滚动位置算出要挂载的区间。 */
   function windowFor(offsets, total, scrollTop, viewport) {
     const count = offsets.length - 1;
     if (count <= VIRTUAL.maxItems) return { start: 0, end: count, total };
@@ -1131,14 +1149,12 @@
     while (start < count - 1 && offsets[start + 1] <= top) start += 1;
     let end = start;
     while (end < count && offsets[end] < bottom) end += 1;
-    if (end - start < VIRTUAL.minItems) {
-      end = Math.min(count, start + VIRTUAL.minItems);
-    }
+    if (end - start < VIRTUAL.minItems) end = Math.min(count, start + VIRTUAL.minItems);
     if (end - start > VIRTUAL.maxItems) end = start + VIRTUAL.maxItems;
     return { start, end, total };
   }
 
-  /** 读回挂载节点的真实高度，返回是否有变化。 */
+  /** 读回挂载节点的真实高度（不含间距），返回是否有变化。 */
   function measureHeights(messages) {
     let changed = false;
     const session = cur();
@@ -1156,26 +1172,36 @@
     return changed;
   }
 
-  /** 留白：把未挂载部分的高度补成 padding，滚动条才能代表整段历史。 */
-  function applyPadding(offsets, start, end) {
-    const list = els.messageList;
-    const previous = Number.parseFloat(list.style.paddingTop || "0") || 0;
-    const top = start <= 0 ? 0 : offsets[start];
-    const total = offsets[offsets.length - 1];
-    list.style.paddingTop = `${top}px`;
-    list.style.paddingBottom = `${Math.max(0, total - offsets[end])}px`;
-    return { previous, top };
+  /** 渲染前记下「第一条可见消息」相对视口的偏移。 */
+  function captureAnchor() {
+    const scroller = els.chatScroll;
+    const scrollerTop = scroller.getBoundingClientRect().top;
+    for (const node of els.messageList.children) {
+      const rect = node.getBoundingClientRect();
+      if (rect.bottom - scrollerTop <= 0) continue;
+      return { key: node.__key || "", offset: rect.top - scrollerTop };
+    }
+    return null;
   }
 
-  /**
-   * 上侧留白变了，内容会整体位移：小跨度（窗口顺带滑动一页）要补回 scrollTop，
-   * 画面才不抖；大跨度是用户主动跳转（拖滚动条/跳到顶），补了反而跳回去。
-   */
-  function compensateScroll(delta, options) {
-    if (options.scroll || Math.abs(delta) < 0.5) return;
-    const viewport = els.chatScroll.clientHeight || 0;
-    if (Math.abs(delta) > Math.max(viewport * 1.2, 240)) return;
-    els.chatScroll.scrollTop += delta;
+  /** 渲染后按锚点的真实位置把 scrollTop 补回去（位置只依赖实测几何）。 */
+  function restoreAnchor(anchor) {
+    if (!anchor || !anchor.key) return;
+    const node = view.byKey.get(anchor.key);
+    if (!node) return;
+    const scroller = els.chatScroll;
+    const offset = node.getBoundingClientRect().top - scroller.getBoundingClientRect().top;
+    const delta = offset - anchor.offset;
+    if (Math.abs(delta) < 0.5) return;
+    state.suppressScrollSync = true;
+    scroller.scrollTop += delta;
+  }
+
+  /** 贴底：用即时滚动，并压掉自己引起的那次 scroll 事件。 */
+  function snapToBottom() {
+    const scroller = els.chatScroll;
+    state.suppressScrollSync = true;
+    scroller.scrollTop = scroller.scrollHeight;
   }
 
   function syncMessages(options = {}) {
@@ -1190,12 +1216,28 @@
 
     const session = cur();
     const scroller = els.chatScroll;
-    // 贴底意图要在改留白之前判断：改完 scrollHeight 会变，判断就不准了
+    const metrics = listMetrics();
+    const gap = messageGap();
+    // 贴底判断要在改留白之前做：改完 scrollHeight 就变了
     const wasAtBottom =
       scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight < 48;
-    const offsets = offsetsOf(messageHeights(all));
+
+    const offsets = offsetsOf(messageSlots(all, gap));
     const total = offsets[offsets.length - 1];
-    const win = windowFor(offsets, total, scroller.scrollTop, scroller.clientHeight);
+
+    // 先决定「这一轮结束后停在哪」再算窗口：要贴底就按贴底后的位置取窗口，
+    // 否则会先把顶部那批挂上去、贴底后又没人重算，屏幕上只剩留白。
+    const shouldSnap =
+      options.scroll === true
+        ? options.force !== false || wasAtBottom
+        : wasAtBottom;
+    const contentHeight = metrics.padTop + total + metrics.padBottom;
+    const targetTop = shouldSnap
+      ? Math.max(0, contentHeight - scroller.clientHeight)
+      : scroller.scrollTop;
+
+    const anchor = captureAnchor();
+    const win = windowFor(offsets, total, targetTop, scroller.clientHeight);
     session.renderFrom = win.start;
     session.renderTo = win.end;
     const messages = all.slice(win.start, win.end);
@@ -1210,6 +1252,7 @@
       if (!node) {
         node = createMessageNode(message, names);
         node.__message = message;
+        node.__key = key;
         view.byKey.set(key, node);
         view.signatures.set(node, messageSignature(message));
       } else {
@@ -1231,44 +1274,45 @@
     }
     placeInOrder(wanted);
 
-    const pad = applyPadding(offsets, win.start, win.end);
-    compensateScroll(pad.top - pad.previous, options);
+    // 未挂载的部分用留白顶出来；挂载段的高度就是它自己的真实高度
+    els.messageList.style.paddingTop = `${metrics.padTop + offsets[win.start]}px`;
+    els.messageList.style.paddingBottom = `${
+      metrics.padBottom + (total - offsets[win.end])
+    }px`;
 
-    // 估算收敛成实测高度后再修一次留白
-    if (measureHeights(messages)) {
-      const before = Number.parseFloat(els.messageList.style.paddingTop || "0") || 0;
-      const after = applyPadding(offsetsOf(messageHeights(all)), win.start, win.end);
-      compensateScroll(after.top - before, options);
+    // 贴底时位置由 targetTop 决定，不需要再按锚点还原
+    if (shouldSnap) {
+      state.stickToBottom = true;
+      snapToBottom();
+    } else {
+      restoreAnchor(anchor);
     }
+    // 只量一次：估算值下一轮自然收敛，不再同一轮反复改留白（那会造成漂移）
+    measureHeights(messages);
 
     refreshTyping();
-    if (options.scroll || wasAtBottom) {
-      // 原本在底部（或明确要求）就重新贴底，别被估算误差留在半空
-      state.stickToBottom = true;
-      requestAnimationFrame(() => {
-        scroller.scrollTop = scroller.scrollHeight;
-      });
-    }
   }
 
-  /** 滚动到新位置后若挂载区间该变，重排一次（rAF 节流）。 */
+  /** 滚动后若挂载区间该变就重排一次；自己造成的滚动事件直接跳过。 */
   let scrollFrame = 0;
 
   function scheduleWindowSync() {
     if (scrollFrame) return;
     scrollFrame = requestAnimationFrame(() => {
       scrollFrame = 0;
+      if (state.suppressScrollSync) {
+        state.suppressScrollSync = false;
+        return;
+      }
       const all = visibleMessages();
       if (!all.length) return;
       const session = cur();
-      const offsets = offsetsOf(messageHeights(all));
+      const gap = messageGap();
+      const offsets = offsetsOf(messageSlots(all, gap));
       const total = offsets[offsets.length - 1];
-      const scrollTop = els.chatScroll.scrollTop;
-      const win = windowFor(offsets, total, scrollTop, els.chatScroll.clientHeight);
-      if (win.start === session.renderFrom && win.end === session.renderTo) {
-        if (measureHeights(all.slice(win.start, win.end))) syncMessages();
-        return;
-      }
+      const scroller = els.chatScroll;
+      const win = windowFor(offsets, total, scroller.scrollTop, scroller.clientHeight);
+      if (win.start === session.renderFrom && win.end === session.renderTo) return;
       syncMessages();
     });
   }
