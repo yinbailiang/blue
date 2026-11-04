@@ -3,7 +3,7 @@ kit_version = 1
 
 [project]
 name = "blue"
-summary = "Add your description here"
+summary = "基于 infinity 家族的分布式 Agent 系统控制面与共享 SDK"
 package = "blue"
 src_dir = "src/blue"
 repo_url = ""

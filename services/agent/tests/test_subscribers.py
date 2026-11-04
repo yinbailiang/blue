@@ -96,13 +96,17 @@ def test_registry_handler_translates_events() -> None:
     tool = ToolDefinition.create("echo", "回显")
 
     async def scenario() -> None:
-        register = ToolRegisterPayload(worker_id="w1", tool=tool, ttl=5.0)
+        register = ToolRegisterPayload(
+            session_id="", request_id="req-1", worker_id="w1", tool=tool, ttl=5.0
+        )
         await handler.handle(
             register,
             proxy,
             Event(name=ToolRegisterEvent.name, data=register),
         )
-        heartbeat = ToolHeartbeatPayload(worker_id="w1")
+        heartbeat = ToolHeartbeatPayload(
+            session_id="", request_id="req-2", worker_id="w1"
+        )
         await handler.handle(
             heartbeat,
             proxy,

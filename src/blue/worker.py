@@ -52,6 +52,12 @@ from blue.transport import BusRuntime
 
 logger = logging.getLogger(__name__)
 
+REGISTRY_TIMEOUT = 5.0
+"""登记/续约的超时：注册中心可能正在重启，等太久会把启动拖住——失败就等心跳重试。"""
+
+WITHDRAW_TIMEOUT = 1.5
+"""下线时的超时：退出路径要快，注册中心不在就直接放弃（租约本来也会过期）。"""
+
 __all__ = ["ToolLease", "ToolRegistrar", "ToolWorker", "unpack_tool_output"]
 
 
@@ -101,6 +107,7 @@ class ToolRegistrar:
                 raise ValueError("worker_id 不能为空")
         self._ttl = ttl
         self._heartbeat_task: asyncio.Task[None] | None = None
+        self._announce_task: asyncio.Task[None] | None = None
         self._withdrawn = False
 
     @property
@@ -114,9 +121,15 @@ class ToolRegistrar:
         return self._ttl
 
     async def announce(self) -> None:
-        """登记全部租约并启动续约循环（重复调用幂等）。"""
+        """登记全部租约并启动续约循环（重复调用幂等）。
+
+        登记是**尽力而为**：注册中心可能还没起来/正在重启，所以这里不等应答
+        （后台任务发送，失败只记日志），心跳循环会继续重试——不能让启动卡住。
+        """
         self._withdrawn = False
-        await self._publish_register()
+        self._announce_task = asyncio.create_task(
+            self._publish_register(), name="tool-registrar.announce"
+        )
         if self._heartbeat_task is None:
             self._heartbeat_task = asyncio.create_task(
                 self._heartbeat_loop(), name="tool-registrar.heartbeat"
@@ -128,22 +141,29 @@ class ToolRegistrar:
             return
         self._withdrawn = True
         heartbeat, self._heartbeat_task = self._heartbeat_task, None
-        if heartbeat is not None:
-            heartbeat.cancel()
-            with suppress(asyncio.CancelledError):
-                await heartbeat
+        announce, self._announce_task = self._announce_task, None
+        for task in (heartbeat, announce):
+            if task is not None:
+                task.cancel()
+                with suppress(asyncio.CancelledError):
+                    await task
         if not self._runtime.is_running:
             return
-        tools = ToolProxy(self._runtime.proxy())
+        tools = ToolProxy(self._runtime.proxy(), timeout=WITHDRAW_TIMEOUT)
         for lease in self._leases:
             with suppress(Exception):
                 await tools.unregister(lease.worker_id)
 
     async def _publish_register(self) -> None:
         """逐条登记租约。"""
-        tools = ToolProxy(self._runtime.proxy())
+        tools = ToolProxy(self._runtime.proxy(), timeout=REGISTRY_TIMEOUT)
         for lease in self._leases:
-            await tools.register(lease.worker_id, lease.definition, ttl=self._ttl)
+            try:
+                await tools.register(lease.worker_id, lease.definition, ttl=self._ttl)
+            except Exception:
+                logger.warning(
+                    "登记 %s 失败，等待心跳重试", lease.worker_id, exc_info=True
+                )
 
     async def _heartbeat_loop(self) -> None:
         """周期性补发注册并续约；单次失败不影响后续。"""
@@ -151,12 +171,15 @@ class ToolRegistrar:
         while True:
             await asyncio.sleep(interval)
             try:
-                tools = ToolProxy(self._runtime.proxy())
+                tools = ToolProxy(self._runtime.proxy(), timeout=REGISTRY_TIMEOUT)
                 for lease in self._leases:
-                    await tools.register(
-                        lease.worker_id, lease.definition, ttl=self._ttl
-                    )
-                    await tools.heartbeat(lease.worker_id)
+                    reply = await tools.heartbeat(lease.worker_id)
+                    if not reply.registered:
+                        # 注册中心已经不认这个租约（重启/过期）：补一次登记
+                        logger.info("租约失效，重新登记：%s", lease.worker_id)
+                        await tools.register(
+                            lease.worker_id, lease.definition, ttl=self._ttl
+                        )
             except Exception:
                 logger.debug(
                     "心跳发送失败：%s",

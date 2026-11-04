@@ -28,12 +28,15 @@ from blue_contracts_tool.events import (
     ToolCallResult,
     ToolDefinition,
     ToolHeartbeatEvent,
-    ToolHeartbeatPayload,
+    ToolHeartbeatReplyEvent,
+    ToolHeartbeatResponse,
     ToolRegisterEvent,
-    ToolRegisterPayload,
+    ToolRegisterReplyEvent,
+    ToolRegisterResponse,
     ToolResultEvent,
     ToolUnregisterEvent,
-    ToolUnregisterPayload,
+    ToolUnregisterReplyEvent,
+    ToolUnregisterResponse,
 )
 
 __all__ = ["ToolCallError", "ToolProxy"]
@@ -125,23 +128,46 @@ class ToolProxy:
         tool: ToolDefinition,
         *,
         ttl: float,
-    ) -> None:
-        """登记工具进程（单向广播，不等回话）。"""
-        await self._bus.publish(
-            ToolRegisterEvent.name,
-            ToolRegisterPayload(worker_id=worker_id, tool=tool, ttl=ttl),
+        timeout: float | None = None,
+    ) -> ToolRegisterResponse:
+        """登记工具进程，返回目录是否变化。
+
+        注册中心是**单实例**：请求/应答能明确告知"登记成功/租约冲突"，比单向
+        广播可靠。以后要支持多实例再设计专用协议迁移。
+        """
+        return await self._call(
+            ToolRegisterEvent,
+            ToolRegisterReplyEvent,
+            ToolRegisterResponse,
+            {"worker_id": worker_id, "tool": tool, "ttl": ttl},
+            session_id=None,
+            timeout=timeout,
         )
 
-    async def heartbeat(self, worker_id: str) -> None:
-        """续约（单向广播）。"""
-        await self._bus.publish(
-            ToolHeartbeatEvent.name, ToolHeartbeatPayload(worker_id=worker_id)
+    async def heartbeat(
+        self, worker_id: str, *, timeout: float | None = None
+    ) -> ToolHeartbeatResponse:
+        """续约；``registered=False`` 表示租约已失效、需要重新登记。"""
+        return await self._call(
+            ToolHeartbeatEvent,
+            ToolHeartbeatReplyEvent,
+            ToolHeartbeatResponse,
+            {"worker_id": worker_id},
+            session_id=None,
+            timeout=timeout,
         )
 
-    async def unregister(self, worker_id: str) -> None:
-        """主动下线（单向广播）。"""
-        await self._bus.publish(
-            ToolUnregisterEvent.name, ToolUnregisterPayload(worker_id=worker_id)
+    async def unregister(
+        self, worker_id: str, *, timeout: float | None = None
+    ) -> ToolUnregisterResponse:
+        """主动下线，返回是否真的移除了登记。"""
+        return await self._call(
+            ToolUnregisterEvent,
+            ToolUnregisterReplyEvent,
+            ToolUnregisterResponse,
+            {"worker_id": worker_id},
+            session_id=None,
+            timeout=timeout,
         )
 
     async def publish_catalog(self, version: int, tools: list[ToolDefinition]) -> None:

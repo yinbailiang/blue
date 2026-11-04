@@ -892,11 +892,11 @@ wheels = [
 
 [[package]]
 name = "infinity-agent-kit"
-version = "1.0.0"
+version = "1.0.1"
 source = { registry = "https://pypi.org/simple" }
-sdist = { url = "https://files.pythonhosted.org/packages/2b/82/d1ad00a4c021a61180dae48806d600090aa652037fab985333a26f4e2714/infinity_agent_kit-1.0.0.tar.gz", hash = "sha256:f6e1b7a2f66bcb0472b22148ac8f374657bcb22cbfa541f674d6bad1be1edbb3", size = 24740, upload-time = "2026-10-11T15:00:28.37Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/f3/0a/bc9f4a797ceb22753c779da11b845037ee02bd1b0719029e668288b33e5b/infinity_agent_kit-1.0.1.tar.gz", hash = "sha256:809cf0256dc1be518b3b1653f7b5bb70351319d53e1e09f7abf1eee2250af0ba", size = 24687, upload-time = "2026-11-04T22:50:35.877Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/28/e1/0a26fee6fd241d96ff293243736cda2da192129e1ae51b29c7a6e10f2ac9/infinity_agent_kit-1.0.0-py3-none-any.whl", hash = "sha256:946f409699c91b023b3a5297d656c4baf0d6f8078cbf87e4452f7f4d7c1a5c69", size = 32816, upload-time = "2026-10-11T15:00:27.461Z" },
+    { url = "https://files.pythonhosted.org/packages/57/96/98d3edb1742224d471179ba40fc69e492f248ade460ec98aa7453e9298b3/infinity_agent_kit-1.0.1-py3-none-any.whl", hash = "sha256:bccfeb47206d8042eb8f314331bfb8f4e6c1551d2740caf5e9bb14219f0f52f9", size = 32766, upload-time = "2026-11-04T22:50:34.967Z" },
 ]
 
 [[package]]

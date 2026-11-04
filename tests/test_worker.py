@@ -11,15 +11,21 @@ from blue_contracts_tool import (
     ToolCallResult,
     ToolHeartbeatEvent,
     ToolHeartbeatPayload,
+    ToolHeartbeatReplyEvent,
+    ToolHeartbeatResponse,
     ToolRegisterEvent,
     ToolRegisterPayload,
+    ToolRegisterReplyEvent,
+    ToolRegisterResponse,
     ToolResultEvent,
     ToolUnregisterEvent,
     ToolUnregisterPayload,
+    ToolUnregisterReplyEvent,
+    ToolUnregisterResponse,
 )
 from infinity_agent import ToolDefinition, ToolFunction, ToolParameters
 from infinity_bus import Event, EventBus, EventHandler
-from infinity_bus.templates.request import request
+from infinity_bus.templates.request import RequestProtocol, request
 from pydantic import BaseModel
 
 from blue.transport import MemoryFanout, MemoryRuntime
@@ -41,7 +47,7 @@ def _definition(name: str) -> ToolDefinition:
 class _Recorder(EventHandler):
     """把登记 / 续约 / 注销三类事件分别收进列表。"""
 
-    def __init__(self) -> None:
+    def __init__(self, *, lease_alive: bool = True) -> None:
         super().__init__(
             subscriptions=[
                 ToolRegisterEvent.name,
@@ -53,6 +59,7 @@ class _Recorder(EventHandler):
         self.registers: list[ToolRegisterPayload] = []
         self.heartbeats: list[ToolHeartbeatPayload] = []
         self.unregisters: list[ToolUnregisterPayload] = []
+        self._lease_alive = lease_alive
 
     async def handle(
         self,
@@ -60,14 +67,37 @@ class _Recorder(EventHandler):
         bus_proxy: EventBus.Proxy,
         raw_event: Event,
     ) -> None:
-        """按载荷类型归档。"""
-        del bus_proxy, raw_event
+        """按载荷类型归档，并像真注册中心那样回一句结果。
+
+        登记/续约/下线现在是**请求/应答**：不回话的话 worker 会等超时。
+        """
+        if not isinstance(payload, RequestProtocol):
+            return
+        sid, rid = payload.session_id, payload.request_id
         if isinstance(payload, ToolRegisterPayload):
             self.registers.append(payload)
+            await bus_proxy.publish(
+                ToolRegisterReplyEvent.name,
+                ToolRegisterResponse(
+                    session_id=sid, request_id=rid, changed=True, version=1
+                ),
+            )
         elif isinstance(payload, ToolHeartbeatPayload):
             self.heartbeats.append(payload)
+            await bus_proxy.publish(
+                ToolHeartbeatReplyEvent.name,
+                ToolHeartbeatResponse(
+                    session_id=sid, request_id=rid, registered=self._lease_alive
+                ),
+            )
         elif isinstance(payload, ToolUnregisterPayload):
             self.unregisters.append(payload)
+            await bus_proxy.publish(
+                ToolUnregisterReplyEvent.name,
+                ToolUnregisterResponse(
+                    session_id=sid, request_id=rid, removed=True, changed=True
+                ),
+            )
 
 
 def _leases(*names: str) -> list[ToolLease]:
@@ -81,10 +111,12 @@ def _leases(*names: str) -> list[ToolLease]:
 _Body = Callable[[MemoryRuntime, _Recorder], Awaitable[None]]
 
 
-async def _with_recorder(hub: MemoryFanout, body: _Body) -> None:
+async def _with_recorder(
+    hub: MemoryFanout, body: _Body, *, lease_alive: bool = True
+) -> None:
     """建一个客户端成员并挂上记录器，交给 ``body`` 使用。"""
     runtime = make_runtime(hub, "recorder")
-    recorder = _Recorder()
+    recorder = _Recorder(lease_alive=lease_alive)
     await runtime.start()
     try:
         await runtime.register(recorder)
@@ -124,12 +156,17 @@ async def _announces_every_lease() -> None:
     await _with_recorder(hub, body)
 
 
-def test_registrar_heartbeat_reannounces_and_renews() -> None:
-    """心跳循环同时补发登记与续约，覆盖「工具先于 agent 启动」的竞态。"""
-    asyncio.run(_heartbeat_reannounces())
+def test_registrar_heartbeat_reannounces_when_lease_is_lost() -> None:
+    """心跳发现租约失效（注册中心重启/过期）时补一次登记。"""
+    asyncio.run(_heartbeat_reannounces(lease_alive=False))
 
 
-async def _heartbeat_reannounces() -> None:
+def test_registrar_heartbeat_only_renews_when_lease_is_alive() -> None:
+    """租约还在时只续约、不重复登记（少一半广播）。"""
+    asyncio.run(_heartbeat_reannounces(lease_alive=True))
+
+
+async def _heartbeat_reannounces(*, lease_alive: bool) -> None:
     hub = MemoryFanout()
     runtime = make_runtime(hub, "bridge")
     registrar = ToolRegistrar(runtime=runtime, leases=_leases("a", "b"), ttl=0.3)
@@ -139,12 +176,18 @@ async def _heartbeat_reannounces() -> None:
         try:
             await registrar.announce()
             await wait_until(lambda: len(recorder.heartbeats) >= 2, timeout=3.0)
-            assert len(recorder.registers) >= 4
+            if lease_alive:
+                # 只续约：登记只有 announce 那一次（两条租约）
+                await wait_until(lambda: len(recorder.registers) >= 2, timeout=3.0)
+                assert len(recorder.registers) == 2
+            else:
+                # 租约失效 → 每个心跳周期补登记一次
+                await wait_until(lambda: len(recorder.registers) >= 4, timeout=3.0)
         finally:
             await registrar.withdraw()
             await runtime.stop()
 
-    await _with_recorder(hub, body)
+    await _with_recorder(hub, body, lease_alive=lease_alive)
 
 
 def test_registrar_withdraw_unregisters_all_leases() -> None:

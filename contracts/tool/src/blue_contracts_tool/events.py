@@ -41,24 +41,48 @@ __all__ = [
 # ---------------------------------------------------------------------------
 
 
-class ToolRegisterPayload(BaseModel):
-    """工具进程上线：把自己登记到注册中心。"""
+class ToolRegisterPayload(RequestProtocol):
+    """工具进程上线：把自己登记到注册中心。
+
+    这是**请求/应答**（不是单向广播）：注册中心是单实例，进程需要知道登记结果
+    （目录变没变、被拒了没有）。以后若要支持多实例，应设计专门的协议再迁移。
+    """
 
     worker_id: str = Field(description="工具进程唯一标识")
     tool: ToolDefinition = Field(description="工具定义（由函数签名自动推断）")
     ttl: float = Field(description="租约时长（秒），超时未续约即被清除")
 
 
-class ToolHeartbeatPayload(BaseModel):
-    """工具进程续约。"""
+class ToolRegisterResponse(ResponseProtocol):
+    """登记结果。"""
+
+    changed: bool = Field(default=False, description="目录是否因这次登记而变化")
+    version: int = Field(default=0, description="登记后的目录版本号")
+
+
+class ToolHeartbeatPayload(RequestProtocol):
+    """工具进程续约；``registered=False`` 表示租约已失效、调用方应重新登记。"""
 
     worker_id: str = Field(description="工具进程唯一标识")
 
 
-class ToolUnregisterPayload(BaseModel):
+class ToolHeartbeatResponse(ResponseProtocol):
+    """续约结果。"""
+
+    registered: bool = Field(default=False, description="该进程当前是否仍在册")
+
+
+class ToolUnregisterPayload(RequestProtocol):
     """工具进程主动下线。"""
 
     worker_id: str = Field(description="工具进程唯一标识")
+
+
+class ToolUnregisterResponse(ResponseProtocol):
+    """下线结果。"""
+
+    removed: bool = Field(default=False, description="是否真的移除了登记")
+    changed: bool = Field(default=False, description="目录是否因这次下线而变化")
 
 
 class CatalogChangedPayload(BaseModel):
@@ -77,6 +101,13 @@ class ToolRegisterEvent(EventDeclaration):
     payload_type = ToolRegisterPayload
 
 
+class ToolRegisterReplyEvent(EventDeclaration):
+    """登记结果。"""
+
+    name = "tool.register.reply"
+    payload_type = ToolRegisterResponse
+
+
 class ToolHeartbeatEvent(EventDeclaration):
     """工具进程续约。"""
 
@@ -84,11 +115,25 @@ class ToolHeartbeatEvent(EventDeclaration):
     payload_type = ToolHeartbeatPayload
 
 
+class ToolHeartbeatReplyEvent(EventDeclaration):
+    """续约结果。"""
+
+    name = "tool.heartbeat.reply"
+    payload_type = ToolHeartbeatResponse
+
+
 class ToolUnregisterEvent(EventDeclaration):
     """工具进程主动下线。"""
 
     name = "tool.unregister"
     payload_type = ToolUnregisterPayload
+
+
+class ToolUnregisterReplyEvent(EventDeclaration):
+    """下线结果。"""
+
+    name = "tool.unregister.reply"
+    payload_type = ToolUnregisterResponse
 
 
 class CatalogChangedEvent(EventDeclaration):
@@ -183,8 +228,11 @@ class CatalogReplyEvent(EventDeclaration):
 
 EVENTS: tuple[type[EventDeclaration], ...] = (
     ToolRegisterEvent,
+    ToolRegisterReplyEvent,
     ToolHeartbeatEvent,
+    ToolHeartbeatReplyEvent,
     ToolUnregisterEvent,
+    ToolUnregisterReplyEvent,
     CatalogChangedEvent,
     ToolCallEvent,
     ToolResultEvent,

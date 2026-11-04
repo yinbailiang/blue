@@ -15,13 +15,20 @@ from blue_contracts_tool import (
     ToolCallRequest,
     ToolCallResult,
     ToolHeartbeatEvent,
+    ToolHeartbeatReplyEvent,
+    ToolHeartbeatResponse,
     ToolProxy,
     ToolRegisterEvent,
+    ToolRegisterReplyEvent,
+    ToolRegisterResponse,
     ToolResultEvent,
     ToolUnregisterEvent,
+    ToolUnregisterReplyEvent,
+    ToolUnregisterResponse,
 )
 from infinity_agent import ToolDefinition, ToolFunction, ToolParameters
 from infinity_bus import Event, EventBus, EventHandler
+from infinity_bus.templates.request import RequestProtocol
 from pydantic import BaseModel
 
 from tests.support import MemoryFanout, make_runtime
@@ -46,6 +53,9 @@ class _Recorder(EventHandler):
                 ToolRegisterEvent.name,
                 ToolHeartbeatEvent.name,
                 ToolUnregisterEvent.name,
+                ToolRegisterReplyEvent.name,
+                ToolHeartbeatReplyEvent.name,
+                ToolUnregisterReplyEvent.name,
             ]
         )
         self.seen: list[str] = []
@@ -68,6 +78,42 @@ class _Recorder(EventHandler):
                     request_id=payload.request_id,
                     version=7,
                     tools=[],
+                ),
+            )
+            return
+        if isinstance(payload, RequestProtocol):
+            sid, rid = payload.session_id, payload.request_id
+        else:  # pragma: no cover - 事件都带请求载荷
+            sid, rid = "", ""
+        if raw_event.name == ToolRegisterEvent.name:
+            await bus_proxy.publish(
+                ToolRegisterReplyEvent.name,
+                ToolRegisterResponse(
+                    session_id=sid,
+                    request_id=rid,
+                    changed=True,
+                    version=3,
+                ),
+            )
+            return
+        if raw_event.name == ToolHeartbeatEvent.name:
+            await bus_proxy.publish(
+                ToolHeartbeatReplyEvent.name,
+                ToolHeartbeatResponse(
+                    session_id=sid,
+                    request_id=rid,
+                    registered=False,
+                ),
+            )
+            return
+        if raw_event.name == ToolUnregisterEvent.name:
+            await bus_proxy.publish(
+                ToolUnregisterReplyEvent.name,
+                ToolUnregisterResponse(
+                    session_id=sid,
+                    request_id=rid,
+                    removed=True,
+                    changed=True,
                 ),
             )
             return
@@ -104,11 +150,11 @@ async def _run(
         elif action == "catalog":
             result = await proxy.catalog()
         elif action == "register":
-            await proxy.register("worker-1", _NOW_TOOL, ttl=30.0)
+            result = await proxy.register("worker-1", _NOW_TOOL, ttl=30.0)
         elif action == "heartbeat":
-            await proxy.heartbeat("worker-1")
+            result = await proxy.heartbeat("worker-1")
         elif action == "unregister":
-            await proxy.unregister("worker-1")
+            result = await proxy.unregister("worker-1")
     finally:
         # 单向广播是"发完就走"，给分发留一个调度机会再取记录
         await asyncio.sleep(0.05)
@@ -144,12 +190,16 @@ def test_catalog_query() -> None:
     assert response.version == 7
 
 
-def test_registry_management_is_one_way() -> None:
-    """注册/心跳/下线是单向广播：发完就返回，不等应答也不该超时。"""
-    for action, event in [
-        ("register", "tool.register"),
-        ("heartbeat", "tool.heartbeat"),
-        ("unregister", "tool.unregister"),
-    ]:
-        _, seen = asyncio.run(_run(action))
-        assert event in seen, f"{action} 应该发出 {event}"
+def test_registry_calls_return_typed_replies() -> None:
+    """注册/心跳/下线都是请求/应答：拿得到结果，进程才知道租约还在不在。"""
+    register, _ = asyncio.run(_run("register"))
+    assert isinstance(register, ToolRegisterResponse)
+    assert register.changed is True and register.version == 3
+
+    heartbeat, _ = asyncio.run(_run("heartbeat"))
+    assert isinstance(heartbeat, ToolHeartbeatResponse)
+    assert heartbeat.registered is False  # 假注册中心回的是"已不在册"
+
+    unregister, _ = asyncio.run(_run("unregister"))
+    assert isinstance(unregister, ToolUnregisterResponse)
+    assert unregister.removed is True

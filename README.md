@@ -465,6 +465,28 @@ BLUE_BUS_URL=amqp://guest:guest@127.0.0.1:5672/blue \
 > **网络提示**：`weather` 会向 `wttr.in` 发起 HTTPS 请求；如需换源或镜像，
 > 在 `blue.infd` 里传 `WeatherService(base_url = ..., timeout = ...)`。
 
+## 注册中心是单实例（工具登记走请求/应答）
+
+`tool.register` / `tool.heartbeat` / `tool.unregister` 是**请求/应答**，不是单向广播：
+
+| 事件 | 应答 | 说明 |
+|---|---|---|
+| `tool.register` | `ToolRegisterResponse{changed, version}` | 目录变没变、当前版本号 |
+| `tool.heartbeat` | `ToolHeartbeatResponse{registered}` | `false` = 租约已失效，调用方要重新登记 |
+| `tool.unregister` | `ToolUnregisterResponse{removed, changed}` | 是否真的移除了 |
+
+代价是**前提**：注册中心必须**单实例**——多实例时多个副本会各回一条，`request()`
+只等第一条，语义就含糊了。以后要支持多实例，请设计专用协议（例如选主 + 确认数）
+再迁移，不要直接把这条请求复制成 N 份。
+
+配套的 worker 侧语义（`ToolRegistrar`）：
+
+- **登记不阻塞启动**：`announce()` 把登记丢到后台任务里发，注册中心没起来也不影响
+  服务 ready，失败由心跳循环重试；
+- **心跳先续约、失效才补登记**：`registered=False` 时才重发 `tool.register`，
+  少一半广播（注册中心重启后能自愈）；
+- **下线用短超时**：退出路径不等太久（`WITHDRAW_TIMEOUT`），租约本来也会过期。
+
 ## 队列守卫（bus 自带兜底）
 
 fanout 成员队列是 **durable + 非 auto-delete**（`restart` 策略要能补投积压），

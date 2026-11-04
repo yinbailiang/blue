@@ -3,23 +3,28 @@
 from __future__ import annotations
 
 import logging
-from typing import Protocol
+from typing import Any, Protocol
 
 from blue_contracts_tool import (
     CatalogQueryEvent,
     CatalogQueryRequest,
-    CatalogQueryResponse,
     CatalogReplyEvent,
     ToolDefinition,
     ToolHeartbeatEvent,
     ToolHeartbeatPayload,
+    ToolHeartbeatReplyEvent,
     ToolRegisterEvent,
     ToolRegisterPayload,
+    ToolRegisterReplyEvent,
     ToolUnregisterEvent,
     ToolUnregisterPayload,
+    ToolUnregisterReplyEvent,
 )
-from infinity_bus import Event, EventBus, EventHandler
-from pydantic import BaseModel
+from infinity_bus import Event, EventBus
+from infinity_bus.templates.handlers.service import (  # pyright: ignore[reportMissingTypeStubs]
+    ServiceHandler,
+    process,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -50,57 +55,68 @@ class RegistryBackend(Protocol):
         ...
 
 
-class RegistryHandler(EventHandler):
-    """把注册中心事件翻译成后端的状态变更。"""
+class RegistryHandler(ServiceHandler):
+    """把注册中心事件翻译成后端的状态变更。
+
+    四个事件现在都是**请求/应答**：注册/续约/下线都会回一句结果，进程能知道
+    "登记生效了没、租约还在不在"。注册中心是单实例——以后要支持多实例，应设计
+    专用协议再迁移。
+    """
 
     def __init__(self, backend: RegistryBackend) -> None:
-        super().__init__(
-            subscriptions=[
-                ToolRegisterEvent.name,
-                ToolHeartbeatEvent.name,
-                ToolUnregisterEvent.name,
-                CatalogQueryEvent.name,
-            ],
-            handle_timeout=10.0,
-        )
         self._backend = backend
+        super().__init__()
 
-    async def handle(
+    @process(ToolRegisterEvent, ToolRegisterReplyEvent)
+    async def on_register(
+        self, payload: ToolRegisterPayload, bus_proxy: EventBus.Proxy, raw_event: Event
+    ) -> dict[str, Any]:
+        """登记工具进程；目录变了就广播。"""
+        del raw_event
+        changed = self._backend.register_tool(payload)
+        logger.log(
+            logging.INFO if changed else logging.DEBUG,
+            "工具登记：%s（worker=%s, changed=%s）",
+            payload.tool.function.name,
+            payload.worker_id,
+            changed,
+        )
+        if changed:
+            await self._backend.broadcast_catalog(bus_proxy)
+        version, _ = self._backend.catalog_snapshot()
+        return {"changed": changed, "version": version}
+
+    @process(ToolHeartbeatEvent, ToolHeartbeatReplyEvent)
+    async def on_heartbeat(
+        self, payload: ToolHeartbeatPayload, bus_proxy: EventBus.Proxy, raw_event: Event
+    ) -> dict[str, Any]:
+        """续约；未登记的进程要显式告警（多半是注册丢了，调用方会重新登记）。"""
+        del bus_proxy, raw_event
+        registered = self._backend.heartbeat_tool(payload.worker_id)
+        if not registered:
+            logger.warning("收到未登记进程的续约：%s", payload.worker_id)
+        return {"registered": registered}
+
+    @process(ToolUnregisterEvent, ToolUnregisterReplyEvent)
+    async def on_unregister(
         self,
-        payload: BaseModel | None,
+        payload: ToolUnregisterPayload,
         bus_proxy: EventBus.Proxy,
         raw_event: Event,
-    ) -> None:
-        """按事件类型分派处理。"""
+    ) -> dict[str, Any]:
+        """下线；目录变了就广播。"""
         del raw_event
-        backend = self._backend
+        changed = self._backend.unregister_tool(payload.worker_id)
+        if changed:
+            logger.info("工具下线：%s", payload.worker_id)
+            await self._backend.broadcast_catalog(bus_proxy)
+        return {"removed": True, "changed": changed}
 
-        if isinstance(payload, ToolRegisterPayload):
-            changed = backend.register_tool(payload)
-            logger.log(
-                logging.INFO if changed else logging.DEBUG,
-                "工具登记：%s（worker=%s, changed=%s）",
-                payload.tool.function.name,
-                payload.worker_id,
-                changed,
-            )
-            if changed:
-                await backend.broadcast_catalog(bus_proxy)
-        elif isinstance(payload, ToolHeartbeatPayload):
-            if not backend.heartbeat_tool(payload.worker_id):
-                logger.warning("收到未登记进程的续约：%s", payload.worker_id)
-        elif isinstance(payload, ToolUnregisterPayload):
-            if backend.unregister_tool(payload.worker_id):
-                logger.info("工具下线：%s", payload.worker_id)
-                await backend.broadcast_catalog(bus_proxy)
-        elif isinstance(payload, CatalogQueryRequest):
-            version, tools = backend.catalog_snapshot()
-            await bus_proxy.publish(
-                CatalogReplyEvent.name,
-                CatalogQueryResponse(
-                    session_id=payload.session_id,
-                    request_id=payload.request_id,
-                    version=version,
-                    tools=tools,
-                ),
-            )
+    @process(CatalogQueryEvent, CatalogReplyEvent)
+    async def on_catalog_query(
+        self, payload: CatalogQueryRequest, bus_proxy: EventBus.Proxy, raw_event: Event
+    ) -> dict[str, Any]:
+        """返回当前目录快照（版本号 + 工具定义）。"""
+        del bus_proxy, raw_event
+        version, tools = self._backend.catalog_snapshot()
+        return {"version": version, "tools": tools}
