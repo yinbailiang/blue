@@ -17,6 +17,14 @@ from starlette.testclient import TestClient
 from webui_fake_backend import FakeBackend
 
 
+def _chain(payload: dict[str, Any]) -> list[dict[str, Any]]:
+    """按 current 从 nodes 取当前链上的消息（快照不再重复下发 messages）。"""
+    by_id = {node["id"]: node for node in payload["nodes"]}
+    return [
+        by_id[node_id]["message"] for node_id in payload["current"] if node_id in by_id
+    ]
+
+
 def _client() -> Any:
     backend = FakeBackend()
     app = create_app(
@@ -77,12 +85,12 @@ def test_rest_endpoints() -> None:
     detail = client.get("/api/sessions/s1")
     assert detail.status_code == 200
     payload: dict[str, Any] = detail.json()
-    assert [message["role"] for message in payload["messages"]] == [
+    assert [message["role"] for message in _chain(payload)] == [
         "system",
         "user",
         "assistant",
     ]
-    assert payload["messages"][1]["content"] == "你好"
+    assert _chain(payload)[1]["content"] == "你好"
 
     assert client.get("/api/sessions/missing").status_code == 404
 

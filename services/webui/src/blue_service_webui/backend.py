@@ -251,8 +251,9 @@ class SessionNodeView(BaseModel):
 class SessionView(BaseModel):
     """会话快照的 JSON 视图。
 
-    ``messages`` 是当前链（界面直接按顺序渲染），``nodes`` 是整棵树：前端用它
-    算出某个节点的兄弟分支，从而画出 ``‹ 2/3 ›`` 切换条。
+    只下发**整棵树**（每个节点自带一条消息）加「当前链的节点 id 列表」；链上的
+    消息由客户端按 ``current`` 从 ``nodes`` 取。早先两边各存一份同样的消息正文，
+    长会话切一次会话要多传一倍数据（实测 13 MB 里有一半是重复的）。
     """
 
     session_id: str
@@ -260,7 +261,6 @@ class SessionView(BaseModel):
     updated_at: float
     steps: int
     message_count: int
-    messages: list[MessageView] = Field(default_factory=list[MessageView])
     nodes: list[SessionNodeView] = Field(default_factory=list[SessionNodeView])
     current: list[int] = Field(
         default_factory=list[int], description="当前链的节点 id（早 → 新）"
@@ -956,17 +956,12 @@ def serialize_snapshot(snapshot: SessionSnapshot) -> SessionView:
         )
         for node in snapshot.nodes
     ]
-    by_id = {node.id: node for node in nodes}
     return SessionView(
         session_id=snapshot.session_id,
         created_at=snapshot.created_at,
         updated_at=snapshot.updated_at,
         steps=snapshot.steps,
         message_count=snapshot.message_count,
-        # 当前链按 current 的顺序渲染，不能依赖节点 id 升序（换分支后不单调）
-        messages=[
-            by_id[node_id].message for node_id in snapshot.current if node_id in by_id
-        ],
         nodes=nodes,
         current=list(snapshot.current),
         root_current=snapshot.root_current,

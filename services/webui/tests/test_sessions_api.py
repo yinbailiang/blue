@@ -88,3 +88,32 @@ def test_outbox_changes_are_pushed_over_the_socket() -> None:
     assert frame["type"] == "outbox"
     assert frame["session_id"] == "s1"
     assert [item["text"] for item in frame["messages"]] == ["排队一"]
+
+
+def test_api_responses_are_not_cached() -> None:
+    """会话 API 必须 no-store：缓存住就会「切走再切回还是旧内容」。"""
+    client, _ = _client()
+    response: Any = client.get("/api/sessions/s1")
+    assert response.status_code == 200
+    assert response.headers["cache-control"] == "no-store"
+    listing: Any = client.get("/api/sessions")
+    assert listing.headers["cache-control"] == "no-store"
+
+
+def test_attachment_stays_cacheable() -> None:
+    """附件是内容寻址的，不能被 no-store 一刀切掉长缓存。"""
+    client, backend = _client()
+    digest = "a" * 64
+    backend.blobs[digest] = ("image/png", b"binary")
+    response: Any = client.get(f"/api/attachments/{digest}")
+    assert response.status_code == 200
+    assert "max-age" in response.headers["cache-control"]
+    assert "no-store" not in response.headers["cache-control"]
+
+
+def test_snapshot_is_gzipped() -> None:
+    """长会话快照很大，必须压缩（未压缩时一次切换要传十几 MB）。"""
+    client, _ = _client()
+    response: Any = client.get("/api/sessions/s1", headers={"accept-encoding": "gzip"})
+    assert response.status_code == 200
+    assert response.headers.get("content-encoding") == "gzip"

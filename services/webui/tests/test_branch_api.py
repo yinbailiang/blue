@@ -10,6 +10,14 @@ from starlette.testclient import TestClient
 from webui_fake_backend import FakeBackend
 
 
+def _chain(payload: dict[str, Any]) -> list[dict[str, Any]]:
+    """按 current 从 nodes 取当前链上的消息（快照不再重复下发 messages）。"""
+    by_id = {node["id"]: node for node in payload["nodes"]}
+    return [
+        by_id[node_id]["message"] for node_id in payload["current"] if node_id in by_id
+    ]
+
+
 def _client() -> tuple[Any, FakeBackend]:
     """构造测试客户端与替身后端（与 test_app.py 同一套假数据）。"""
     backend = FakeBackend()
@@ -28,13 +36,13 @@ def test_session_view_exposes_the_whole_tree() -> None:
     assert [node["parent"] for node in payload["nodes"]] == [0, 1, 2, 2]
     # 用户消息下挂着两条回答分支，只有一条在当前链上
     assert payload["nodes"][1]["current"] == 3
-    assert [message["content"] for message in payload["messages"]] == [
+    assert [message["content"] for message in _chain(payload)] == [
         "系统提示",
         "你好",
         "你好，我是 Blue。",
     ]
     # 每条消息都带节点 id，前端靠它发分支操作
-    assert [message["id"] for message in payload["messages"]] == [1, 2, 3]
+    assert [message["id"] for message in _chain(payload)] == [1, 2, 3]
 
 
 def test_activate_endpoint_switches_the_current_chain() -> None:
@@ -44,7 +52,7 @@ def test_activate_endpoint_switches_the_current_chain() -> None:
     assert response.status_code == 200
     payload: dict[str, Any] = response.json()
     assert payload["current"] == [1, 2, 4]
-    assert payload["messages"][-1]["content"] == "另一个分支"
+    assert _chain(payload)[-1]["content"] == "另一个分支"
     assert len(payload["nodes"]) == 4
     assert backend.activation_calls == [("s1", 4)]
 

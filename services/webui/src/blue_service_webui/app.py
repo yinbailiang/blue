@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import re
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any, Literal, cast
 
@@ -15,11 +16,18 @@ from blue_contracts_session import (
     SessionInfo,
     SessionStreamPayload,
 )
-from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi import (
+    FastAPI,
+    HTTPException,
+    Request,
+    WebSocket,
+    WebSocketDisconnect,
+)
 from fastapi.responses import FileResponse, Response
 from fastapi.staticfiles import StaticFiles
 from infinity_agent import ToolDefinition
 from pydantic import BaseModel, Field, ValidationError, model_validator
+from starlette.middleware.gzip import GZipMiddleware
 
 from blue.errors import BlueError
 from blue_service_webui.backend import (
@@ -141,6 +149,20 @@ def create_app(*, backend: WebBackend, config: WebUIConfig) -> FastAPI:
         openapi_url="/api/openapi.json",
     )
     app.mount("/static", StaticFiles(directory=WEB_DIR), name="static")
+    # 会话快照动辄上 MB（工具结果全在里面），不压缩的话切一次会话要拉十几 MB
+    app.add_middleware(GZipMiddleware, minimum_size=1024)
+
+    @app.middleware("http")
+    async def no_store_api(
+        request: Request, call_next: Callable[[Request], Any]
+    ) -> Any:
+        """``/api`` 一律不走浏览器缓存：会话随时在变，缓存住就等于「切回来不更新」。"""
+        response: Any = await call_next(request)
+        path = request.url.path
+        # 附件是内容寻址的（hash 即内容），可以长缓存；其余 /api 一律不缓存
+        if path.startswith("/api") and not path.startswith("/api/attachments"):
+            response.headers["cache-control"] = "no-store"
+        return response
 
     @app.get("/", include_in_schema=False)
     async def index() -> FileResponse:

@@ -319,6 +319,8 @@
 
   async function api(path, options = {}) {
     const response = await fetch(path, {
+      // 会话数据随时在变：别让浏览器缓存住，否则「切走再切回」拿到的是旧快照
+      cache: "no-store",
       ...options,
       headers: {
         "content-type": "application/json",
@@ -1438,12 +1440,18 @@
     if (!snapshot) return;
     const session = store(snapshot.session_id);
     session.title = String(snapshot.title || session.title || "");
-    const nextMessages = Array.isArray(snapshot.messages) ? snapshot.messages : [];
+    // 快照只下发整棵树 + 当前链的 id：链上的消息从 nodes 里取（服务端不再重复发一份）
+    const incomingNodes = Array.isArray(snapshot.nodes) ? snapshot.nodes : [];
+    const nodeById = new Map(incomingNodes.map((node) => [node.id, node]));
+    const nextMessages = (Array.isArray(snapshot.current) ? snapshot.current : [])
+      .map((id) => nodeById.get(id))
+      .filter(Boolean)
+      .map((node) => node.message);
     if (state.sessionId === snapshot.session_id) {
       adoptProvisionalNodes(session, nextMessages);
     }
     session.messages = nextMessages;
-    session.nodes = Array.isArray(snapshot.nodes) ? snapshot.nodes : [];
+    session.nodes = incomingNodes;
     session.chain = Array.isArray(snapshot.current) ? snapshot.current : [];
     session.liveMessage = null;
     session.loaded = true;
@@ -1518,25 +1526,53 @@
   }
 
   /** 切到某个会话：先渲染缓存（立刻有内容），再后台刷新快照。 */
+  /**
+   * 正在进行的会话加载（会话 id → Promise）。
+   *
+   * 切会话时「点来点去」会同时发起多个请求：这里做两件事——
+   * 同一个会话不重复发；同会话的旧响应（token 过期）直接丢弃，
+   * 免得慢的那次回来把新的覆盖掉。
+   */
+  const pendingLoads = new Map();
+
   async function loadSession(sessionId, options = {}) {
     if (!sessionId) return;
     switchSession(sessionId);
     closeSidebar();
     if (options.refresh === false) return;
-    try {
+
+    const running = pendingLoads.get(sessionId);
+    if (running) {
+      // 已经有一个在拉同一个会话：等它，不重复发
+      await running.catch(() => undefined);
+      return;
+    }
+
+    const session = store(sessionId);
+    const token = (session.loadToken || 0) + 1;
+    session.loadToken = token;
+
+    const task = (async () => {
       const snapshot = await api(`/api/sessions/${encodeURIComponent(sessionId)}`);
+      if (session.loadToken !== token) return; // 期间又发起了新加载：这次结果作废
       applySnapshot(snapshot, { force: true });
       void refreshOutbox(sessionId);
+    })();
+
+    pendingLoads.set(sessionId, task);
+    try {
+      await task;
     } catch (error) {
       if (options.silent) {
         localStorage.removeItem("blue.session");
         return;
       }
       toast(`读取会话失败：${error.message}`, "error");
+    } finally {
+      pendingLoads.delete(sessionId);
     }
   }
 
-  /** 切换视图到某个会话（纯界面动作，不等待网络）。 */
   function switchSession(sessionId) {
     // 草稿跟着会话走：切走时存下输入框，切回来再放回去
     if (state.sessionId && state.sessionId !== sessionId) {
@@ -1561,6 +1597,9 @@
       session.nodes = [];
       session.chain = [];
     }
+    // 目录是按会话算的：换会话必须重画，否则右侧还挂着上一个会话的条目
+    session.indexedCount = -1;
+    scheduleIndexRender();
     // 视图缓存是按当前会话建的，切会话一律重建
     resetView();
     renderMessages({ scroll: true, force: true });
