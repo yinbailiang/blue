@@ -61,6 +61,7 @@ async def _lists_tools() -> None:
             "echo",
             "boom",
             "rich",
+            "huge",
             "slow",
             "zod_schema",
             "array_no_items",
@@ -178,5 +179,20 @@ async def _capture_stderr() -> None:
     try:
         await _wait_for(lambda: any("ready" in line for line in session.stderr_tail))
         assert any("fake-mcp-server ready" in line for line in session.stderr_tail)
+    finally:
+        await session.close()
+
+
+def test_reads_oversized_message() -> None:
+    """单个响应超过 64 KiB 管道默认上限时也要能读到（截图就是这种体量）。"""
+    asyncio.run(_reads_oversized())
+
+
+async def _reads_oversized() -> None:
+    session = await _open(timeout=20.0)
+    try:
+        result = await session.call_tool("huge", {}, timeout=20.0)
+        assert result.is_error is False
+        assert len(result.content) >= 1024 * 1024
     finally:
         await session.close()

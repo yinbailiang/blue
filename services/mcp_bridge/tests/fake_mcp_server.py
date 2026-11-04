@@ -59,6 +59,11 @@ def _tools_page_two() -> list[dict[str, Any]]:
             "inputSchema": {"type": "object", "properties": {}},
         },
         {
+            "name": "huge",
+            "description": "返回超大文本（单条消息超过默认管道上限）",
+            "inputSchema": {"type": "object", "properties": {}},
+        },
+        {
             "name": "slow",
             "description": "睡眠一段时间",
             "inputSchema": {"type": "object", "properties": {}},
@@ -202,6 +207,15 @@ def _handle_call_tool(request_id: Any, params: dict[str, Any]) -> None:
                         {"type": "future_block", "payload": {"x": 1}},
                     ]
                 },
+            }
+        )
+        return
+    if name == "huge":
+        _send(
+            {
+                "jsonrpc": "2.0",
+                "id": request_id,
+                "result": {"content": [{"type": "text", "text": "x" * (1024 * 1024)}]},
             }
         )
         return

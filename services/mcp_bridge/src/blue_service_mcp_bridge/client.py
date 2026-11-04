@@ -28,6 +28,7 @@ from blue_service_mcp_bridge.config import McpServerConfig
 
 __all__ = [
     "DEFAULT_PROTOCOL_VERSION",
+    "MAX_MESSAGE_BYTES",
     "McpAttachment",
     "McpCallError",
     "McpCallResult",
@@ -45,6 +46,14 @@ __all__ = [
 logger = logging.getLogger(__name__)
 
 DEFAULT_PROTOCOL_VERSION = "2025-06-18"
+
+MAX_MESSAGE_BYTES = 32 * 1024 * 1024
+"""单条 JSON-RPC 消息的读取上限。
+
+asyncio 子进程管道的默认行缓冲只有 64 KiB：MCP server 返回一张截图
+（base64 PNG）就会远超它，``readline`` 直接抛错、会话被判成「关闭了 stdout」。
+这里放宽到 32 MiB，并让超限错误带上真实原因。
+"""
 """客户端声明的 MCP 协议版本；服务端返回什么就按什么工作。"""
 
 CLIENT_INFO: dict[str, str] = {
@@ -216,6 +225,7 @@ class StdioMcpSession:
                 cwd=cwd,
                 env=environment,
                 start_new_session=True,
+                limit=MAX_MESSAGE_BYTES,
             )
         except OSError as error:
             raise McpTransportError(
@@ -397,6 +407,14 @@ class StdioMcpSession:
         while True:
             try:
                 line = await stdout.readline()
+            except (asyncio.LimitOverrunError, ValueError) as error:
+                self._fail_pending(
+                    McpTransportError(
+                        f"MCP server {self._server_name!r} 单条消息超过 "
+                        f"{MAX_MESSAGE_BYTES} 字节上限：{error}"
+                    )
+                )
+                return
             except Exception:
                 logger.debug(
                     "读取 MCP stdout 失败：%s", self._server_name, exc_info=True

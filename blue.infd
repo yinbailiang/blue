@@ -107,8 +107,13 @@ view_image = ViewImageService()
 # MCP 客户端桥：把外部 MCP server（stdio）的工具接进目录。
 # 工具集是声明式的：只有 tools 里列出的 <server>__<tool> 会注册；声明的工具在
 # server 上不存在时桥启动失败（fail loud）。
-# 下面接的是仓库自带的「虚拟屏幕」样例 server（mcp_servers/virtual_screen/）：
-# 一块内存画布，能画字/画框，并导出 PNG（顺带验证图片回传链路）。
+#
+# 两个 server：
+#   vscreen —— 仓库自带的虚拟屏幕样例（内存画布，可导 PNG）
+#   kwin    —— 第三方 kwin-mcp（KDE Plasma 6 Wayland 桌面自动化）连真实会话，
+#              这里只放会话管理 + 只读/低风险工具：连/断真实会话、看窗口、
+#              活动窗口、虚拟桌面、截图、窗口几何、聚焦窗口。
+#              输入类（鼠标/键盘/关闭窗口）刻意不启用。
 mcp_bridge = McpBridgeService(
   tools = [
     "vscreen__screen_info",
@@ -117,12 +122,25 @@ mcp_bridge = McpBridgeService(
     "vscreen__screen_rect",
     "vscreen__screen_text",
     "vscreen__screen_snapshot",
+    "kwin__session_connect",
+    "kwin__session_stop",
+    "kwin__list_windows",
+    "kwin__active_window",
+    "kwin__virtual_desktops",
+    "kwin__screenshot",
+    "kwin__window_geometry",
+    "kwin__focus_window",
   ],
   servers = [
     {
       name = "vscreen",
       command = ".venv/bin/python",
       args = ["mcp_servers/virtual_screen/server.py"],
+    },
+    {
+      name = "kwin",
+      command = "mcp_servers/kwin_mcp/run.sh",
+      args = ["--screenshot-images", "--default-live-session"],
     },
   ],
 )
