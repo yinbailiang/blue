@@ -1,0 +1,24 @@
+~ServiceTemplate {
+  shell: str = ""
+  workdir: <str?> = null
+  max_sessions: <int, range(1, 16)> = 6
+  cols: <int, range(20, 400)> = 100
+  rows: <int, range(5, 200)> = 30
+  scrollback: <int, range(0, 10000)> = 2000
+  font_path: str = ""
+  font_size: <int, range(8, 40)> = 15
+  idle_ttl: <float, positive> = 1800.0
+}
+
+service {
+  name = "terminal"
+  kind = "tool"
+  package = "blue-service-terminal"
+  module = "blue_service_terminal"
+  depends_on = ["bus"]
+  depends_contracts = ["tool"]
+  restart = "always"
+  stop_timeout = 10.0
+  startup_timeout = 30.0
+  readiness = "process"
+}

@@ -23,6 +23,7 @@
 !from p"services/write_file/service.infd" import ServiceTemplate as WriteFileService
 !from p"services/edit_file/service.infd" import ServiceTemplate as EditFileService
 !from p"services/shell/service.infd" import ServiceTemplate as ShellService
+!from p"services/terminal/service.infd" import ServiceTemplate as TerminalService
 !from p"services/view_image/service.infd" import ServiceTemplate as ViewImageService
 !from p"services/weather/service.infd" import ServiceTemplate as WeatherService
 !from p"services/web_search/service.infd" import ServiceTemplate as WebSearchService
@@ -85,6 +86,11 @@ edit_file = EditFileService()
 
 # workdir 缺省为项目根（blue.infd 所在目录）；可设为绝对路径或相对项目根的路径
 shell = ShellService()
+
+# 交互式终端（PTY）：多会话、不同 shell、终端截图与坐标点击。
+# shell 留空=自动挑选带 readline 的 shell（NixOS 的 bash 有两个构建，
+# 不带 readline 的那个会让方向键失效、提示符里的 \[ \] 原样打印）。
+terminal = TerminalService()
 
 # 天气查询：默认走 wttr.in，可改 base_url / timeout
 weather = WeatherService()

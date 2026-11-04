@@ -478,6 +478,7 @@ Ready / Running → Stopping → Stopped
 | `clock` / `echo` / `text_stats` | 基础工具 |
 | `read_file` / `write_file` / `edit_file` | 文件读写与精确替换；相对路径默认锚定项目根 |
 | `shell` | 异步 shell 命令，超时进程组强杀、输出截断；默认工作目录为项目根 |
+| `terminal` | 交互式终端（PTY）多会话：跑 vim/htop/REPL，可截图给模型看，并按截图坐标点击/拖动；`shell` 留空时自动挑选带 readline 的 shell |
 | `weather` | 天气查询（wttr.in，免密钥）：实时实况 + 最多 3 天预报，天气码本地译中文 |
 | `browser` | 无头 Firefox 截图：把网页截成图片**作为附件**回到 agent（Pillow 归一化到会话体积上限内） |
 | `browser_ops` | 可交互浏览器（WebDriver/geckodriver）：等渲染、点击、输入、滚动、执行 JS，再截图回传附件 |
@@ -486,6 +487,11 @@ Ready / Running → Stopping → Stopped
 | `mcp_server` | MCP 服务端桥：把 blue 工具目录暴露给外部 MCP 客户端（stdio，手工运行，白名单 + 危险工具门禁） |
 | `chat` / `inspect` | 手工 UI 客户端，不纳入 supervisor 调谐 |
 
+> **终端提示**：`shell` 是"跑一条命令、收输出、结束"；`terminal` 是长期存活的
+> PTY（多会话、可选 shell、终端截图与坐标点击）。NixOS 上 `bash` 有两种构建，
+> 不带 readline 的那个会让方向键失效、提示符里的 `\[ \]` 原样打印——`terminal`
+> 会自动跳过它，也可以用 `blue-config` 里的 `shell` 显式指定。
+>
 > **安全提示**：`read_file` / `write_file` / `edit_file` / `shell` 以工具进程
 > 权限运行，没有额外沙箱。只在可信工作目录中启用。
 >

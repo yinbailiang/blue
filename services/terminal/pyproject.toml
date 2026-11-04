@@ -1,0 +1,26 @@
+[project]
+name = "blue-service-terminal"
+version = "0.1.0"
+description = "blue 终端工具服务：多会话 PTY、终端截图与坐标点击"
+requires-python = ">=3.14"
+dependencies = [
+    "blue",
+    "pillow>=11",
+    "pydantic>=2",
+    "pyte>=0.8",
+    "wcwidth>=0.2",
+]
+
+[tool.uv.sources]
+blue = { workspace = true }
+
+[build-system]
+requires = ["uv_build>=0.9.0,<0.14"]
+build-backend = "uv_build"
+
+[tool.uv.build-backend]
+module-name = "blue_service_terminal"
+module-root = "src"
+
+[project.scripts]
+blue-service-terminal = "blue_service_terminal:main"
