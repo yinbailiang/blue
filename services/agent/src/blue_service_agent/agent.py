@@ -181,7 +181,18 @@ class AgentCore:
         except Exception:
             await self.stop()
             raise
-        logger.info("Agent 核心已启动（%s）", self._runtime.member_id)
+        settings = self._settings
+        logger.info(
+            "Agent 核心已启动（%s）：provider=%s model=%s 读超时=%ss 连接超时=%ss "
+            "流重试=%s HTTP重试=%s",
+            self._runtime.member_id,
+            settings.provider,
+            settings.model,
+            settings.llm_timeout,
+            settings.llm_connect_timeout,
+            settings.llm_retries,
+            settings.llm_http_retries,
+        )
 
     async def stop(self) -> None:
         """退出模型客户端上下文；仅在拥有总线时一并关闭总线。"""
