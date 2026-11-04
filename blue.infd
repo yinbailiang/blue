@@ -84,7 +84,9 @@ agent = AgentService(
   ],
 )
 
-webui = WebUIService()
+webui = WebUIService(
+  host = "0.0.0.0"
+)
 
 # 小工具
 #echo = EchoService()
