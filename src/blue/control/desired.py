@@ -41,6 +41,7 @@ __all__ = [
     "load_desired",
     "read_package_name",
     "read_package_version",
+    "redact_config",
     "redact_state",
     "remove_runtime_config",
     "render_state",
@@ -586,6 +587,16 @@ def _chmod_private(path: Path) -> None:
             path.chmod(0o600)
     except OSError:
         return
+
+
+def redact_config(config: dict[str, Any]) -> dict[str, Any]:
+    """把配置里的密钥替换成 ``***``，用于写入状态快照。
+
+    状态文件本身是 0600，但"能不落盘就不落盘"：``blue plan --diff`` 只需要
+    知道字段变没变，不需要看到密钥内容。
+    """
+    redacted = _redact(config)
+    return cast(dict[str, Any], redacted) if isinstance(redacted, dict) else {}
 
 
 def _redact(value: object) -> object:

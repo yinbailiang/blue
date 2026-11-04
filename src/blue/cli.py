@@ -72,7 +72,9 @@ def main(argv: Sequence[str] | None = None) -> int:
             case "build":
                 return _build(config_path)
             case "plan":
-                return _plan(config_path, as_json=bool(args.json))
+                return _plan(
+                    config_path, as_json=bool(args.json), show_diff=bool(args.diff)
+                )
             case "doctor":
                 return _doctor(config_path)
             case "mcp-tools":
@@ -444,7 +446,7 @@ def _build(config_path: str) -> int:
     return completed.returncode
 
 
-def _plan(config_path: str, *, as_json: bool) -> int:
+def _plan(config_path: str, *, as_json: bool, show_diff: bool = False) -> int:
     """预览一次 apply 会做什么，不接触 supervisor、不改任何文件。
 
     退出码：``0`` 无变化、``1`` 有变化、``2`` 配置无法编译——方便脚本用
@@ -471,6 +473,7 @@ def _plan(config_path: str, *, as_json: bool) -> int:
                             "action": change.action,
                             "reasons": list(change.reasons),
                             "status": change.status,
+                            "config_diff": list(change.config_diff),
                         }
                         for change in result.services
                     ],
@@ -504,6 +507,12 @@ def _plan(config_path: str, *, as_json: bool) -> int:
             reason = "；".join(change.reasons) or ""
             detail = f"  {reason}" if reason else ""
             print(f"  {marker} {change.name:<16}{detail}")
+            if show_diff:
+                if change.config_diff:
+                    for line in change.config_diff:
+                        print(f"      {line}")
+                elif change.action == "restart" and "配置变化" in change.reasons:
+                    print("      （旧快照里没有配置内容，apply 一次后即可对比字段）")
     if result.contracts:
         print("\n契约变更")
         for change in result.contracts:
@@ -709,6 +718,7 @@ def _parser() -> argparse.ArgumentParser:
         "plan", help="预览一次 apply 会新增/重启/删除哪些服务（对标 kubectl diff）"
     )
     plan_parser.add_argument("--json", action="store_true", help="输出 JSON")
+    plan_parser.add_argument("--diff", action="store_true", help="展示配置的字段级变化")
     subparsers.add_parser("doctor", help="检查运行依赖")
     mcp_parser = subparsers.add_parser(
         "mcp-tools", help="列出 MCP server 真实提供的工具名（写白名单用）"

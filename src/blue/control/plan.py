@@ -15,9 +15,12 @@
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
-from typing import Literal
+from decimal import Decimal
+from typing import Any, Literal, cast
 
+from blue.control.desired import redact_config
 from blue.control.model import (
     ActualState,
     DesiredService,
@@ -31,6 +34,7 @@ __all__ = [
     "PlanResult",
     "ServiceChange",
     "changed_contracts",
+    "config_diff",
     "plan",
     "restart_reasons",
 ]
@@ -52,6 +56,8 @@ class ServiceChange:
     action: Action
     reasons: tuple[str, ...] = ()
     status: str = ""
+    config_diff: tuple[str, ...] = ()
+    """配置的字段级变化（仅在 ``config_hash`` 变了、且旧快照有配置内容时给出）。"""
 
     @property
     def changed(self) -> bool:
@@ -98,6 +104,69 @@ class PlanResult:
         return tuple(
             change.name for change in self.services if change.action == "restart"
         )
+
+
+DIFF_LIMIT = 12
+"""一条 diff 最多展示多少行（其余折叠成一行提示）。"""
+
+
+def config_diff(
+    previous: dict[str, Any], current: dict[str, Any], *, limit: int = DIFF_LIMIT
+) -> tuple[str, ...]:
+    """对比两份（已脱敏的）配置，返回人类可读的字段级变化。
+
+    嵌套字典按 ``a.b.c`` 路径展开；列表整体作为一个值比较（避免索引噪声）。
+    脱敏字段只会提示"已变更"，不会显示新旧值。
+    """
+    before = _flatten(previous)
+    after = _flatten(current)
+    lines: list[str] = []
+    for key in sorted(set(before) | set(after)):
+        old = before.get(key)
+        new = after.get(key)
+        if old == new:
+            continue
+        if old is None:
+            lines.append(f"+ {key} = {new}")
+        elif new is None:
+            lines.append(f"- {key} = {old}")
+        elif old == "***" or new == "***":
+            lines.append(f"~ {key}: 已变更（已脱敏）")
+        else:
+            lines.append(f"~ {key}: {old} → {new}")
+    if len(lines) > limit:
+        extra = len(lines) - limit
+        lines = [*lines[:limit], f"… 还有 {extra} 处变化"]
+    return tuple(lines)
+
+
+def _flatten(value: object, prefix: str = "") -> dict[str, str]:
+    """把配置摊平成 ``路径 → 值文本``。
+
+    infd 编译出来的数字是 ``Decimal``，不能直接 ``json.dumps``；标量统一走
+    ``str()``，复杂值才退回复用 JSON（``default=str`` 兜底）。
+    """
+    items: dict[str, str] = {}
+    if isinstance(value, dict):
+        for key, item in cast(dict[object, object], value).items():
+            path = f"{prefix}.{key}" if prefix else str(key)
+            items.update(_flatten(item, path))
+    elif isinstance(value, list):
+        items[prefix] = json.dumps(
+            value, ensure_ascii=False, sort_keys=True, default=str
+        )
+    elif prefix:
+        if isinstance(value, str):
+            items[prefix] = value
+        elif isinstance(value, bool):
+            items[prefix] = "true" if value else "false"
+        elif isinstance(value, int | float | Decimal):
+            items[prefix] = str(value)
+        elif value is None:
+            items[prefix] = "null"
+        else:
+            items[prefix] = json.dumps(value, ensure_ascii=False, default=str)
+    return items
 
 
 def restart_reasons(
@@ -184,12 +253,17 @@ def plan(desired: DesiredState, actual: ActualState | None) -> PlanResult:
         if previous.status in _UNHEALTHY:
             reasons.append(f"当前状态 {previous.status.value}")
         if reasons:
+            field_diff: tuple[str, ...] = ()
+            if "配置变化" in reasons and previous.config:
+                # 旧快照可能是升级前写的（没有 config 字段），那就只报告哈希变化
+                field_diff = config_diff(previous.config, redact_config(service.config))
             services.append(
                 ServiceChange(
                     name=name,
                     action="restart",
                     reasons=tuple(reasons),
                     status=previous.status.value,
+                    config_diff=field_diff,
                 )
             )
         else:

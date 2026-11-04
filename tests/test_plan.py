@@ -18,7 +18,7 @@ from blue.control.model import (
     DesiredState,
     ServiceStatus,
 )
-from blue.control.plan import plan, restart_reasons
+from blue.control.plan import config_diff, plan, restart_reasons
 
 ROOT = Path(__file__).resolve().parents[1]
 """项目根（含 blue.infd）。"""
@@ -195,3 +195,68 @@ def test_restart_reasons_shared_with_reconciler(desired: DesiredState) -> None:
     assert "源码变化" in reasons
     assert "版本变化" in reasons
     assert any("依赖契约变化" in reason for reason in reasons)
+
+
+def test_config_diff_reports_added_removed_changed() -> None:
+    """字段级 diff：新增、删除、修改都能说清楚。"""
+    before = {"llm_timeout": 60.0, "model": "old", "gone": 1}
+    after = {"llm_timeout": 300.0, "model": "old", "fresh": {"nested": True}}
+
+    lines = config_diff(before, after)
+
+    assert "~ llm_timeout: 60.0 → 300.0" in lines
+    assert "+ fresh.nested = true" in lines
+    assert "- gone = 1" in lines
+    assert not any("model" in line for line in lines)  # 没变的不出现
+
+
+def test_config_diff_redacts_secret_values() -> None:
+    """脱敏字段只提示"已变更"，不泄露内容。"""
+    lines = config_diff({"api_key": "***"}, {"api_key": "***"})
+    assert lines == ()
+
+    lines = config_diff({"api_key": "***"}, {"api_key": "sk-new"})
+    assert lines == ("~ api_key: 已变更（已脱敏）",)
+
+
+def test_config_diff_truncates_long_lists() -> None:
+    """变化太多时折叠，避免刷屏。"""
+    before = {f"k{index}": index for index in range(20)}
+    after = {f"k{index}": index + 1 for index in range(20)}
+
+    lines = config_diff(before, after)
+
+    assert len(lines) == 13
+    assert lines[-1].startswith("… 还有")
+
+
+def test_plan_includes_field_diff_when_snapshot_has_config(
+    desired: DesiredState,
+) -> None:
+    """旧快照带着配置内容时，restart 会附上字段级变化。"""
+    actual = _actual(desired)
+    name = "agent"
+    service = actual.services[name]
+    service.config_hash = "changed"
+    service.config = {"llm_timeout": 60.0, "model": "old-model"}
+
+    change = next(item for item in plan(desired, actual).services if item.name == name)
+
+    assert change.action == "restart"
+    joined = " ".join(change.config_diff)
+    assert "llm_timeout" in joined
+
+
+def test_plan_omits_diff_when_snapshot_has_no_config(
+    desired: DesiredState,
+) -> None:
+    """升级前写下的快照没有 config 字段：只报告哈希变化，不瞎猜字段。"""
+    actual = _actual(desired)
+    name = "agent"
+    actual.services[name].config_hash = "changed"
+    assert actual.services[name].config == {}
+
+    change = next(item for item in plan(desired, actual).services if item.name == name)
+
+    assert change.action == "restart"
+    assert change.config_diff == ()

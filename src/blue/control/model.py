@@ -172,6 +172,12 @@ class ActualService(BaseModel):
     config_hash: str = ""
     package_version: str = ""
     source_hash: str = ""
+    config: dict[str, Any] = Field(default_factory=dict)
+    """脱敏后的配置快照，供 ``blue plan --diff`` 做字段级对比。
+
+    旧版本写下的 state.json 没有这个字段（默认空 dict），此时预览会跳过
+    「具体改了哪个字段」，只报告 config 变了。
+    """
     log_path: Path | None = None
 
 

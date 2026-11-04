@@ -16,6 +16,7 @@ from pathlib import Path
 from blue.control.backoff import Backoff, should_restart
 from blue.control.desired import (
     load_desired,
+    redact_config,
     remove_runtime_config,
     topological_order,
     write_runtime_configs,
@@ -546,6 +547,7 @@ class Supervisor:
                 started_at=runtime.started_at,
                 ready_at=runtime.ready_at,
                 config_hash=runtime.desired.config_hash,
+                config=redact_config(runtime.desired.config),
                 package_version=runtime.desired.package_version,
                 source_hash=runtime.desired.source_hash,
                 log_path=self._logs.path_for(name),

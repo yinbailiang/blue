@@ -388,6 +388,7 @@ uv run blue up                  # 前台运行 supervisor
 uv run blue status [--json]     # 查看实际状态
 uv run blue logs echo -f        # 跟踪日志
 uv run blue plan                # 预览 apply 会新增/重启/删除哪些服务（对标 kubectl diff）
+uv run blue plan --diff         # 再展开配置的字段级变化
 uv run blue apply --wait        # SIGHUP 重载配置并等待生效
 uv run blue down                # 优雅停止 supervisor 与全部服务
 uv run blue config-check        # 编译校验 + 打印期望状态摘要
@@ -420,6 +421,23 @@ generation：当前 feb420fe3a3f → 期望 b26b9e477bfc
 汇总：新增 0 · 重启 3 · 删除 0 · 不变 14
 重启期间这些服务会短暂不可用：agent, session, webui
 ```
+
+加 `--diff` 会继续展开到字段级（值全部来自**脱敏**后的快照，密钥只显示"已变更"）：
+
+```text
+服务变更
+  ~ agent             配置变化
+      ~ llm_timeout: 60.0 → 300.0
+      ~ model: deepseek-chat → deepseek-v4-flash
+      ~ api_key: 已变更（已脱敏）
+  ~ session           配置变化
+      ~ prune_enabled: true → false
+```
+
+快照里的配置是每次 apply 时写的（`state.json` 里的 `ActualService.config`，
+写盘前把 `password/api_key/secret/token/credential` 一类字段替换成 `***`）。
+所以升级到本版本后的**第一次 apply 之前**，`--diff` 会提示「旧快照里没有配置
+内容」，只报告"配置变了"而不猜字段。
 
 退出码：`0` 无变化、`1` 有变化、`2` 配置编译失败——可以写
 `if blue plan >/dev/null; then echo 已是期望状态; fi`。判定逻辑与调和器共用同一
