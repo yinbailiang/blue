@@ -76,7 +76,10 @@
       pendingAttachments: [],
       unread: 0,
       sentAny: false,
-      windowStart: 0,
+      /* 虚拟滚动：key → 真实像素高度；renderFrom/renderTo 是当前挂载的区间 */
+      heights: new Map(),
+      renderFrom: 0,
+      renderTo: 0,
     };
   }
 
@@ -219,14 +222,14 @@
     view.byKey.clear();
     view.signatures.clear();
     els.messageList.replaceChildren();
+    // 虚拟滚动的留白属于「上一屏」，换会话/清空时必须归零
+    els.messageList.style.paddingTop = "";
+    els.messageList.style.paddingBottom = "";
   }
 
   /** 只移动位置不对的节点；已经在位的跳过，避免无谓的 DOM 抖动与动画重启。 */
   function placeInOrder(nodes) {
     let cursor = els.messageList.firstElementChild;
-    while (cursor && cursor.classList.contains("load-earlier")) {
-      cursor = cursor.nextElementSibling;
-    }
     for (const node of nodes) {
       if (node === cursor) {
         cursor = cursor.nextElementSibling;
@@ -824,11 +827,14 @@
     }
   }
 
+  /** 折叠态的摘要：只留一行、够短，完整内容在展开后的 body 里。 */
   function toolBrief(text) {
     const line = String(text || "")
       .split("\n")
       .find((item) => item.trim());
-    return (line || "").trim().slice(0, 120) || "（无输出）";
+    const flat = (line || "").trim().replace(/\s+/g, " ");
+    if (!flat) return "（无输出）";
+    return flat.length > 44 ? `${flat.slice(0, 44)}…` : flat;
   }
 
   function updateToolCallNode(node, parts, call) {
@@ -970,8 +976,8 @@
       parts.thumbs.appendChild(imageLink(part.url, "tool-thumb", "工具返回的图片"));
       parts.images.appendChild(imageLink(part.url, "bubble-image", "工具返回的图片"));
     }
-    // 有图就默认展开，省得用户不知道里面还有内容
-    if (images.length && parts.details) parts.details.open = true;
+    // 一律默认折叠：内容多的时候整屏都是工具输出，展开与否交给用户点
+    if (parts.details) parts.details.open = false;
   }
 
   function createToolNode(message, name) {
@@ -1077,27 +1083,118 @@
 
 
   /** 一次渲染的尾部条数；更早的消息由「加载更早」按需追加。 */
-  const WINDOW_SIZE = 60;
+  /*
+   * 虚拟滚动：整段历史用「估算高度」撑出滚动条，只把视口附近的消息挂到 DOM。
+   * 实测高度回填到 session.heights，估算值很快收敛成真值。
+   */
+  const VIRTUAL = {
+    estimate: 96,
+    overscan: 900,
+    minItems: 20,
+    maxItems: 200,
+  };
 
-  /** 当前会话要渲染的那一段（长会话只渲染尾部，切会话/加载更早时重算）。 */
-  function visibleSlice() {
-    const all = cur().messages.filter((message) => message.role !== "system");
-    const extra = Math.max(0, cur().windowStart || 0);
-    const start = Math.max(0, all.length - WINDOW_SIZE - extra);
-    return { messages: all.slice(start), start, hidden: start };
+  /** 参与渲染的消息（system 不进正文）。 */
+  function visibleMessages() {
+    return cur().messages.filter((message) => message.role !== "system");
+  }
+
+  /** 每条消息用的高度：有实测用实测，没有就先用估算。 */
+  function messageHeights(all) {
+    const list = [];
+    for (const message of all) {
+      list.push(cur().heights.get(messageKey(message)) || VIRTUAL.estimate);
+    }
+    return list;
+  }
+
+  /** 前缀和：offsets[i] 是第 i 条消息的顶部位置。 */
+  function offsetsOf(heights) {
+    const offsets = [0];
+    for (let index = 0; index < heights.length; index += 1) {
+      offsets.push(offsets[index] + heights[index]);
+    }
+    return offsets;
+  }
+
+  /** 由当前滚动位置算出要挂载的区间。 */
+  function windowFor(offsets, total, scrollTop, viewport) {
+    const count = offsets.length - 1;
+    if (count <= VIRTUAL.maxItems) return { start: 0, end: count, total };
+    const top = Math.max(0, scrollTop - VIRTUAL.overscan);
+    const bottom = Math.min(total, scrollTop + viewport + VIRTUAL.overscan);
+    let start = 0;
+    while (start < count - 1 && offsets[start + 1] <= top) start += 1;
+    let end = start;
+    while (end < count && offsets[end] < bottom) end += 1;
+    if (end - start < VIRTUAL.minItems) {
+      end = Math.min(count, start + VIRTUAL.minItems);
+    }
+    if (end - start > VIRTUAL.maxItems) end = start + VIRTUAL.maxItems;
+    return { start, end, total };
+  }
+
+  /** 读回挂载节点的真实高度，返回是否有变化。 */
+  function measureHeights(messages) {
+    let changed = false;
+    const session = cur();
+    for (const message of messages) {
+      const key = messageKey(message);
+      const node = view.byKey.get(key);
+      if (!node) continue;
+      const height = Math.round(node.getBoundingClientRect().height);
+      if (!height) continue;
+      if (Math.abs((session.heights.get(key) || 0) - height) > 1) {
+        session.heights.set(key, height);
+        changed = true;
+      }
+    }
+    return changed;
+  }
+
+  /** 留白：把未挂载部分的高度补成 padding，滚动条才能代表整段历史。 */
+  function applyPadding(offsets, start, end) {
+    const list = els.messageList;
+    const previous = Number.parseFloat(list.style.paddingTop || "0") || 0;
+    const top = start <= 0 ? 0 : offsets[start];
+    const total = offsets[offsets.length - 1];
+    list.style.paddingTop = `${top}px`;
+    list.style.paddingBottom = `${Math.max(0, total - offsets[end])}px`;
+    return { previous, top };
+  }
+
+  /**
+   * 上侧留白变了，内容会整体位移：小跨度（窗口顺带滑动一页）要补回 scrollTop，
+   * 画面才不抖；大跨度是用户主动跳转（拖滚动条/跳到顶），补了反而跳回去。
+   */
+  function compensateScroll(delta, options) {
+    if (options.scroll || Math.abs(delta) < 0.5) return;
+    const viewport = els.chatScroll.clientHeight || 0;
+    if (Math.abs(delta) > Math.max(viewport * 1.2, 240)) return;
+    els.chatScroll.scrollTop += delta;
   }
 
   function syncMessages(options = {}) {
-    const slice = visibleSlice();
-    const messages = slice.messages;
-    if (!messages.length) {
+    const all = visibleMessages();
+    if (!all.length) {
       resetView();
       showWelcome(true);
       return;
     }
     showWelcome(false);
     els.messageList.hidden = false;
-    renderEarlierButton(slice.hidden);
+
+    const session = cur();
+    const scroller = els.chatScroll;
+    // 贴底意图要在改留白之前判断：改完 scrollHeight 会变，判断就不准了
+    const wasAtBottom =
+      scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight < 48;
+    const offsets = offsetsOf(messageHeights(all));
+    const total = offsets[offsets.length - 1];
+    const win = windowFor(offsets, total, scroller.scrollTop, scroller.clientHeight);
+    session.renderFrom = win.start;
+    session.renderTo = win.end;
+    const messages = all.slice(win.start, win.end);
 
     const names = toolNameIndex(messages);
     const wanted = [];
@@ -1130,29 +1227,46 @@
     }
     placeInOrder(wanted);
 
+    const pad = applyPadding(offsets, win.start, win.end);
+    compensateScroll(pad.top - pad.previous, options);
+
+    // 估算收敛成实测高度后再修一次留白
+    if (measureHeights(messages)) {
+      const before = Number.parseFloat(els.messageList.style.paddingTop || "0") || 0;
+      const after = applyPadding(offsetsOf(messageHeights(all)), win.start, win.end);
+      compensateScroll(after.top - before, options);
+    }
+
     refreshTyping();
-    if (options.scroll) scrollToBottom(options.force === true);
+    if (options.scroll || wasAtBottom) {
+      // 原本在底部（或明确要求）就重新贴底，别被估算误差留在半空
+      state.stickToBottom = true;
+      requestAnimationFrame(() => {
+        scroller.scrollTop = scroller.scrollHeight;
+      });
+    }
   }
 
-  /** 顶部「加载更早」按钮：长会话不必一次塞进 DOM。 */
-  function renderEarlierButton(hidden) {
-    let button = els.messageList.querySelector(".load-earlier");
-    if (hidden <= 0) {
-      if (button) button.remove();
-      return;
-    }
-    if (!button) {
-      button = document.createElement("button");
-      button.type = "button";
-      button.className = "load-earlier";
-      button.addEventListener("click", () => {
-        cur().windowStart = (cur().windowStart || 0) + WINDOW_SIZE;
-        resetView();
-        renderMessages({ scroll: false });
-      });
-      els.messageList.prepend(button);
-    }
-    button.textContent = `加载更早的 ${Math.min(hidden, WINDOW_SIZE)} 条（还有 ${hidden} 条）`;
+  /** 滚动到新位置后若挂载区间该变，重排一次（rAF 节流）。 */
+  let scrollFrame = 0;
+
+  function scheduleWindowSync() {
+    if (scrollFrame) return;
+    scrollFrame = requestAnimationFrame(() => {
+      scrollFrame = 0;
+      const all = visibleMessages();
+      if (!all.length) return;
+      const session = cur();
+      const offsets = offsetsOf(messageHeights(all));
+      const total = offsets[offsets.length - 1];
+      const scrollTop = els.chatScroll.scrollTop;
+      const win = windowFor(offsets, total, scrollTop, els.chatScroll.clientHeight);
+      if (win.start === session.renderFrom && win.end === session.renderTo) {
+        if (measureHeights(all.slice(win.start, win.end))) syncMessages();
+        return;
+      }
+      syncMessages();
+    });
   }
 
   function renderMessages(options = {}) {
@@ -1210,7 +1324,8 @@
     session.chain = Array.isArray(snapshot.current) ? snapshot.current : [];
     session.liveMessage = null;
     session.loaded = true;
-    session.windowStart = 0;
+    session.renderFrom = 0;
+    session.renderTo = 0;
 
     const existing = metaOf(snapshot.session_id);
     const next = {
@@ -2553,7 +2668,10 @@
 
     els.chatScroll.addEventListener("scroll", () => {
       state.stickToBottom = isSourceNearBottom();
+      scheduleWindowSync();
     });
+    // 图片是异步布局的：加载完要重新量高度，否则留白会算错
+    els.messageList.addEventListener("load", () => scheduleWindowSync(), true);
 
     document.querySelectorAll("[data-prompt]").forEach((button) => {
       button.addEventListener("click", () => {
