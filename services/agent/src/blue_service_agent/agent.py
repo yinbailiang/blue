@@ -14,9 +14,13 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import time
 from typing import Any
 
 from blue_contracts_session import (
+    SessionActivity,
+    SessionActivityEvent,
+    SessionActivityPayload,
     SessionAttachmentBlob,
     SessionPromptRequest,
     SessionReplyResponse,
@@ -130,6 +134,7 @@ class AgentCore:
         self._session_locks: dict[str, asyncio.Lock] = {}
         self._active_turns: dict[str, asyncio.Task[Any]] = {}
         self._cancelling: set[str] = set()
+        self._activity: dict[str, SessionActivity] = {}
         self._catalog: ToolCatalogClient = catalog or ToolCatalogClient(runtime=runtime)
 
     @property
@@ -181,11 +186,78 @@ class AgentCore:
         task = asyncio.current_task()
         if task is not None:
             self._active_turns[payload.session_id] = task
+        await self._set_activity(
+            bus_proxy,
+            payload.session_id,
+            running=True,
+            phase="thinking",
+            request_id=payload.request_id,
+        )
         try:
             return await self._run_prompt(payload, bus_proxy)
         finally:
             if self._active_turns.get(payload.session_id) is task:
                 self._active_turns.pop(payload.session_id, None)
+            await self._set_activity(
+                bus_proxy,
+                payload.session_id,
+                running=False,
+                request_id=payload.request_id,
+            )
+
+    def activity(self) -> list[SessionActivity]:
+        """当前正在运行的会话（前端刷新后靠它恢复追踪）。"""
+        return [item for item in self._activity.values() if item.running]
+
+    async def _set_activity(
+        self,
+        bus_proxy: EventBus.Proxy,
+        session_id: str,
+        *,
+        running: bool,
+        phase: str = "",
+        step: int = 0,
+        request_id: str = "",
+    ) -> None:
+        """更新并广播会话运行状态；状态没变化就不重复发。
+
+        广播失败只记 debug：状态通知不能反过来打断正在跑的对话。
+        """
+        now = time.time()
+        previous = self._activity.get(session_id)
+        if (
+            previous is not None
+            and previous.running == running
+            and previous.phase == phase
+            and previous.step == step
+            and previous.request_id == request_id
+        ):
+            return
+        if running and (previous is None or not previous.running):
+            started_at = now
+        elif previous is not None:
+            started_at = previous.started_at
+        else:
+            started_at = now
+        activity = SessionActivity(
+            session_id=session_id,
+            running=running,
+            phase=phase,
+            step=step,
+            request_id=request_id,
+            started_at=started_at,
+            updated_at=now,
+        )
+        if running:
+            self._activity[session_id] = activity
+        else:
+            self._activity.pop(session_id, None)
+        try:
+            await bus_proxy.publish(
+                SessionActivityEvent.name, SessionActivityPayload(activity=activity)
+            )
+        except Exception:
+            logger.debug("会话运行状态广播失败：%s", session_id, exc_info=True)
 
     def cancel(self, session_id: str) -> bool:
         """请求中断某个会话正在进行的回复。
@@ -298,6 +370,14 @@ class AgentCore:
         )
         while steps < self._settings.max_steps:
             steps += 1
+            await self._set_activity(
+                bus_proxy,
+                session_id,
+                running=True,
+                phase="thinking",
+                step=steps,
+                request_id=request_id,
+            )
             await self._stream_event(
                 bus_proxy,
                 SessionStreamPayload(
@@ -392,6 +472,14 @@ class AgentCore:
                 name=tool_call.function.name,
                 arguments=tool_call.function.arguments,
             )
+            await self._set_activity(
+                bus_proxy,
+                session_id,
+                running=True,
+                phase="tool",
+                step=step,
+                request_id=request_id,
+            )
             await self._stream_event(
                 bus_proxy,
                 SessionStreamPayload(
@@ -458,6 +546,17 @@ class AgentCore:
         chunk: StreamChunk,
     ) -> None:
         """把模型流式 chunk 转成 WebUI 可消费的事件。"""
+        if (isinstance(chunk, TextChunk) and chunk.text) or (
+            isinstance(chunk, ThinkingChunk) and chunk.text
+        ):
+            await self._set_activity(
+                bus_proxy,
+                session_id,
+                running=True,
+                phase="streaming",
+                step=step,
+                request_id=request_id,
+            )
         if isinstance(chunk, TextChunk) and chunk.text:
             await self._stream_event(
                 bus_proxy,

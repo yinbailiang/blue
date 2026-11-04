@@ -10,6 +10,13 @@ from blue_contracts_session.attachments import (
 )
 from blue_contracts_session.events import (
     EVENTS,
+    SessionActivity,
+    SessionActivityEvent,
+    SessionActivityPayload,
+    SessionActivityQueryEvent,
+    SessionActivityQueryRequest,
+    SessionActivityQueryResponse,
+    SessionActivityReplyEvent,
     SessionAppendEvent,
     SessionAppendReplyEvent,
     SessionAppendRequest,
@@ -54,6 +61,13 @@ from blue_contracts_session.events import (
 __all__ = [
     "ATTACHMENT_URL_PREFIX",
     "EVENTS",
+    "SessionActivity",
+    "SessionActivityEvent",
+    "SessionActivityPayload",
+    "SessionActivityQueryEvent",
+    "SessionActivityQueryRequest",
+    "SessionActivityQueryResponse",
+    "SessionActivityReplyEvent",
     "SessionAppendEvent",
     "SessionAppendReplyEvent",
     "SessionAppendRequest",

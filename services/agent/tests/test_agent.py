@@ -4,11 +4,16 @@ from __future__ import annotations
 
 import asyncio
 import base64
-from collections.abc import Iterable
-from typing import cast
+from collections.abc import AsyncGenerator, Iterable
+from typing import Any, cast
 
 import pytest
 from blue_contracts_session import (
+    SessionActivityEvent,
+    SessionActivityPayload,
+    SessionActivityQueryEvent,
+    SessionActivityQueryResponse,
+    SessionActivityReplyEvent,
     SessionAttachmentBlob,
     SessionPromptEvent,
     SessionPromptRequest,
@@ -23,7 +28,16 @@ from blue_service_agent.config import AgentConfig
 from blue_service_agent.session_gateway import AttachmentPayload
 from blue_service_echo import echo
 from blue_service_registry import ToolRegistryService
-from infinity_agent import FunctionCall, Message, MessageRole, ToolCall
+from infinity_agent import (
+    FunctionCall,
+    Message,
+    MessageRole,
+    Messages,
+    StreamChunk,
+    ToolCall,
+    ToolDefinition,
+)
+from infinity_agent.clients import RequestConfig
 from infinity_bus import Event, EventBus, EventHandler
 from infinity_bus.templates.request import request
 from pydantic import BaseModel
@@ -54,6 +68,60 @@ class StreamCollector(EventHandler):
         del bus_proxy, raw_event
         if isinstance(payload, SessionStreamPayload):
             self.events.append(payload)
+
+
+class ActivityCollector(EventHandler):
+    """收集 Agent 广播的 session.activity 事件。"""
+
+    def __init__(self) -> None:
+        super().__init__(
+            subscriptions=[SessionActivityEvent.name],
+            handle_timeout=1.0,
+        )
+        self.events: list[SessionActivityPayload] = []
+
+    async def handle(
+        self,
+        payload: BaseModel | None,
+        bus_proxy: EventBus.Proxy,
+        raw_event: Event,
+    ) -> None:
+        del bus_proxy, raw_event
+        if isinstance(payload, SessionActivityPayload):
+            self.events.append(payload)
+
+
+class StubCatalog:
+    """不查总线的空工具目录（避免测试里等 5 秒目录超时）。"""
+
+    def __init__(self) -> None:
+        self.tools: list[ToolDefinition] = []
+
+    async def start(self) -> None:
+        return
+
+    async def refresh(self, bus_proxy: EventBus.Proxy) -> list[ToolDefinition]:
+        del bus_proxy
+        return []
+
+
+class GatedClient(ScriptedClient):
+    """第一轮流式响应先卡在闸门上，便于观察「进行中」状态。"""
+
+    def __init__(self, script: list[Message]) -> None:
+        super().__init__(script)
+        self.started = asyncio.Event()
+        self.release = asyncio.Event()
+
+    async def stream_chat(
+        self,
+        messages: Messages,
+        config: RequestConfig | None = None,
+    ) -> AsyncGenerator[StreamChunk]:
+        self.started.set()
+        await self.release.wait()
+        async for chunk in super().stream_chat(messages, config):
+            yield chunk
 
 
 class MemorySessionGateway:
@@ -432,3 +500,77 @@ async def _cancel_active_turn(monkeypatch: pytest.MonkeyPatch) -> None:
     with pytest.raises(asyncio.CancelledError):
         await task
     assert core.cancel("s1") is False
+
+
+def test_activity_tracks_running_session() -> None:
+    """turn 进行中能被查询/广播，结束后自动清空。"""
+    asyncio.run(_activity_tracks_running_session())
+
+
+async def _activity_tracks_running_session() -> None:
+    hub = MemoryFanout()
+    client = GatedClient([Message.assistant(content="好了")])
+    gateway = MemorySessionGateway()
+    core = AgentCore(
+        runtime=make_runtime(hub, "agent"),
+        settings=AgentConfig(api_key="sk-test", max_steps=4),
+        client=client,
+        session_gateway=gateway,
+        catalog=cast(Any, StubCatalog()),
+    )
+    chat = make_runtime(hub, "chat")
+    collector = ActivityCollector()
+    collector_runtime = make_runtime(hub, "activity.collector")
+
+    await core.start()
+    await chat.start()
+    await collector_runtime.start()
+    await collector_runtime.register(collector)
+    try:
+        assert core.activity() == []
+        prompt = asyncio.create_task(
+            request(
+                chat.proxy(),
+                SessionPromptEvent.name,
+                {"text": "在吗"},
+                SessionReplyEvent.name,
+                session_id="s-busy",
+                timeout=10.0,
+            )
+        )
+        await asyncio.wait_for(client.started.wait(), timeout=5.0)
+        await wait_until(lambda: bool(core.activity()))
+
+        running = core.activity()
+        assert [item.session_id for item in running] == ["s-busy"]
+        assert running[0].running is True
+        assert running[0].phase in {"thinking", "streaming"}
+
+        # 另一台设备/新页面靠这个 RPC 补上「谁在跑」
+        snapshot = await request(
+            chat.proxy(),
+            SessionActivityQueryEvent.name,
+            {},
+            SessionActivityReplyEvent.name,
+            session_id="other-ui",
+            timeout=5.0,
+        )
+        assert isinstance(snapshot, SessionActivityQueryResponse)
+        assert [item.session_id for item in snapshot.running] == ["s-busy"]
+
+        client.release.set()
+        response = await prompt
+        assert isinstance(response, SessionReplyResponse)
+        assert response.success is True
+        assert core.activity() == []
+        await wait_until(
+            lambda: any(not item.activity.running for item in collector.events)
+        )
+    finally:
+        await collector_runtime.stop()
+        await chat.stop()
+        await core.stop()
+
+    assert collector.events[0].activity.running is True
+    assert collector.events[0].activity.session_id == "s-busy"
+    assert collector.events[-1].activity.running is False

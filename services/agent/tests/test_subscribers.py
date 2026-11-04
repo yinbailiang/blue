@@ -6,6 +6,8 @@ import asyncio
 from typing import cast
 
 from blue_contracts_session import (
+    SessionActivity,
+    SessionActivityQueryEvent,
     SessionCancelEvent,
     SessionPromptEvent,
     SessionPromptRequest,
@@ -158,14 +160,18 @@ def test_session_handler_has_no_timeout() -> None:
             del session_id
             return False
 
+        def activity(self) -> list[SessionActivity]:
+            return []
+
     handler = SessionHandler(FakeSessions())
 
     assert handler.handle_timeout is None
     assert list(handler.subscriptions.patterns) == [
         SessionPromptEvent.name,
         SessionCancelEvent.name,
+        SessionActivityQueryEvent.name,
     ]
-    assert len(handler.subscriptions) == 2
+    assert len(handler.subscriptions) == 3
 
 
 def test_tool_call_handler_subscribes_tool_call() -> None:

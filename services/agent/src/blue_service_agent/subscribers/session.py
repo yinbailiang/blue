@@ -11,6 +11,11 @@ from __future__ import annotations
 from typing import Protocol
 
 from blue_contracts_session import (
+    SessionActivity,
+    SessionActivityQueryEvent,
+    SessionActivityQueryRequest,
+    SessionActivityQueryResponse,
+    SessionActivityReplyEvent,
     SessionCancelEvent,
     SessionCancelReplyEvent,
     SessionCancelRequest,
@@ -39,6 +44,10 @@ class SessionBackend(Protocol):
         """请求中断该会话正在进行的回复；返回是否确有进行中的 turn。"""
         ...
 
+    def activity(self) -> list[SessionActivity]:
+        """当前正在运行的会话。"""
+        ...
+
 
 class SessionHandler(EventHandler):
     """会话消息入口。
@@ -49,7 +58,11 @@ class SessionHandler(EventHandler):
 
     def __init__(self, backend: SessionBackend) -> None:
         super().__init__(
-            subscriptions=[SessionPromptEvent.name, SessionCancelEvent.name],
+            subscriptions=[
+                SessionPromptEvent.name,
+                SessionCancelEvent.name,
+                SessionActivityQueryEvent.name,
+            ],
             handle_timeout=None,
         )
         self._backend = backend
@@ -72,5 +85,14 @@ class SessionHandler(EventHandler):
                     session_id=payload.session_id,
                     request_id=payload.request_id,
                     cancelled=cancelled,
+                ),
+            )
+        elif isinstance(payload, SessionActivityQueryRequest):
+            await bus_proxy.publish(
+                SessionActivityReplyEvent.name,
+                SessionActivityQueryResponse(
+                    session_id=payload.session_id,
+                    request_id=payload.request_id,
+                    running=self._backend.activity(),
                 ),
             )

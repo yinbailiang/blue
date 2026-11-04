@@ -13,6 +13,13 @@ from pydantic import BaseModel, Field, model_validator
 
 __all__ = [
     "EVENTS",
+    "SessionActivity",
+    "SessionActivityEvent",
+    "SessionActivityPayload",
+    "SessionActivityQueryEvent",
+    "SessionActivityQueryRequest",
+    "SessionActivityQueryResponse",
+    "SessionActivityReplyEvent",
     "SessionAppendEvent",
     "SessionAppendReplyEvent",
     "SessionAppendRequest",
@@ -147,6 +154,64 @@ class StreamToolCall(BaseModel):
     arguments: dict[str, Any] = Field(
         default_factory=dict[str, Any], description="工具参数"
     )
+
+
+class SessionActivity(BaseModel):
+    """一个会话的**运行状态**：谁在跑、跑到哪一步。
+
+    Agent 是唯一的事实来源：它知道某个会话是否有正在进行的 turn。前端刷新、
+    另一台设备连入时都靠这份状态恢复「正在生成」的追踪。
+    """
+
+    session_id: str = Field(description="会话 ID")
+    running: bool = Field(description="是否有正在进行的 turn")
+    phase: str = Field(
+        default="",
+        description="当前阶段：thinking（等模型）/ streaming（出字）/ tool（跑工具）",
+    )
+    step: int = Field(default=0, description="当前模型步骤序号")
+    request_id: str = Field(default="", description="本轮请求 ID")
+    started_at: float = Field(default=0.0, description="本轮开始时间（epoch 秒）")
+    updated_at: float = Field(default=0.0, description="状态最后变化时间（epoch 秒）")
+
+
+class SessionActivityPayload(BaseModel):
+    """会话运行状态变化（广播）。"""
+
+    activity: SessionActivity = Field(description="变化后的运行状态")
+
+
+class SessionActivityEvent(EventDeclaration):
+    """Agent 广播某个会话的运行状态变化。"""
+
+    name = "session.activity"
+    payload_type = SessionActivityPayload
+
+
+class SessionActivityQueryRequest(RequestProtocol):
+    """查询当前所有正在运行的会话（前端刚连上时用它补全状态）。"""
+
+
+class SessionActivityQueryResponse(ResponseProtocol):
+    """正在运行的会话快照。"""
+
+    running: list[SessionActivity] = Field(
+        default_factory=list[SessionActivity], description="当前进行中的会话"
+    )
+
+
+class SessionActivityQueryEvent(EventDeclaration):
+    """查询正在运行的会话。"""
+
+    name = "session.activity.query"
+    payload_type = SessionActivityQueryRequest
+
+
+class SessionActivityReplyEvent(EventDeclaration):
+    """正在运行的会话快照回复。"""
+
+    name = "session.activity.reply"
+    payload_type = SessionActivityQueryResponse
 
 
 class SessionStreamPayload(BaseModel):
@@ -390,6 +455,9 @@ EVENTS: tuple[type[EventDeclaration], ...] = (
     SessionUpdateEvent,
     SessionUpdateReplyEvent,
     SessionStreamEvent,
+    SessionActivityEvent,
+    SessionActivityQueryEvent,
+    SessionActivityReplyEvent,
     SessionAttachmentGetEvent,
     SessionAttachmentReplyEvent,
 )
