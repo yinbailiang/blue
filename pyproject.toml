@@ -64,6 +64,8 @@ extraPaths = [
     "services/clock/src",
     "services/edit_file/src",
     "services/echo/src",
+    "services/history_read/src",
+    "services/history_search/src",
     "services/inspect/src",
     "services/mcp_bridge/src",
     "services/mcp_server/src",

@@ -115,6 +115,9 @@ CREATE INDEX IF NOT EXISTS idx_session_outbox_session
     ON session_outbox(session_id, position);
 """
 
+SNIPPET_CHARS = 160
+"""搜索命中片段的字符数上限。"""
+
 LABEL_LIMIT = 24
 """分支名长度上限（字）。"""
 
@@ -551,6 +554,106 @@ class SessionDatabase:
         if updated is None:
             raise SessionNotFoundError(f"会话不存在：{session_id}")
         return updated
+
+    async def search(
+        self,
+        session_id: str,
+        query: str,
+        *,
+        limit: int = 5,
+        roles: Iterable[str] = ("user", "assistant", "tool"),
+    ) -> list[tuple[int, str, int, int, str]]:
+        """在当前链上按子串搜索，返回 ``(id, role, 序号, 字符数, 片段)``。
+
+        用 SQL ``LIKE`` 先缩小范围（SQLite 用 C 跑），再在 Python 里定位命中处、
+        截片段。只搜**当前链**：兄弟分支是"另一个版本的历史"，不该混进来。
+        """
+        wanted = [role for role in roles if role]
+        async with self._lock:
+            connection = self._connection_or_raise()
+            record = await self._record_locked(session_id)
+            if record is None:
+                raise SessionNotFoundError(f"会话不存在：{session_id}")
+            chain = Tree(record.nodes, root_current=record.meta.root_current).chain()
+            order = {node_id: index for index, node_id in enumerate(chain)}
+            if not chain:
+                return []
+            placeholders = ",".join("?" * len(chain))
+            sql = f"""
+                SELECT id, payload FROM messages
+                 WHERE session_id = ? AND id IN ({placeholders})
+                   AND payload LIKE ? ESCAPE '\\'
+            """
+            params: list[object] = [session_id, *chain, f"%{_like_escape(query)}%"]
+            if wanted:
+                role_placeholders = ",".join("?" * len(wanted))
+                sql += f" AND json_extract(payload, '$.role') IN ({role_placeholders})"
+                params.extend(wanted)
+            sql += " ORDER BY id"
+            cursor = await connection.execute(sql, params)
+            rows = await cursor.fetchall()
+            await cursor.close()
+
+        needle = query.lower()
+        hits: list[tuple[int, str, int, int, str]] = []
+        for row in rows:
+            node_id = int(row["id"])
+            message = decode_message(str(row["payload"]))
+            role = str(getattr(message.role, "value", message.role)).lower()
+            text = message_text(message)
+            position = text.lower().find(needle)
+            if position < 0:
+                # LIKE 可能命中 JSON 里的字段名（如 tool_call 参数），正文没命中就跳过
+                continue
+            hits.append(
+                (
+                    node_id,
+                    role,
+                    order.get(node_id, 0),
+                    len(text),
+                    _snippet(text, position, len(query)),
+                )
+            )
+            if len(hits) >= max(1, limit):
+                break
+        return hits
+
+    async def read(
+        self, session_id: str, ids: Iterable[int], *, max_chars: int = 4000
+    ) -> tuple[list[tuple[int, str, int, str, bool]], list[int]]:
+        """按 id 读原文；返回 ``(messages, missing)``。"""
+        wanted = [int(node_id) for node_id in ids]
+        limit = max(200, min(max_chars, 200_000))
+        async with self._lock:
+            connection = self._connection_or_raise()
+            if not wanted:
+                return [], []
+            placeholders = ",".join("?" * len(wanted))
+            cursor = await connection.execute(
+                "SELECT id, payload FROM messages"
+                f" WHERE session_id = ? AND id IN ({placeholders})",
+                [session_id, *wanted],
+            )
+            rows = await cursor.fetchall()
+            await cursor.close()
+
+        found: dict[int, str] = {int(row["id"]): str(row["payload"]) for row in rows}
+        messages: list[tuple[int, str, int, str, bool]] = []
+        missing: list[int] = []
+        for node_id in wanted:
+            payload = found.get(node_id)
+            if payload is None:
+                missing.append(node_id)
+                continue
+            message = decode_message(payload)
+            role = str(getattr(message.role, "value", message.role)).lower()
+            text = message_text(message)
+            if len(text) > limit:
+                body = f"{text[:limit]}…[{len(text)} chars total]"
+                messages.append((node_id, role, len(text), body, True))
+            else:
+                messages.append((node_id, role, len(text), text, False))
+        return messages, missing
 
     async def set_label(self, session_id: str, node_id: int, label: str) -> str:
         """给分支起名（节点 id = 分支起点）；空串表示恢复序号显示。
@@ -1446,6 +1549,22 @@ async def _table_columns(connection: aiosqlite.Connection, table: str) -> set[st
     rows = await cursor.fetchall()
     await cursor.close()
     return {str(row["name"]) for row in rows}
+
+
+def _like_escape(text: str) -> str:
+    """转义 LIKE 的通配符，让 ``%`` / ``_`` 当普通字符。"""
+    return text.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+
+
+def _snippet(text: str, position: int, length: int) -> str:
+    """命中处前后各留一点上下文，压平空白成一行。"""
+    half = max(20, (SNIPPET_CHARS - length) // 2)
+    start = max(0, position - half)
+    end = min(len(text), position + length + half)
+    piece = " ".join(text[start:end].split())
+    prefix = "…" if start > 0 else ""
+    suffix = "…" if end < len(text) else ""
+    return f"{prefix}{piece}{suffix}"
 
 
 def _queued_from_row(

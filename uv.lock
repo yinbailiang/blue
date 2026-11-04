@@ -15,6 +15,8 @@ members = [
     "blue-service-clock",
     "blue-service-echo",
     "blue-service-edit-file",
+    "blue-service-history-read",
+    "blue-service-history-search",
     "blue-service-inspect",
     "blue-service-mcp-bridge",
     "blue-service-mcp-server",
@@ -277,7 +279,7 @@ dev = [
 
 [[package]]
 name = "blue-contracts-session"
-version = "0.4.0"
+version = "0.5.0"
 source = { editable = "contracts/session" }
 dependencies = [
     { name = "infinity-bus", extra = ["templates"] },
@@ -309,7 +311,7 @@ requires-dist = [
 
 [[package]]
 name = "blue-service-agent"
-version = "0.4.0"
+version = "0.5.0"
 source = { editable = "services/agent" }
 dependencies = [
     { name = "blue" },
@@ -454,6 +456,36 @@ requires-dist = [
 ]
 
 [[package]]
+name = "blue-service-history-read"
+version = "0.1.0"
+source = { editable = "services/history_read" }
+dependencies = [
+    { name = "blue" },
+    { name = "pydantic" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "blue", editable = "." },
+    { name = "pydantic", specifier = ">=2" },
+]
+
+[[package]]
+name = "blue-service-history-search"
+version = "0.1.0"
+source = { editable = "services/history_search" }
+dependencies = [
+    { name = "blue" },
+    { name = "pydantic" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "blue", editable = "." },
+    { name = "pydantic", specifier = ">=2" },
+]
+
+[[package]]
 name = "blue-service-inspect"
 version = "0.1.0"
 source = { editable = "services/inspect" }
@@ -546,7 +578,7 @@ requires-dist = [
 
 [[package]]
 name = "blue-service-session"
-version = "0.4.0"
+version = "0.5.0"
 source = { editable = "services/session" }
 dependencies = [
     { name = "aiosqlite" },

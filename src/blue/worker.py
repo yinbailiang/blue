@@ -52,6 +52,7 @@ from infinity_agent.tools import ToolRegistry
 from infinity_bus import EventBus
 
 from blue.subscribers.tool_call import ToolCallHandler
+from blue.tool_context import ToolContext, use_context
 from blue.transport import BusRuntime
 
 logger = logging.getLogger(__name__)
@@ -269,12 +270,23 @@ class ToolWorker:
         """处理一次工具调用（只响应自己的工具名）。"""
         if payload.tool != self.tool_name:
             return
-        message = await self._registry.invoke(
-            ToolCall(
-                id=payload.request_id,
-                function=FunctionCall(name=payload.tool, arguments=payload.arguments),
+        # 工具函数拿不到自己的 schema 之外的东西（那些字段是要发给模型看的），
+        # 所以「为哪个会话/哪次请求干活」通过 ContextVar 传进去。
+        with use_context(
+            ToolContext(
+                session_id=payload.session_id,
+                request_id=payload.request_id,
+                tool=payload.tool,
             )
-        )
+        ):
+            message = await self._registry.invoke(
+                ToolCall(
+                    id=payload.request_id,
+                    function=FunctionCall(
+                        name=payload.tool, arguments=payload.arguments
+                    ),
+                )
+            )
         text, ok, attachments = unpack_tool_output(message.content)
         if not ok:
             logger.warning("工具 %s 执行失败：%s", self.tool_name, text)

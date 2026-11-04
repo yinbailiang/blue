@@ -485,6 +485,92 @@ class SessionNodeLabelReplyEvent(EventDeclaration):
     payload_type = SessionNodeLabelResponse
 
 
+class SessionSearchRequest(RequestProtocol):
+    """在当前会话的历史里按子串搜索。
+
+    ``session_id`` 来自请求上下文；只搜**当前链**（界面正在看的那条），
+    兄弟分支不算——那属于"另一个版本的历史"。
+    """
+
+    query: str = Field(description="搜索文本（子串、大小写不敏感）")
+    limit: int = Field(default=5, description="最多返回多少条命中")
+    roles: str = Field(
+        default="user,assistant,tool",
+        description="只看这些角色，逗号分隔；传空串表示不限",
+    )
+
+
+class SessionSearchHit(BaseModel):
+    """一条搜索命中。"""
+
+    id: int = Field(description="消息（节点）id")
+    role: str = Field(description="角色")
+    index: int = Field(description="在当前链上的序号，从 0 开始")
+    chars: int = Field(description="该条消息正文字符数")
+    snippet: str = Field(description="命中处上下文片段")
+
+
+class SessionSearchResponse(ResponseProtocol):
+    """搜索应答。"""
+
+    total: int = Field(default=0, description="命中总数（可能大于返回条数）")
+    hits: list[SessionSearchHit] = Field(default_factory=list, description="命中列表")
+
+
+class SessionReadRequest(RequestProtocol):
+    """按 id 读回历史消息的完整原文。"""
+
+    ids: list[int] = Field(default_factory=list, description="要读取的消息 id")
+    max_chars: int = Field(default=4000, description="单条返回的字符上限")
+
+
+class SessionReadMessage(BaseModel):
+    """读回来的一条消息。"""
+
+    id: int = Field(description="消息（节点）id")
+    role: str = Field(description="角色")
+    chars: int = Field(description="正文总字符数")
+    content: str = Field(description="正文（超上限时已截断并标注）")
+    truncated: bool = Field(default=False, description="是否被截断")
+
+
+class SessionReadResponse(ResponseProtocol):
+    """读取应答。"""
+
+    messages: list[SessionReadMessage] = Field(
+        default_factory=list, description="读到的消息"
+    )
+    missing: list[int] = Field(default_factory=list, description="不存在的 id")
+
+
+class SessionSearchEvent(EventDeclaration):
+    """历史搜索请求事件。"""
+
+    name = "session.search"
+    payload_type = SessionSearchRequest
+
+
+class SessionSearchReplyEvent(EventDeclaration):
+    """历史搜索应答事件。"""
+
+    name = "session.search.reply"
+    payload_type = SessionSearchResponse
+
+
+class SessionReadEvent(EventDeclaration):
+    """历史读取请求事件。"""
+
+    name = "session.read"
+    payload_type = SessionReadRequest
+
+
+class SessionReadReplyEvent(EventDeclaration):
+    """历史读取应答事件。"""
+
+    name = "session.read.reply"
+    payload_type = SessionReadResponse
+
+
 class SessionNodeDeleteRequest(RequestProtocol):
     """删除一条分支：该节点连同它的全部后代一起消失。"""
 
@@ -931,6 +1017,10 @@ EVENTS: tuple[type[EventDeclaration], ...] = (
     SessionBranchActivateReplyEvent,
     SessionNodeDeleteEvent,
     SessionNodeLabelEvent,
+    SessionSearchEvent,
+    SessionSearchReplyEvent,
+    SessionReadEvent,
+    SessionReadReplyEvent,
     SessionNodeLabelReplyEvent,
     SessionNodeDeleteReplyEvent,
     SessionUpdateEvent,

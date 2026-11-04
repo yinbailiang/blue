@@ -14,7 +14,7 @@ import logging
 import os
 import sys
 import uuid
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Sequence
 from pathlib import Path
 from typing import Any, Literal, TypeVar, cast
 
@@ -24,6 +24,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from blue.errors import RuntimeConfigError
 from blue.lifecycle import LifecycleService, serve_forever
+from blue.tool_context import bind_runtime
 from blue.transport import RabbitRuntime
 from blue.worker import ToolWorker
 
@@ -410,17 +411,18 @@ def run_tool(
     name: str,
     *,
     ttl: float | None = None,
+    events: Sequence[type[EventDeclaration]] = (),
 ) -> int:
     """把工具函数作为独立进程运行。
 
     :param tool: 带完整类型签名的工具函数。
     :param name: 工具名（用于成员命名与日志）。
     :param ttl: 注册租约；缺省读 supervisor 下发的基础设施配置，再缺省 15 秒。
+    :param events: 额外要注册的事件声明——工具需要反向调用别的服务（如
+        ``session.search``）时，把它那个契约包的事件一起传进来。
     """
     lease = ttl if ttl is not None else registry_ttl()
-    worker = ToolWorker(
-        runtime=build_runtime(f"tool.{name}", TOOL_EVENTS),
-        tool=tool,
-        ttl=lease,
-    )
+    runtime = build_runtime(f"tool.{name}", (*TOOL_EVENTS, *events))
+    bind_runtime(runtime)
+    worker = ToolWorker(runtime=runtime, tool=tool, ttl=lease)
     return run_service(worker)

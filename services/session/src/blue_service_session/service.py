@@ -87,6 +87,11 @@ from blue_contracts_session import (
     SessionOutboxUpdateReplyEvent,
     SessionOutboxUpdateRequest,
     SessionOutboxUpdateResponse,
+    SessionReadEvent,
+    SessionReadMessage,
+    SessionReadReplyEvent,
+    SessionReadRequest,
+    SessionReadResponse,
     SessionRenameEvent,
     SessionRenameReplyEvent,
     SessionRenameRequest,
@@ -95,6 +100,11 @@ from blue_contracts_session import (
     SessionResetReplyEvent,
     SessionResetRequest,
     SessionResetResponse,
+    SessionSearchEvent,
+    SessionSearchHit,
+    SessionSearchReplyEvent,
+    SessionSearchRequest,
+    SessionSearchResponse,
     SessionSnapshot,
     SessionStateEvent,
     SessionStateReplyEvent,
@@ -232,6 +242,23 @@ class SessionBackend(Protocol):
 
     async def delete_node(self, session_id: str, node_id: int) -> int:
         """删除节点及其后代，返回删除条数。"""
+        ...
+
+    async def search(
+        self,
+        session_id: str,
+        query: str,
+        *,
+        limit: int = 5,
+        roles: Iterable[str] = ("user", "assistant", "tool"),
+    ) -> list[tuple[int, str, int, int, str]]:
+        """在当前链上按子串搜索历史。"""
+        ...
+
+    async def read(
+        self, session_id: str, ids: Iterable[int], *, max_chars: int = 4000
+    ) -> tuple[list[tuple[int, str, int, str, bool]], list[int]]:
+        """按 id 读原文。"""
         ...
 
     async def set_label(self, session_id: str, node_id: int, label: str) -> str:
@@ -376,6 +403,23 @@ class SessionService:
         """删除一条分支（节点 + 后代）。"""
         return await self._db.delete_node(session_id, node_id, now=time.time())
 
+    async def search(
+        self,
+        session_id: str,
+        query: str,
+        *,
+        limit: int = 5,
+        roles: Iterable[str] = ("user", "assistant", "tool"),
+    ) -> list[tuple[int, str, int, int, str]]:
+        """在当前链上按子串搜索历史。"""
+        return await self._db.search(session_id, query, limit=limit, roles=roles)
+
+    async def read(
+        self, session_id: str, ids: Iterable[int], *, max_chars: int = 4000
+    ) -> tuple[list[tuple[int, str, int, str, bool]], list[int]]:
+        """按 id 读原文。"""
+        return await self._db.read(session_id, ids, max_chars=max_chars)
+
     async def set_label(self, session_id: str, node_id: int, label: str) -> str:
         """给分支起名；空串恢复序号显示。"""
         return await self._db.set_label(session_id, node_id, label)
@@ -497,6 +541,8 @@ class SessionRpcHandler(EventHandler):
                 SessionBranchActivateEvent.name,
                 SessionNodeDeleteEvent.name,
                 SessionNodeLabelEvent.name,
+                SessionSearchEvent.name,
+                SessionReadEvent.name,
                 SessionUpdateEvent.name,
                 SessionResetEvent.name,
                 SessionStateEvent.name,
@@ -533,6 +579,10 @@ class SessionRpcHandler(EventHandler):
             await self._handle_rename(payload, bus_proxy)
         elif isinstance(payload, SessionBranchActivateRequest):
             await self._handle_branch_activate(payload, bus_proxy)
+        elif isinstance(payload, SessionSearchRequest):
+            await self._handle_search(payload, bus_proxy)
+        elif isinstance(payload, SessionReadRequest):
+            await self._handle_read(payload, bus_proxy)
         elif isinstance(payload, SessionNodeLabelRequest):
             await self._handle_node_label(payload, bus_proxy)
         elif isinstance(payload, SessionNodeDeleteRequest):
@@ -861,6 +911,69 @@ class SessionRpcHandler(EventHandler):
                 error_msg=str(error),
             )
         await bus_proxy.publish(SessionAppendReplyEvent.name, reply)
+
+    async def _handle_search(
+        self, payload: SessionSearchRequest, bus_proxy: EventBus.Proxy
+    ) -> None:
+        """历史搜索：返回命中列表（只搜当前链）。"""
+        try:
+            roles = [role.strip() for role in payload.roles.split(",") if role.strip()]
+            hits = await self._backend.search(
+                payload.session_id, payload.query, limit=payload.limit, roles=roles
+            )
+            reply: SessionSearchResponse = SessionSearchResponse(
+                session_id=payload.session_id,
+                request_id=payload.request_id,
+                success=True,
+                total=len(hits),
+                hits=[
+                    SessionSearchHit(
+                        id=node_id, role=role, index=index, chars=chars, snippet=snippet
+                    )
+                    for node_id, role, index, chars, snippet in hits
+                ],
+            )
+        except BlueError as error:
+            reply = SessionSearchResponse(
+                session_id=payload.session_id,
+                request_id=payload.request_id,
+                success=False,
+                error_msg=str(error),
+            )
+        await bus_proxy.publish(SessionSearchReplyEvent.name, reply)
+
+    async def _handle_read(
+        self, payload: SessionReadRequest, bus_proxy: EventBus.Proxy
+    ) -> None:
+        """按 id 读原文；不存在的 id 放进 ``missing``。"""
+        try:
+            messages, missing = await self._backend.read(
+                payload.session_id, payload.ids, max_chars=payload.max_chars
+            )
+            reply: SessionReadResponse = SessionReadResponse(
+                session_id=payload.session_id,
+                request_id=payload.request_id,
+                success=True,
+                messages=[
+                    SessionReadMessage(
+                        id=node_id,
+                        role=role,
+                        chars=chars,
+                        content=content,
+                        truncated=truncated,
+                    )
+                    for node_id, role, chars, content, truncated in messages
+                ],
+                missing=missing,
+            )
+        except BlueError as error:
+            reply = SessionReadResponse(
+                session_id=payload.session_id,
+                request_id=payload.request_id,
+                success=False,
+                error_msg=str(error),
+            )
+        await bus_proxy.publish(SessionReadReplyEvent.name, reply)
 
     async def _handle_node_label(
         self, payload: SessionNodeLabelRequest, bus_proxy: EventBus.Proxy

@@ -1,0 +1,15 @@
+~ServiceTemplate {
+}
+
+service {
+  name = "history_read"
+  kind = "tool"
+  package = "blue-service-history_read"
+  module = "blue_service_history_read"
+  depends_on = ["bus", "session"]
+  depends_contracts = ["tool", "session"]
+  restart = "always"
+  stop_timeout = 5.0
+  startup_timeout = 30.0
+  readiness = "process"
+}

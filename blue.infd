@@ -18,6 +18,8 @@
 !from p"services/webui/service.infd" import ServiceTemplate as WebUIService
 !from p"services/echo/service.infd" import ServiceTemplate as EchoService
 !from p"services/clock/service.infd" import ServiceTemplate as ClockService
+!from p"services/history_search/service.infd" import ServiceTemplate as HistorySearchService
+!from p"services/history_read/service.infd" import ServiceTemplate as HistoryReadService
 !from p"services/text_stats/service.infd" import ServiceTemplate as TextStatsService
 !from p"services/read_file/service.infd" import ServiceTemplate as ReadFileService
 !from p"services/write_file/service.infd" import ServiceTemplate as WriteFileService
@@ -91,6 +93,8 @@ webui = WebUIService(
 # 小工具
 #echo = EchoService()
 clock = ClockService()
+history_search = HistorySearchService()
+history_read = HistoryReadService()
 #text_stats = TextStatsService()
 
 # 文件类工具的 workdir 与 shell 同义：缺省为项目根，相对路径按项目根解析

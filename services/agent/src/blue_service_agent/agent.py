@@ -65,7 +65,7 @@ from infinity_bus import EventBus
 from infinity_bus.templates.request import request
 
 from blue.errors import BlueError, ConfigError
-from blue.messages import decode_message, decode_messages
+from blue.messages import decode_messages
 from blue.transport import BusRuntime
 from blue.tree import ROOT_ID, Tree
 from blue_service_agent.attachments import (
@@ -80,12 +80,6 @@ from blue_service_agent.history import (
     interrupted_reply,
     interrupted_step_messages,
     sanitize_history,
-)
-from blue_service_agent.recall import (
-    HISTORY_TOOL_NAMES,
-    HISTORY_TOOLS,
-    HistoryEntry,
-    HistoryIndex,
 )
 from blue_service_agent.session_gateway import BusSessionGateway, SessionGateway
 from blue_service_agent.subscribers.session import OutboxHandler, SessionHandler
@@ -550,14 +544,6 @@ class AgentCore:
                     raise BlueError(f"消息不存在或已被删除：{target}")
                 mount = ROOT_ID if target is None else target
                 base = tree.collect(tree.chain_to(mount)) if mount != ROOT_ID else []
-                # 压缩会丢掉旧对话，但模型随时可以用内建工具回取原文：
-                # 检索视图基于**压缩前**的完整链，所以被省略/截断的内容都还能拿到。
-                history = HistoryIndex(
-                    [
-                        HistoryEntry(id=node.id, message=decode_message(node.message))
-                        for node in base
-                    ]
-                )
                 # 历史可能带着进程中断遗留的悬空 tool_calls，
                 # 直接回灌会被模型接口以 400 拒收
                 messages = sanitize_history(
@@ -605,7 +591,6 @@ class AgentCore:
                     messages,
                     bus_proxy,
                     head=head,
-                    history=history,
                 )
                 try:
                     await self._sessions.update(bus_proxy, payload.session_id, steps)
@@ -670,7 +655,6 @@ class AgentCore:
         bus_proxy: EventBus.Proxy,
         *,
         head: int,
-        history: HistoryIndex | None = None,
     ) -> tuple[str, int]:
         """执行一轮对话：模型可多次调用工具，直到最终答复或达到步数上限。
 
@@ -737,7 +721,6 @@ class AgentCore:
                     tools,
                     tool_messages,
                     tool_blobs,
-                    history,
                 )
             except asyncio.CancelledError:
                 await self._commit_interrupted_step(
@@ -872,7 +855,6 @@ class AgentCore:
         tools: list[ToolDefinition],
         tool_messages: list[Message],
         tool_blobs: list[SessionAttachmentBlob],
-        history: HistoryIndex | None = None,
     ) -> None:
         """按序执行 assistant 消息里的工具调用，结果累积到 ``tool_messages``。
 
@@ -904,7 +886,7 @@ class AgentCore:
                 ),
             )
             content, tool_attachments = await self._invoke_tool(
-                bus_proxy, session_id, tool_call, tools, history
+                bus_proxy, session_id, tool_call, tools
             )
             parts, blobs = tool_attachment_parts(tool_attachments)
             tool_blobs.extend(blobs)
@@ -1048,11 +1030,11 @@ class AgentCore:
         return OpenAIRequestConfig(tools=tools or None)
 
     async def _tools_for(self, bus_proxy: EventBus.Proxy) -> list[ToolDefinition]:
-        """取工具目录：外置工具来自注册中心，内建历史工具固定挂在最前面。"""
+        """取工具目录：缓存为空时向注册中心拉取一次。"""
         tools = self._catalog.tools
-        if not tools:
-            tools = await self._catalog.refresh(bus_proxy)
-        return [*HISTORY_TOOLS, *tools]
+        if tools:
+            return tools
+        return await self._catalog.refresh(bus_proxy)
 
     async def _available_tool_names(
         self, bus_proxy: EventBus.Proxy, tools: list[ToolDefinition], name: str
@@ -1074,12 +1056,8 @@ class AgentCore:
         session_id: str,
         tool_call: ToolCall,
         tools: list[ToolDefinition],
-        history: HistoryIndex | None = None,
     ) -> tuple[str, list[ToolAttachment]]:
-        """执行一次工具调用：内建历史工具本地跑，其余走总线找工具进程。"""
-        if tool_call.function.name in HISTORY_TOOL_NAMES:
-            index = history if history is not None else HistoryIndex([])
-            return index.call(tool_call.function.name, tool_call.function.arguments), []
+        """通过总线调用一个工具进程，任何失败都转成工具错误文本回灌模型。"""
         name = tool_call.function.name
         available = await self._available_tool_names(bus_proxy, tools, name)
         if available and name not in available:

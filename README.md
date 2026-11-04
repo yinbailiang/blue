@@ -415,231 +415,29 @@ WebUI 通过 WebSocket 调用 Agent，并订阅 `session.stream` 实时展示模
 
 > 运行时配置可能包含密钥，务必保持 `0600` 且不要提交。
 
-### 内建历史工具（回取被压缩的原文）
+### 历史回取工具（history_search / history_read）
 
-压缩会丢掉旧对话，所以 agent 自带两个**内建工具**（不走总线、不进注册中心，
-直接用本轮的完整历史在内存里查）：
+压缩会丢掉旧对话，所以需要一条"回取原文"的通道。它由**两个普通工具服务**提供，
+和别的工具一样受 registry 管理：
 
-| 工具 | 作用 |
-|---|---|
-| `history_search(query, limit=5, roles="user,assistant,tool")` | 在本会话历史里按子串搜索，返回命中消息的 `id`、角色、在链上的序号与上下文片段 |
-| `history_read(ids, max_chars=4000)` | 按 id 读回完整原文；超长截断并标注真实长度；缺失的 id 单独列出 |
+| 服务 | 工具 | 作用 |
+|---|---|---|
+| `history_search` | `history_search(query, limit=5, roles=...)` | 在本会话历史里按子串搜索，返回命中消息的 `id`、角色、链上序号与上下文片段 |
+| `history_read` | `history_read(ids, max_chars=4000)` | 按 id 读回完整原文；超长截断并标注真实长度；缺失 id 单独列出 |
 
-配合方式：压缩产生的省略说明里直接点名这两个工具
-（`[早期历史已省略：N 步 / M 条消息；需要原文用 history_search / history_read 取回]`），
-于是「上下文预算」和「可回溯性」不再冲突——模型看到省略就知道该去查，而不是硬猜。
+数据与搜索都在 **session 服务**里（`session.search` / `session.read`，SQL `LIKE`
+先缩小范围再定位片段），两个工具只是薄包装：拿到工具调用上下文里的
+`session_id`，转成一次 RPC。
 
-检索视图基于**压缩前**的完整链，所以被丢弃、被截断、被投影的内容都能取回原文。
+**工具怎么知道自己在哪个会话**：工具函数的参数 schema 是发给模型看的，不能塞
+内部字段，所以上下文走 `blue.tool_context`（`ContextVar`）：`ToolWorker` 在调用前
+用 `ToolCallRequest.session_id` 绑定，调用后复位。工具里用 `current_context()`
+取；需要反向调用别的服务时用 `call_service(...)`，并把那个契约包的事件传给
+`run_tool(..., events=...)`。
 
-## 命令行
-
-```bash
-uv run blue up                  # 前台运行 supervisor
-uv run blue status [--json]     # 查看实际状态
-uv run blue logs echo -f        # 跟踪日志
-uv run blue plan                # 预览 apply 会新增/重启/删除哪些服务（对标 kubectl diff）
-uv run blue plan --diff         # 再展开配置的字段级变化
-uv run blue apply --wait        # SIGHUP 重载配置并等待生效
-uv run blue down                # 优雅停止 supervisor 与全部服务
-uv run blue config-check        # 编译校验 + 打印期望状态摘要
-uv run blue config-check --write# 只生成运行时配置，不启动
-uv run blue render [--full]     # 打印期望状态（默认脱敏）
-uv run blue build               # uv sync --all-packages
-uv run blue doctor              # 检查 uv / RabbitMQ / 状态目录 / 每个 MCP server 的启动命令
-uv run blue mcp-tools           # 列出每个 MCP server 真实提供的工具名（写白名单用）
-uv run blue mcp-tools kwin --json  # 只看一个 server，JSON 输出
-```
-
-全局参数：`--config <path>`、`--verbose`。
-
-`blue plan` 是只读的：对比「刚编译出的 `blue.infd`」与 `.blue/state.json` 快照，
-列出每个服务的命运（`+` 新增 / `~` 重启 / `-` 删除 / 不变）与**原因**，
-契约变化还会点名受影响的依赖方：
-
-```text
-$ blue plan
-generation：当前 feb420fe3a3f → 期望 b26b9e477bfc
-
-服务变更
-  ~ agent             源码变化；依赖契约变化：session
-  ~ session           依赖契约变化：session
-  ~ webui             依赖契约变化：session
-
-契约变更
-  ~ session         453b5881 → f9efd306   影响：agent, session, webui
-
-汇总：新增 0 · 重启 3 · 删除 0 · 不变 14
-重启期间这些服务会短暂不可用：agent, session, webui
-```
-
-加 `--diff` 会展开到字段级，格式是标准统一 diff（渲染复用 infd 的
-`infinity_data.emit.yaml_dump`，所以 `Decimal`、嵌套、列表都是 infd 原生写法）：
-
-```text
-服务变更
-  ~ agent             配置变化
-      @@ -1,4 +1,5 @@
-      - llm_timeout: 60.0
-      - model: deepseek-chat
-      + llm_timeout: 300.0
-      + model: deepseek-v4-flash
-       tools:
-         - a
-      +   - b
-```
-
-对比基准是每次 apply 写进 `state.json` 的 `ActualService.config`，写盘前把
-`password/api_key/secret/token/credential` 一类字段换成 `***`——所以密钥变化
-只会显示「（仅密钥类字段有变化，已脱敏）」，不会打印明文。升级到本版本后的
-**第一次 apply 之前**没有配置快照，`--diff` 只会报告"配置变了"并说明原因。
-
-退出码：`0` 无变化、`1` 有变化、`2` 配置编译失败——可以写
-`if blue plan >/dev/null; then echo 已是期望状态; fi`。判定逻辑与调和器共用同一
-个 `restart_reasons()`，不会出现「预览说不动、apply 却重启」。
-
-接第三方 MCP server 的推荐顺序：先 `blue doctor` 确认启动命令可用 →
-`blue mcp-tools <server>` 拿到真实工具名（不同版本会改名，别照 README 抄）→
-把 `<server>__<tool>` 写进 `blue.infd` 的 `mcp_bridge.tools` → `blue apply`。
-声明的工具在 server 上不存在时桥会启动失败，不会静默少一个工具。
-
-服务进程的日志默认打到 stderr（supervisor 收集到 `.blue/logs/<name>.log`），级别
-默认 `INFO`（服务上下线、会话回收等都会留下痕迹），可用环境变量
-`BLUE_LOG_LEVEL=DEBUG|INFO|WARNING|ERROR` 调整；未知取值回退 `INFO`。
-
-## 快速开始
-
-```bash
-uv sync --all-packages               # 安装根包与全部服务
-cp secrets.example.toml secrets.toml # 填入密钥
-chmod 600 secrets.toml
-uv run blue config-check             # 编译校验
-
-# 终端 1：控制面（前台；生产交给 systemd / Docker）
-uv run blue up
-
-# 终端 2：观察与操作
-uv run blue status
-uv run blue logs agent -f
-
-# 浏览器打开 WebUI
-#   http://127.0.0.1:8787
-
-BLUE_BUS_URL=amqp://guest:guest@127.0.0.1:5672/blue \
-  uv run --package blue-service-inspect blue-service-inspect tools
-
-# 交互式 CLI（手工客户端，不纳入 supervisor）
-BLUE_BUS_URL=amqp://guest:guest@127.0.0.1:5672/blue \
-  uv run --package blue-service-chat blue-service-chat --interactive
-```
-
-`bus` 默认 `managed` 模式：supervisor 会启动本机 `rabbitmq-server`，创建
-`blue` vhost、配置用户与权限；退出时一并停止。若使用外部 RabbitMQ：
-
-```infd
-bus = BusService(
-  mode = "external",
-  url = "amqp://user:pass@broker:5672/blue",
-  configure = false,
-)
-```
-
-## 服务状态与生命周期
-
-```text
-Pending → Starting → Running → Ready
-                    ↘ BackOff → Starting
-Ready / Running → Stopping → Stopped
-任意状态 → Failed（restart=never 或策略不再重启）
-连续失败 → CrashLoopBackOff（仍按最大退避重试）
-```
-
-- **依赖**：`depends_on` 形成 DAG；依赖 Ready 后才启动下游，停止时逆序。
-- **契约变更**：`blue apply` 会比较契约包指纹；变化时重启所有
-  `depends_contracts` 命中该契约的服务。
-- **重启**：`always` / `on-failure` / `never`；指数退避 + 抖动；稳定运行
-  `stable_after` 秒后重置失败计数。
-- **就绪**：`process`（存活）、`tcp`（连接 host:port）、`none`；`bus` 的 TCP
-  目标自动从 `url` 或 `proxy_listen` 推导。
-- **停机**：SIGTERM 进程树 → 等待 `stop_timeout` → SIGKILL；整体受
-  `supervisor.shutdown_timeout` 预算约束。
-- **孤儿清理**：重启 supervisor 时，按 `BLUE_INSTANCE_ID` 核对
-  `/proc/<pid>/environ` 后清理旧进程；RabbitMQ 子进程带 `PR_SET_PDEATHSIG`。
-- **单实例**：`.blue/supervisor.lock` 防止重复启动 supervisor。
-- **版本与源码扫描**：每个服务的 `package_version` 取自
-  `services/<name>/pyproject.toml` 的 `[project].version`；`source_hash` 是
-  「版本声明 + `src/**/*.py` 内容」的 SHA-256 指纹。两者都写进 `state.json`，
-  版本在 `blue status` / `config-check` 中可见。源码/版本扫描只在显式
-  `blue apply`（或 `SIGHUP`/`reload()`）时执行：重新编译 `blue.infd`、计算
-  指纹并重启发生变化的服务。supervisor 不会持续 watch 源码，也不会因为保存
-  文件自动重启服务。
-  （`uv run` 在源码变化时会自动重建并重装该 workspace 包，所以 apply 重启即生效。）
-
-## 内置服务
-
-| 服务 | 说明 |
-| --- | --- |
-| `bus` | 管理 RabbitMQ、vhost/用户/权限配置，可选 AMQP TCP 代理 |
-| `registry` | 工具运行时注册中心：租约、心跳、目录版本与 `catalog.changed` 广播 |
-| `session` | SQLite（WAL）会话**树**持久化（分支、切换、删子树）+ 内容寻址附件表（去重、级联、GC），独立进程、支持重启后恢复 |
-| `agent` | 模型推理 + 工具目录缓存，本身不保存会话正文；加载历史时自愈悬空 `tool_calls`，未知工具立即失败 |
-| `webui` | FastAPI + 静态单页 Chat UI，WebSocket 实时进度，托管在 supervisor 中 |
-| `clock` / `echo` / `text_stats` | 基础工具 |
-| `read_file` / `write_file` / `edit_file` | 文件读写与精确替换；相对路径默认锚定项目根 |
-| `shell` | 异步 shell 命令，超时进程组强杀、输出截断；默认工作目录为项目根 |
-| `terminal` | 交互式终端（PTY）多会话：跑 vim/htop/REPL，可截图给模型看，并按截图坐标点击/拖动；`shell` 留空时自动挑选带 readline 的 shell |
-| `weather` | 天气查询（wttr.in，免密钥）：实时实况 + 最多 3 天预报，天气码本地译中文 |
-| `browser` | 无头 Firefox 截图：把网页截成图片**作为附件**回到 agent（Pillow 归一化到会话体积上限内） |
-| `browser_ops` | 可交互浏览器（WebDriver/geckodriver）：等渲染、点击、输入、滚动、执行 JS，再截图回传附件 |
-| `view_image` | 查看本地图片：把磁盘上的图（截图/图表/下载图）**作为附件**交给模型；相对路径锚定项目根 |
-| `mcp_bridge` | MCP 客户端桥：把外部 MCP server（stdio）的工具接入工具目录；工具集声明式、schema 自动降级并留痕 |
-| `mcp_server` | MCP 服务端桥：把 blue 工具目录暴露给外部 MCP 客户端（stdio，手工运行，白名单 + 危险工具门禁） |
-| `chat` / `inspect` | 手工 UI 客户端，不纳入 supervisor 调谐 |
-
-> **终端提示**：`shell` 是"跑一条命令、收输出、结束"；`terminal` 是长期存活的
-> PTY（多会话、可选 shell、终端截图与坐标点击）。NixOS 上 `bash` 有两种构建，
-> 不带 readline 的那个会让方向键失效、提示符里的 `\[ \]` 原样打印——`terminal`
-> 会自动跳过它，也可以用 `blue-config` 里的 `shell` 显式指定。
->
-> **安全提示**：`read_file` / `write_file` / `edit_file` / `shell` 以工具进程
-> 权限运行，没有额外沙箱。只在可信工作目录中启用。
->
-> **MCP 提示**：`mcp_bridge` 会以工具进程权限启动外部命令（`npx` / `uvx` /
-> 任意 `command`）。MCP server 就是一段任意代码，只接入可信来源。
-
-## MCP 桥接
-
-`mcp_bridge` 把外部 **MCP server**（stdio 传输）的工具接进工具目录，agent 用它
-们和用本地工具没有区别。
-
-```infd
-!from p"services/mcp_bridge/service.infd" import ServiceTemplate as McpBridgeService
-
-mcp_bridge = McpBridgeService(
-  tools = ["fs__read_file", "git__status"],
-  servers = [
-    {name = "fs", command = "npx", args = ["-y", "@modelcontextprotocol/server-filesystem", "/tmp"]},
-    {name = "git", command = "uvx", args = ["mcp-server-git"]},
-  ],
-)
-```
-
-约定：
-
-- **工具集是声明式的**。只有 `tools` 里列出的 `<server>__<tool>` 会注册；运行期
-  不跟随 MCP 的 `tools/list_changed`，只有 `blue apply` 才会对齐。
-- **fail loud**：声明了但 server 未提供的工具会让桥启动失败（`blue status` 可见），
-  而不是静默少一个；server 提供了但没声明的工具只 warning。
-- **调用必应答**：server 掉线、调用超时（`call_timeout`，默认 60s）、JSON-RPC error
-  都会立刻回 `tool.result(success=false)`，不会挂到 agent 的 `tool_timeout`。
-- **参数 schema 自动降级**：MCP 的完整 JSON Schema 超出工具参数能表达的部分
-  （`$ref` 的 `definitions` 写法、`allOf`、`const`、`format`、无 `items` 的数组…）
-  会被就地降级，并在工具描述末尾追加 `[blue] 参数 schema 已降级：…`，同时逐条告警。
-- **零新增依赖**：桥自带 stdio JSON-RPC 客户端（只实现 `initialize` /
-  `tools/list` / `tools/call`），不引入官方 `mcp` SDK 的传递依赖链。
-
-未接入的能力：MCP 的 `resources/*`、`prompts/*`、`notifications/cancelled`、
-`progress` 与 streamable HTTP 传输。设计与取舍见
-[`docs/mcp-bridge.md`](docs/mcp-bridge.md)。
+> 为什么不做成 agent 内建工具：内建的看不见（不在 `/api/tools` 目录里、webui 与
+> MCP 桥都拿不到）、改一次要重启 agent、也没有租约/审计。实测内建方案每轮固定
+> 多付 28.5 ms（解码整条链），而服务方案只在真调用时付 ~12.5 ms。
 
 ### 反向：把 blue 工具暴露给外部 MCP 客户端
 
