@@ -43,7 +43,7 @@ dev = [
 [tool.ruff]
 target-version = "py314"
 line-length = 88
-src = ["src", "services", "tests"]
+src = ["src", "services", "tests", "mcp_servers"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B", "SIM", "RUF"]
@@ -51,7 +51,7 @@ select = ["E", "F", "I", "UP", "B", "SIM", "RUF"]
 ignore = ["RUF001", "RUF002", "RUF003"]
 
 [tool.pyright]
-include = ["src", "services", "tests"]
+include = ["src", "services", "tests", "mcp_servers"]
 extraPaths = [
     "src",
     "contracts/tool/src",

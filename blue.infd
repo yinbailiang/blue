@@ -99,11 +99,26 @@ view_image = ViewImageService()
 
 # MCP 客户端桥：把外部 MCP server（stdio）的工具接进目录。
 # 工具集是声明式的：只有 tools 里列出的 <server>__<tool> 会注册；声明的工具在
-# server 上不存在时桥启动失败（fail loud）。启用时把下面三行取消注释：
-#mcp_bridge = McpBridgeService(
-#  tools = ["fs__read_file"],
-#  servers = [{name = "fs", command = "npx", args = ["-y", "@modelcontextprotocol/server-filesystem", "/tmp"]}],
-#)
+# server 上不存在时桥启动失败（fail loud）。
+# 下面接的是仓库自带的「虚拟屏幕」样例 server（mcp_servers/virtual_screen/）：
+# 一块内存画布，能画字/画框，并导出 PNG（顺带验证图片回传链路）。
+mcp_bridge = McpBridgeService(
+  tools = [
+    "vscreen__screen_info",
+    "vscreen__screen_clear",
+    "vscreen__screen_fill",
+    "vscreen__screen_rect",
+    "vscreen__screen_text",
+    "vscreen__screen_snapshot",
+  ],
+  servers = [
+    {
+      name = "vscreen",
+      command = ".venv/bin/python",
+      args = ["mcp_servers/virtual_screen/server.py"],
+    },
+  ],
+)
 
 # UI 客户端不纳入 supervisor 调谐，手工运行：
 #   uv run --package blue-service-chat blue-service-chat --interactive
