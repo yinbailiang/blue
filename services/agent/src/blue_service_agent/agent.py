@@ -52,6 +52,7 @@ from infinity_agent.clients import (
     ToolCallCompleteChunk,
     create_client,
 )
+from infinity_agent.clients.open_ai.config import OpenAIConnectionConfig
 from infinity_bus import EventBus
 from infinity_bus.templates.request import request
 
@@ -90,6 +91,7 @@ def build_client(settings: AgentConfig) -> LLMClient:
                 model=settings.model,
                 api_key=api_key,
                 base_url=settings.base_url or "https://api.deepseek.com",
+                connection=OpenAIConnectionConfig(timeout=settings.llm_timeout),
             )
         )
     return create_client(
@@ -97,6 +99,7 @@ def build_client(settings: AgentConfig) -> LLMClient:
             model=settings.model,
             api_key=api_key,
             base_url=settings.base_url or "https://api.openai.com/v1",
+            connection=OpenAIConnectionConfig(timeout=settings.llm_timeout),
         )
     )
 
@@ -388,21 +391,11 @@ class AgentCore:
                 ),
             )
             tools = await self._tools_for(bus_proxy)
-            chunks: list[StreamChunk] = []
             # 库里存的是附件伪 URL，模型只接受 data URL：发请求前换一份副本
             request_messages = await materializer.materialize(messages)
-            try:
-                async for chunk in self._require_client().stream_chat(
-                    request_messages,
-                    self._request_config(tools),
-                ):
-                    chunks.append(chunk)
-                    await self._forward_chunk(
-                        bus_proxy, session_id, request_id, steps, chunk
-                    )
-            except asyncio.CancelledError:
-                await self._commit_interrupted_stream(bus_proxy, session_id, chunks)
-                raise
+            chunks = await self._stream_step(
+                bus_proxy, session_id, request_id, steps, request_messages, tools
+            )
             assistant = self._require_client().chunks_to_message(chunks)
             messages.append(assistant)
             if isinstance(assistant.content, str) and assistant.content.strip():
@@ -448,6 +441,62 @@ class AgentCore:
             ),
         )
         return reply, steps
+
+    async def _stream_step(
+        self,
+        bus_proxy: EventBus.Proxy,
+        session_id: str,
+        request_id: str,
+        step: int,
+        messages: list[Message],
+        tools: list[ToolDefinition],
+    ) -> list[StreamChunk]:
+        """跑一步模型流式生成，网络中断时能救就救。
+
+        流式读超时（aiohttp ``SocketTimeoutError``）在长回答、大上下文下很常见：
+
+        - **一点内容都还没收到**：重放请求是安全的（没向浏览器推过任何增量），
+          按 ``llm_retries`` 重试；
+        - **已经收到内容**：不重试（重放会让同一段文字出现两次），但把已流出的
+          那部分落库，用户至少看得到已有的回答，而不是一片空白 + 报错。
+        """
+        attempts = 0
+        while True:
+            chunks: list[StreamChunk] = []
+            try:
+                async for chunk in self._require_client().stream_chat(
+                    messages,
+                    self._request_config(tools),
+                ):
+                    chunks.append(chunk)
+                    await self._forward_chunk(
+                        bus_proxy, session_id, request_id, step, chunk
+                    )
+                return chunks
+            except asyncio.CancelledError:
+                await self._commit_interrupted_stream(bus_proxy, session_id, chunks)
+                raise
+            except Exception as error:
+                if chunks or attempts >= self._settings.llm_retries:
+                    if chunks:
+                        await self._commit_interrupted_stream(
+                            bus_proxy, session_id, chunks
+                        )
+                        logger.warning(
+                            "模型流在第 %s 步中断，已落库流出的 %s 个增量：%s",
+                            step,
+                            len(chunks),
+                            error,
+                        )
+                    raise
+                attempts += 1
+                logger.warning(
+                    "模型流在第 %s 步中断（尚未收到内容），第 %s 次重试：%s",
+                    step,
+                    attempts,
+                    error,
+                )
+                await asyncio.sleep(min(2.0, 0.5 * attempts))
 
     async def _run_tools(
         self,

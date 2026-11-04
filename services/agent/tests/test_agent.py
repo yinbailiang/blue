@@ -34,6 +34,7 @@ from infinity_agent import (
     MessageRole,
     Messages,
     StreamChunk,
+    TextChunk,
     ToolCall,
     ToolDefinition,
 )
@@ -103,6 +104,45 @@ class StubCatalog:
     async def refresh(self, bus_proxy: EventBus.Proxy) -> list[ToolDefinition]:
         del bus_proxy
         return []
+
+
+class FlakyClient(ScriptedClient):
+    """前 N 次流式请求直接抛网络错误，之后正常。"""
+
+    def __init__(self, script: list[Message], *, failures: int = 1) -> None:
+        super().__init__(script)
+        self._failures = failures
+        self.attempts = 0
+
+    async def stream_chat(  # pyright: ignore[reportIncompatibleMethodOverride]
+        self,
+        messages: Messages,
+        config: RequestConfig | None = None,
+    ) -> AsyncGenerator[StreamChunk]:
+        self.attempts += 1
+        if self._failures > 0:
+            self._failures -= 1
+            raise ConnectionError("Timeout on reading data from socket")
+        async for chunk in super().stream_chat(messages, config):
+            yield chunk
+
+
+class PartialThenFailClient(ScriptedClient):
+    """先吐一段文本，再抛网络错误（模拟读到一半断开）。"""
+
+    def __init__(self) -> None:
+        super().__init__([])
+        self.attempts = 0
+
+    async def stream_chat(  # pyright: ignore[reportIncompatibleMethodOverride]
+        self,
+        messages: Messages,
+        config: RequestConfig | None = None,
+    ) -> AsyncGenerator[StreamChunk]:
+        del messages, config
+        self.attempts += 1
+        yield TextChunk(text="已经生成的部分")
+        raise ConnectionError("Timeout on reading data from socket")
 
 
 class GatedClient(ScriptedClient):
@@ -574,3 +614,86 @@ async def _activity_tracks_running_session() -> None:
     assert collector.events[0].activity.running is True
     assert collector.events[0].activity.session_id == "s-busy"
     assert collector.events[-1].activity.running is False
+
+
+def test_retries_stream_when_nothing_received() -> None:
+    """还没收到任何内容就流中断：自动重试一次，用户看到正常回复。"""
+    asyncio.run(_retries_stream())
+
+
+async def _retries_stream() -> None:
+    hub = MemoryFanout()
+    client = FlakyClient([Message.assistant(content="重试后的回答")], failures=1)
+    gateway = MemorySessionGateway()
+    core = AgentCore(
+        runtime=make_runtime(hub, "agent"),
+        settings=AgentConfig(api_key="sk-test", max_steps=4, llm_retries=1),
+        client=client,
+        session_gateway=gateway,
+        catalog=cast(Any, StubCatalog()),
+    )
+    chat = make_runtime(hub, "chat")
+    await core.start()
+    await chat.start()
+    try:
+        response = await request(
+            chat.proxy(),
+            SessionPromptEvent.name,
+            {"text": "在吗"},
+            SessionReplyEvent.name,
+            session_id="s-retry",
+            timeout=10.0,
+        )
+    finally:
+        await chat.stop()
+        await core.stop()
+
+    assert isinstance(response, SessionReplyResponse)
+    assert response.success is True
+    assert response.text == "重试后的回答"
+    assert client.attempts == 2
+    # 只落库一次，没有重复消息
+    roles = [message.role for message in gateway.messages["s-retry"]]
+    assert roles == [MessageRole.SYSTEM, MessageRole.USER, MessageRole.ASSISTANT]
+
+
+def test_keeps_partial_reply_when_stream_drops_midway() -> None:
+    """已经流出内容后中断：不重试，把那部分落库，而不是整轮丢掉。"""
+    asyncio.run(_keeps_partial())
+
+
+async def _keeps_partial() -> None:
+    hub = MemoryFanout()
+    client = PartialThenFailClient()
+    gateway = MemorySessionGateway()
+    core = AgentCore(
+        runtime=make_runtime(hub, "agent"),
+        settings=AgentConfig(api_key="sk-test", max_steps=4, llm_retries=3),
+        client=client,
+        session_gateway=gateway,
+        catalog=cast(Any, StubCatalog()),
+    )
+    chat = make_runtime(hub, "chat")
+    await core.start()
+    await chat.start()
+    try:
+        response = await request(
+            chat.proxy(),
+            SessionPromptEvent.name,
+            {"text": "讲个长的"},
+            SessionReplyEvent.name,
+            session_id="s-partial",
+            timeout=10.0,
+        )
+    finally:
+        await chat.stop()
+        await core.stop()
+
+    assert isinstance(response, SessionReplyResponse)
+    assert response.success is False
+    assert client.attempts == 1  # 有内容就不重试
+    stored = gateway.messages["s-partial"]
+    assistant = stored[-1]
+    assert assistant.role is MessageRole.ASSISTANT
+    assert isinstance(assistant.content, str)
+    assert "已经生成的部分" in assistant.content

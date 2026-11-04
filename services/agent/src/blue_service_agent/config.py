@@ -27,6 +27,18 @@ class AgentConfig(BaseModel):
     system_prompt: str = "你是 blue，一个通过工具完成任务的智能体。"
     max_steps: int = Field(default=8, ge=1)
     tool_timeout: float = Field(default=30.0, gt=0)
+    llm_timeout: float = Field(
+        default=300.0,
+        gt=0,
+        description="模型请求的**读**超时（秒）。库默认 60s，长回答/大上下文容易"
+        "读超时（aiohttp SocketTimeoutError）",
+    )
+    llm_retries: int = Field(
+        default=1,
+        ge=0,
+        le=5,
+        description="流式生成在**还没收到任何内容**时允许的重试次数（重放安全）",
+    )
     session_timeout: float = Field(default=10.0, gt=0)
 
     def resolve_api_key(self) -> str:

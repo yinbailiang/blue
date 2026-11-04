@@ -6,6 +6,8 @@
   system_prompt: str = "你是 blue，一个通过工具完成任务的智能体。需要外部能力时调用工具，不要臆测结果。"
   max_steps: <int, range(32, )> = 512
   tool_timeout: <float, positive> = 30.0
+  llm_timeout: <float, positive> = 300.0
+  llm_retries: <int, range(0, 5)> = 1
   session_timeout: <float, positive> = 10.0
 }
 

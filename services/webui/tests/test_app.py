@@ -362,7 +362,13 @@ def test_websocket_pushes_activity_snapshot_on_connect() -> None:
 
     with client.websocket_connect("/ws/chat") as socket:
         assert socket.receive_json()["type"] == "ready"
-        frame = socket.receive_json()
+        # 快照与实时推送（activity_pump）可能竞争，取第一条**非空**的 activity 帧
+        frame: dict[str, Any] = {}
+        for _ in range(3):
+            candidate: dict[str, Any] = socket.receive_json()
+            if candidate.get("type") == "activity" and candidate.get("sessions"):
+                frame = candidate
+                break
 
     assert frame["type"] == "activity"
     assert frame["sessions"][0]["session_id"] == "s1"
