@@ -32,6 +32,7 @@ SERVICES = (
     "text_stats",
     "view_image",
     "weather",
+    "web_search",
     "webui",
     "write_file",
 )
@@ -49,6 +50,7 @@ MANAGED = {
     "shell",
     "view_image",
     "weather",
+    "web_search",
     "webui",
     "write_file",
 }
@@ -72,6 +74,7 @@ EXPECTED_CONTRACTS: dict[str, set[str]] = {
     "text_stats": {"tool"},
     "view_image": {"tool"},
     "weather": {"tool"},
+    "web_search": {"tool"},
     "webui": {"tool", "session"},
     "write_file": {"tool"},
 }
@@ -124,6 +127,7 @@ def test_blue_infd_compiles_and_matches_service_packages() -> None:
             "shell",
             "view_image",
             "weather",
+            "web_search",
             "webui",
             "write_file",
         }:

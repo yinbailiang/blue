@@ -1,0 +1,21 @@
+~ServiceTemplate {
+  base_url: str = "https://www.bing.com"
+  timeout: <float, positive> = 15.0
+  user_agent: str = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+  market: str = "auto"
+  proxy: str = ""
+  max_results: <int, range(1, 10)> = 10
+}
+
+service {
+  name = "web_search"
+  kind = "tool"
+  package = "blue-service-web-search"
+  module = "blue_service_web_search"
+  depends_on = ["bus"]
+  depends_contracts = ["tool"]
+  restart = "always"
+  stop_timeout = 5.0
+  startup_timeout = 30.0
+  readiness = "process"
+}

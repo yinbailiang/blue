@@ -25,6 +25,7 @@
 !from p"services/shell/service.infd" import ServiceTemplate as ShellService
 !from p"services/view_image/service.infd" import ServiceTemplate as ViewImageService
 !from p"services/weather/service.infd" import ServiceTemplate as WeatherService
+!from p"services/web_search/service.infd" import ServiceTemplate as WebSearchService
 !from p"services/mcp_bridge/service.infd" import ServiceTemplate as McpBridgeService
 
 supervisor {
@@ -87,6 +88,12 @@ shell = ShellService()
 
 # 天气查询：默认走 wttr.in，可改 base_url / timeout
 weather = WeatherService()
+
+# 网页搜索：抓 Bing 结果页（无需密钥）。默认走国际版，经本地代理出去；
+# 中文查询自动用 mkt=zh-CN，英文查询用 en-US。代理留空则直连（国内会落到 cn.bing.com）。
+web_search = WebSearchService(
+  proxy = "http://127.0.0.1:7890",
+)
 
 # 无头 Firefox 截图：截图以图片附件回到模型（agent 真的能「看见」页面）
 browser = BrowserService()

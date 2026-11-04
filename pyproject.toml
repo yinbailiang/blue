@@ -74,6 +74,7 @@ extraPaths = [
     "services/text_stats/src",
     "services/view_image/src",
     "services/weather/src",
+    "services/web_search/src",
     "services/webui/src",
     "services/write_file/src",
 ]

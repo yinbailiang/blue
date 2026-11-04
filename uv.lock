@@ -25,6 +25,7 @@ members = [
     "blue-service-text-stats",
     "blue-service-view-image",
     "blue-service-weather",
+    "blue-service-web-search",
     "blue-service-webui",
     "blue-service-write-file",
 ]
@@ -616,6 +617,23 @@ requires-dist = [
 name = "blue-service-weather"
 version = "0.1.0"
 source = { editable = "services/weather" }
+dependencies = [
+    { name = "blue" },
+    { name = "httpx" },
+    { name = "pydantic" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "blue", editable = "." },
+    { name = "httpx", specifier = ">=0.28.0" },
+    { name = "pydantic", specifier = ">=2" },
+]
+
+[[package]]
+name = "blue-service-web-search"
+version = "0.1.0"
+source = { editable = "services/web_search" }
 dependencies = [
     { name = "blue" },
     { name = "httpx" },
