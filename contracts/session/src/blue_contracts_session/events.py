@@ -514,13 +514,15 @@ class SessionSearchResponse(ResponseProtocol):
     """搜索应答。"""
 
     total: int = Field(default=0, description="命中总数（可能大于返回条数）")
-    hits: list[SessionSearchHit] = Field(default_factory=list, description="命中列表")
+    hits: list[SessionSearchHit] = Field(
+        default_factory=list[SessionSearchHit], description="命中列表"
+    )
 
 
 class SessionReadRequest(RequestProtocol):
     """按 id 读回历史消息的完整原文。"""
 
-    ids: list[int] = Field(default_factory=list, description="要读取的消息 id")
+    ids: list[int] = Field(default_factory=list[int], description="要读取的消息 id")
     max_chars: int = Field(default=4000, description="单条返回的字符上限")
 
 
@@ -538,9 +540,9 @@ class SessionReadResponse(ResponseProtocol):
     """读取应答。"""
 
     messages: list[SessionReadMessage] = Field(
-        default_factory=list, description="读到的消息"
+        default_factory=list[SessionReadMessage], description="读到的消息"
     )
-    missing: list[int] = Field(default_factory=list, description="不存在的 id")
+    missing: list[int] = Field(default_factory=list[int], description="不存在的 id")
 
 
 class SessionSearchEvent(EventDeclaration):

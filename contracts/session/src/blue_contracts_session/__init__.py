@@ -132,6 +132,7 @@ from blue_contracts_session.events import (
     SessionUpdateResponse,
     StreamToolCall,
 )
+from blue_contracts_session.proxy import SessionCallError, SessionProxy
 
 __all__ = [
     "ATTACHMENT_URL_PREFIX",
@@ -159,6 +160,7 @@ __all__ = [
     "SessionBranchActivateReplyEvent",
     "SessionBranchActivateRequest",
     "SessionBranchActivateResponse",
+    "SessionCallError",
     "SessionCancelEvent",
     "SessionCancelReplyEvent",
     "SessionCancelRequest",
@@ -225,6 +227,7 @@ __all__ = [
     "SessionOutboxUpdateResponse",
     "SessionPromptEvent",
     "SessionPromptRequest",
+    "SessionProxy",
     "SessionReadEvent",
     "SessionReadMessage",
     "SessionReadReplyEvent",

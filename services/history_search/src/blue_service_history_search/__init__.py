@@ -16,15 +16,13 @@ from blue_contracts_session import (
     EVENTS as SESSION_EVENTS,
 )
 from blue_contracts_session import (
-    SessionSearchEvent,
+    SessionCallError,
     SessionSearchHit,
-    SessionSearchReplyEvent,
-    SessionSearchResponse,
 )
 from pydantic import BaseModel, Field
 
 from blue.runtime import run_tool
-from blue.tool_context import call_service, current_context
+from blue.tool_context import current_context, session_proxy
 
 MAX_LIMIT = 50
 """一次搜索最多返回多少条命中。"""
@@ -54,16 +52,15 @@ async def history_search(
     context = current_context()
     if not context.session_id:
         raise RuntimeError("history_search 只能在会话内调用（缺少 session_id）")
-    response = await call_service(
-        SessionSearchEvent.name,
-        {"query": query, "limit": max(1, min(limit, MAX_LIMIT)), "roles": roles},
-        SessionSearchReplyEvent.name,
-        session_id=context.session_id,
-    )
-    if not isinstance(response, SessionSearchResponse):
-        raise RuntimeError("收到非预期的搜索应答")
-    if not response.success:
-        raise RuntimeError(response.error_msg or "搜索失败")
+    try:
+        response = await session_proxy().search(
+            context.session_id,
+            query,
+            limit=max(1, min(limit, MAX_LIMIT)),
+            roles=roles,
+        )
+    except SessionCallError as error:
+        raise RuntimeError(str(error) or "搜索失败") from error
     return SearchResult(total=response.total, hits=response.hits)
 
 

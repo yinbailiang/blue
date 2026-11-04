@@ -12,15 +12,13 @@ from blue_contracts_session import (
     EVENTS as SESSION_EVENTS,
 )
 from blue_contracts_session import (
-    SessionReadEvent,
+    SessionCallError,
     SessionReadMessage,
-    SessionReadReplyEvent,
-    SessionReadResponse,
 )
 from pydantic import BaseModel, Field
 
 from blue.runtime import run_tool
-from blue.tool_context import call_service, current_context
+from blue.tool_context import current_context, session_proxy
 
 MAX_IDS = 20
 """一次最多读多少条。"""
@@ -49,19 +47,14 @@ async def history_read(
         raise RuntimeError("history_read 只能在会话内调用（缺少 session_id）")
     if not ids:
         raise RuntimeError("ids 需要至少一个消息 id")
-    response = await call_service(
-        SessionReadEvent.name,
-        {
-            "ids": ids[:MAX_IDS],
-            "max_chars": max(200, min(max_chars, MAX_CHARS_CEILING)),
-        },
-        SessionReadReplyEvent.name,
-        session_id=context.session_id,
-    )
-    if not isinstance(response, SessionReadResponse):
-        raise RuntimeError("收到非预期的读取应答")
-    if not response.success:
-        raise RuntimeError(response.error_msg or "读取失败")
+    try:
+        response = await session_proxy().read(
+            context.session_id,
+            ids[:MAX_IDS],
+            max_chars=max(200, min(max_chars, MAX_CHARS_CEILING)),
+        )
+    except SessionCallError as error:
+        raise RuntimeError(str(error) or "读取失败") from error
     return ReadResult(messages=response.messages, missing=response.missing)
 
 

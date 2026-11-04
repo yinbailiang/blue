@@ -40,6 +40,8 @@ __all__ = [
     "bind_runtime",
     "call_service",
     "current_context",
+    "proxy",
+    "session_proxy",
     "use_context",
 ]
 
@@ -81,6 +83,27 @@ def use_context(context: ToolContext) -> Any:
         yield
     finally:
         _CTX.reset(token)
+
+
+def session_proxy() -> Any:
+    """拿一个指向会话服务的强类型代理（工具里最常用的反向调用）。
+
+    契约包提供 ``SessionProxy``；这里只是把它绑到工具进程的总线出口上，
+    省得每个工具都自己 import 契约 + 取 runtime + 拼 proxy。
+    """
+    from blue_contracts_session import SessionProxy
+
+    return SessionProxy(proxy())
+
+
+def proxy() -> Any:
+    """当前工具进程的总线出口（未绑定运行时则报错）。"""
+    runtime = _RUNTIME.get()
+    if runtime is None:
+        raise RuntimeError(
+            "工具进程未绑定总线运行时：请用 run_tool 启动，或先调用 bind_runtime"
+        )
+    return runtime.proxy(runtime.member_id)
 
 
 def bind_runtime(runtime: BusRuntime) -> None:

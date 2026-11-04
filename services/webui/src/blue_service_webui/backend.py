@@ -18,60 +18,18 @@ from blue_contracts_session import (
     SessionActivityQueryResponse,
     SessionActivityReplyEvent,
     SessionAttachment,
-    SessionAttachmentGetEvent,
-    SessionAttachmentReplyEvent,
-    SessionAttachmentResponse,
-    SessionBranchActivateEvent,
-    SessionBranchActivateReplyEvent,
-    SessionBranchActivateResponse,
+    SessionCallError,
     SessionCancelEvent,
     SessionCancelReplyEvent,
     SessionCancelResponse,
-    SessionGetEvent,
-    SessionGetReplyEvent,
-    SessionGetResponse,
     SessionInfo,
-    SessionNodeDeleteEvent,
-    SessionNodeDeleteReplyEvent,
-    SessionNodeDeleteResponse,
-    SessionNodeLabelEvent,
-    SessionNodeLabelReplyEvent,
-    SessionNodeLabelResponse,
-    SessionOutboxClearEvent,
-    SessionOutboxClearReplyEvent,
-    SessionOutboxClearResponse,
     SessionOutboxEvent,
-    SessionOutboxListEvent,
-    SessionOutboxListReplyEvent,
-    SessionOutboxListResponse,
-    SessionOutboxMoveEvent,
-    SessionOutboxMoveReplyEvent,
-    SessionOutboxMoveResponse,
     SessionOutboxPayload,
-    SessionOutboxRemoveEvent,
-    SessionOutboxRemoveReplyEvent,
-    SessionOutboxRetryEvent,
-    SessionOutboxRetryReplyEvent,
-    SessionOutboxRetryResponse,
-    SessionOutboxSendNowEvent,
-    SessionOutboxSendNowReplyEvent,
-    SessionOutboxSendNowResponse,
-    SessionOutboxUpdateEvent,
-    SessionOutboxUpdateReplyEvent,
-    SessionOutboxUpdateResponse,
     SessionPromptEvent,
-    SessionRenameEvent,
-    SessionRenameReplyEvent,
-    SessionRenameResponse,
+    SessionProxy,
     SessionReplyEvent,
     SessionReplyResponse,
-    SessionResetEvent,
-    SessionResetReplyEvent,
-    SessionResetResponse,
     SessionSnapshot,
-    SessionStateEvent,
-    SessionStateReplyEvent,
-    SessionStateResponse,
     SessionStreamEvent,
     SessionStreamPayload,
     parse_attachment_url,
@@ -479,21 +437,6 @@ class BusBackend:
         finally:
             self._outbox_queues.discard(queue)
 
-    async def rename(self, session_id: str, title: str) -> str:
-        """给会话改名；空标题表示恢复自动标题。"""
-        response = await self._request(
-            SessionRenameEvent.name,
-            {"title": title},
-            SessionRenameReplyEvent.name,
-            session_id=session_id,
-            timeout=10.0,
-        )
-        if not isinstance(response, SessionRenameResponse):
-            raise WebUIError("收到非预期的改名响应")
-        if not response.success:
-            raise WebUIError(response.error_msg or "改名失败")
-        return response.title
-
     def dispatch_stream(self, payload: SessionStreamPayload) -> None:
         """把流式事件推给该会话当前打开的 WebSocket。"""
         for queue in tuple(self._stream_queues.get(payload.session_id, ())):
@@ -513,18 +456,118 @@ class BusBackend:
         """当前正在运行的会话。"""
         return [item for item in self._activity.values() if item.running]
 
+    # -- 会话（统一走契约包里的 SessionProxy）--------------------------
+
+    def _session(self) -> SessionProxy:
+        """会话服务代理；总线尚未启动时明确报错。"""
+        if self._proxy is None:
+            raise WebUIError("WebUI 总线尚未启动")
+        return SessionProxy(self._proxy, timeout=self._timeout)
+
+    async def sessions(self) -> list[SessionInfo]:
+        """读取 session 服务中的会话列表。"""
+        return list((await self._session().state()).sessions)
+
+    async def snapshot(self, session_id: str) -> SessionSnapshot | None:
+        """读取会话；不存在时返回 ``None``，不会隐式创建空会话。"""
+        if not any(item.session_id == session_id for item in await self.sessions()):
+            return None
+        try:
+            return (await self._session().get(session_id)).session
+        except SessionCallError:
+            return None
+
+    async def prompt(
+        self,
+        session_id: str,
+        text: str,
+        attachments: list[SessionAttachment] | None = None,
+        *,
+        parent: int | None = None,
+        regenerate: bool = False,
+    ) -> SessionReplyResponse:
+        """发起一轮对话；失败（含取消）由应答的 ``success`` 表达，不抛异常。
+
+        ``parent`` 决定新用户消息挂在哪里（``None`` = 当前链末端）；``regenerate``
+        表示不追加用户消息、直接在 ``parent`` 下生成一条新回复（重试）。
+        """
+        if self._proxy is None:
+            raise WebUIError("WebUI 总线尚未启动")
+        payload = {
+            "text": text,
+            "attachments": [
+                item.model_dump(mode="json") for item in (attachments or [])
+            ],
+            "parent": parent,
+            "regenerate": regenerate,
+        }
+        try:
+            response = await request(
+                self._proxy,
+                SessionPromptEvent.name,
+                payload,
+                SessionReplyEvent.name,
+                session_id=session_id,
+                timeout=None,
+            )
+        except TimeoutError as error:
+            raise WebUIError("等待 Agent 响应超时") from error
+        if not isinstance(response, SessionReplyResponse):
+            raise WebUIError("收到非预期的 Agent 回复")
+        return response
+
+    async def activate(self, session_id: str, node: int) -> None:
+        """切换分支（只改指针）。"""
+        try:
+            await self._session().activate_branch(session_id, node)
+        except SessionCallError as error:
+            raise WebUIError(str(error)) from error
+
+    async def set_label(self, session_id: str, node: int, label: str) -> str:
+        """给分支起名；空串恢复序号。"""
+        try:
+            return (await self._session().label_node(session_id, node, label)).label
+        except SessionCallError as error:
+            raise WebUIError(str(error)) from error
+
+    async def delete_node(self, session_id: str, node: int) -> int:
+        """删除一条分支；返回删除条数。"""
+        try:
+            return (await self._session().delete_node(session_id, node)).removed
+        except SessionCallError as error:
+            raise WebUIError(str(error)) from error
+
+    async def get_attachment(self, digest: str) -> tuple[str, bytes] | None:
+        """按哈希取附件；不存在返回 ``None``。"""
+        try:
+            reply = await self._session().attachment(digest)
+        except SessionCallError:
+            return None
+        return reply.mime, base64.b64decode(reply.data)
+
+    async def reset(self, session_id: str) -> bool:
+        """删除会话。"""
+        try:
+            await self._session().reset(session_id)
+        except SessionCallError as error:
+            raise WebUIError(str(error)) from error
+        return True
+
+    async def rename(self, session_id: str, title: str) -> str:
+        """改名；空标题回到自动标题。"""
+        try:
+            return (await self._session().rename(session_id, title)).title
+        except SessionCallError as error:
+            raise WebUIError(str(error)) from error
+
+    # -- 发件箱 --------------------------------------------------------
+
     async def outbox(self, session_id: str) -> list[QueuedMessage]:
-        """读取该会话的待发送队列。"""
-        response = await self._request(
-            SessionOutboxListEvent.name,
-            {},
-            SessionOutboxListReplyEvent.name,
-            session_id=session_id,
-            timeout=10.0,
-        )
-        if isinstance(response, SessionOutboxListResponse):
-            return list(response.messages)
-        return []
+        """读取待发送队列。"""
+        try:
+            return list((await self._session().outbox(session_id)).messages)
+        except SessionCallError as error:
+            raise WebUIError(str(error)) from error
 
     async def update_queued(
         self,
@@ -533,86 +576,51 @@ class BusBackend:
         text: str,
         attachments: list[SessionAttachment] | None = None,
     ) -> bool:
-        """改一条排队消息的正文/附件。"""
-        response = await self._request(
-            SessionOutboxUpdateEvent.name,
-            {
-                "message_id": message_id,
-                "text": text,
-                "attachments": [
-                    item.model_dump(mode="json") for item in (attachments or [])
-                ],
-            },
-            SessionOutboxUpdateReplyEvent.name,
-            session_id=session_id,
-            timeout=10.0,
-        )
-        if not isinstance(response, SessionOutboxUpdateResponse):
-            raise WebUIError("收到非预期的队列更新响应")
-        return response.success
+        """改排队消息的正文/附件。"""
+        payload = [item.model_dump(mode="json") for item in (attachments or [])]
+        try:
+            await self._session().update_queued(session_id, message_id, text, payload)
+        except SessionCallError as error:
+            raise WebUIError(str(error)) from error
+        return True
 
     async def move_queued(self, session_id: str, message_id: str, to: str) -> bool:
-        """调整排队顺序（top/up/down）。"""
-        response = await self._request(
-            SessionOutboxMoveEvent.name,
-            {"message_id": message_id, "to": to},
-            SessionOutboxMoveReplyEvent.name,
-            session_id=session_id,
-            timeout=10.0,
-        )
-        if not isinstance(response, SessionOutboxMoveResponse):
-            raise WebUIError("收到非预期的队列重排响应")
-        return response.success
+        """调整排队顺序。"""
+        try:
+            await self._session().move_queued(session_id, message_id, to)
+        except SessionCallError as error:
+            raise WebUIError(str(error)) from error
+        return True
 
     async def send_queued_now(self, session_id: str, message_id: str) -> bool:
-        """把队列项置顶并叫醒 agent，立刻发送。"""
-        response = await self._request(
-            SessionOutboxSendNowEvent.name,
-            {"message_id": message_id},
-            SessionOutboxSendNowReplyEvent.name,
-            session_id=session_id,
-            timeout=10.0,
-        )
-        if not isinstance(response, SessionOutboxSendNowResponse):
-            raise WebUIError("收到非预期的立刻发送响应")
-        return response.success
+        """置顶并立刻发送。"""
+        try:
+            await self._session().send_queued_now(session_id, message_id)
+        except SessionCallError as error:
+            raise WebUIError(str(error)) from error
+        return True
 
     async def retry_queued(self, session_id: str, message_id: str) -> bool:
         """把失败项放回待发。"""
-        response = await self._request(
-            SessionOutboxRetryEvent.name,
-            {"message_id": message_id},
-            SessionOutboxRetryReplyEvent.name,
-            session_id=session_id,
-            timeout=10.0,
-        )
-        if not isinstance(response, SessionOutboxRetryResponse):
-            raise WebUIError("收到非预期的重试响应")
-        return response.success
+        try:
+            await self._session().retry_queued(session_id, message_id)
+        except SessionCallError as error:
+            raise WebUIError(str(error)) from error
+        return True
 
     async def clear_queued(self, session_id: str) -> int:
-        """清空队列（发送中的保留）。"""
-        response = await self._request(
-            SessionOutboxClearEvent.name,
-            {},
-            SessionOutboxClearReplyEvent.name,
-            session_id=session_id,
-            timeout=10.0,
-        )
-        if not isinstance(response, SessionOutboxClearResponse):
-            raise WebUIError("收到非预期的清空响应")
-        return response.removed
+        """清空队列；返回删除条数。"""
+        try:
+            return (await self._session().clear_outbox(session_id)).removed
+        except SessionCallError as error:
+            raise WebUIError(str(error)) from error
 
     async def remove_queued(self, session_id: str, message_id: str) -> bool:
         """取消一条排队消息。"""
-        response = await self._request(
-            SessionOutboxRemoveEvent.name,
-            {"message_id": message_id},
-            SessionOutboxRemoveReplyEvent.name,
-            session_id=session_id,
-            timeout=10.0,
-        )
-        return bool(getattr(response, "removed", False))
+        try:
+            return (await self._session().drop_queued(session_id, message_id)).removed
+        except SessionCallError as error:
+            raise WebUIError(str(error)) from error
 
     async def refresh_activity(self) -> None:
         """向 Agent 拉一次运行状态快照。
@@ -663,139 +671,6 @@ class BusBackend:
                 subscribers.discard(queue)
                 if not subscribers:
                     self._stream_queues.pop(session_id, None)
-
-    async def sessions(self) -> list[SessionInfo]:
-        """读取 session 服务中的会话列表。"""
-        response = await self._request(
-            SessionStateEvent.name,
-            {},
-            SessionStateReplyEvent.name,
-            session_id=self._runtime.member_id,
-        )
-        if not isinstance(response, SessionStateResponse):
-            raise WebUIError("收到非预期的会话状态响应")
-        if not response.success:
-            raise WebUIError(response.error_msg or "读取会话状态失败")
-        return response.sessions
-
-    async def snapshot(self, session_id: str) -> SessionSnapshot | None:
-        """读取会话；不存在时返回 ``None``，不会隐式创建空会话。"""
-        if not any(item.session_id == session_id for item in await self.sessions()):
-            return None
-        response = await self._request(
-            SessionGetEvent.name,
-            {"system_prompt": ""},
-            SessionGetReplyEvent.name,
-            session_id=session_id,
-        )
-        if not isinstance(response, SessionGetResponse):
-            raise WebUIError("收到非预期的会话读取响应")
-        if not response.success:
-            return None
-        return response.session
-
-    async def prompt(
-        self,
-        session_id: str,
-        text: str,
-        attachments: list[SessionAttachment] | None = None,
-        *,
-        parent: int | None = None,
-        regenerate: bool = False,
-    ) -> SessionReplyResponse:
-        """把用户消息（可带附件）交给 agent，并等待最终回复。"""
-        response = await self._request(
-            SessionPromptEvent.name,
-            {
-                "text": text,
-                "attachments": [
-                    attachment.model_dump(mode="json")
-                    for attachment in (attachments or [])
-                ],
-                "parent": parent,
-                "regenerate": regenerate,
-            },
-            SessionReplyEvent.name,
-            session_id=session_id,
-        )
-        if not isinstance(response, SessionReplyResponse):
-            raise WebUIError("收到非预期的 Agent 回复")
-        # 失败/中断也照原样返回：交给上层用 reply 帧表达（「已中断」不是错误，
-        # 之前一路抛异常会让前端多画一个「⚠️ 已中断」气泡，和中断那条内容重复）
-        return response
-
-    async def activate(self, session_id: str, node: int) -> None:
-        """切换当前查看的分支：只动指针，历史一条都不丢。"""
-        response = await self._request(
-            SessionBranchActivateEvent.name,
-            {"node": node},
-            SessionBranchActivateReplyEvent.name,
-            session_id=session_id,
-        )
-        if not isinstance(response, SessionBranchActivateResponse):
-            raise WebUIError("收到非预期的分支切换响应")
-        if not response.success:
-            raise WebUIError(response.error_msg or "分支切换失败")
-
-    async def set_label(self, session_id: str, node: int, label: str) -> str:
-        """给分支起名；空串恢复序号显示。"""
-        response = await self._request(
-            SessionNodeLabelEvent.name,
-            {"node": node, "label": label},
-            SessionNodeLabelReplyEvent.name,
-            session_id=session_id,
-        )
-        if not isinstance(response, SessionNodeLabelResponse):
-            raise WebUIError("收到非预期的分支改名响应")
-        if not response.success:
-            raise WebUIError(response.error_msg or "分支改名失败")
-        return response.label
-
-    async def delete_node(self, session_id: str, node: int) -> int:
-        """删除一条分支（节点与其后代）。"""
-        response = await self._request(
-            SessionNodeDeleteEvent.name,
-            {"node": node},
-            SessionNodeDeleteReplyEvent.name,
-            session_id=session_id,
-        )
-        if not isinstance(response, SessionNodeDeleteResponse):
-            raise WebUIError("收到非预期的分支删除响应")
-        if not response.success:
-            raise WebUIError(response.error_msg or "分支删除失败")
-        return response.removed
-
-    async def get_attachment(self, digest: str) -> tuple[str, bytes] | None:
-        """按内容哈希取附件；不存在返回 None。"""
-        response = await self._request(
-            SessionAttachmentGetEvent.name,
-            {"hash": digest},
-            SessionAttachmentReplyEvent.name,
-            session_id="webui.attachments",
-        )
-        if not isinstance(response, SessionAttachmentResponse):
-            raise WebUIError("收到非预期的附件响应")
-        if not response.success:
-            return None
-        try:
-            data = base64.b64decode(response.data, validate=True)
-        except (ValueError, TypeError) as error:
-            raise WebUIError(f"附件内容不是合法 base64：{error}") from error
-        return response.mime, data
-
-    async def reset(self, session_id: str) -> bool:
-        """删除会话历史。"""
-        response = await self._request(
-            SessionResetEvent.name,
-            {},
-            SessionResetReplyEvent.name,
-            session_id=session_id,
-        )
-        if not isinstance(response, SessionResetResponse):
-            raise WebUIError("收到非预期的会话重置响应")
-        if not response.success:
-            raise WebUIError(response.error_msg or "会话重置失败")
-        return True
 
     async def cancel(self, session_id: str) -> bool:
         """请求中断该会话正在进行的回复。

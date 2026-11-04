@@ -9,36 +9,13 @@ from typing import Protocol
 
 from blue_contracts_session import (
     QueuedMessage,
-    SessionAppendEvent,
-    SessionAppendReplyEvent,
-    SessionAppendResponse,
     SessionAttachmentBlob,
-    SessionAttachmentGetEvent,
-    SessionAttachmentReplyEvent,
-    SessionAttachmentResponse,
-    SessionGetEvent,
-    SessionGetReplyEvent,
-    SessionGetResponse,
-    SessionOutboxClaimEvent,
-    SessionOutboxClaimReplyEvent,
-    SessionOutboxClaimResponse,
-    SessionOutboxCompleteEvent,
-    SessionOutboxCompleteReplyEvent,
-    SessionOutboxFailEvent,
-    SessionOutboxFailReplyEvent,
-    SessionOutboxRetryEvent,
-    SessionOutboxRetryReplyEvent,
+    SessionCallError,
+    SessionProxy,
     SessionSnapshot,
-    SessionStateEvent,
-    SessionStateReplyEvent,
-    SessionStateResponse,
-    SessionUpdateEvent,
-    SessionUpdateReplyEvent,
-    SessionUpdateResponse,
 )
 from infinity_agent import Message
 from infinity_bus import EventBus
-from infinity_bus.templates.request import request
 
 from blue.errors import BlueError
 from blue.messages import encode_messages
@@ -132,99 +109,72 @@ class SessionGateway(Protocol):
 
 
 class BusSessionGateway:
-    """基于总线 RPC 的会话网关。"""
+    """基于总线 RPC 的会话网关。
+
+    「发请求 → 校验应答类型 → 判 success」这些样板全在契约包的
+    :class:`~blue_contracts_session.SessionProxy` 里；这里只表达 **agent 的语义**：
+
+    - 读路径出错（取快照、追加、更新）→ 抛 :class:`BlueError`，让这一轮失败得明确；
+    - 队列操作出错（认领/完成/失败/重试）→ 只记日志，绝不打断正在跑的回合；
+    - 附件不存在 → 返回 ``None``（agent 会把该图当"丢失"处理）。
+    """
 
     def __init__(self, *, timeout: float = 10.0) -> None:
         self._timeout = timeout
+
+    def _session(self, bus_proxy: EventBus.Proxy) -> SessionProxy:
+        """每次调用构造一个轻量代理（它是无状态的，只是带上出口与超时）。"""
+        return SessionProxy(bus_proxy, timeout=self._timeout)
+
+    # -- 发件箱 --------------------------------------------------------
 
     async def claim(
         self, bus_proxy: EventBus.Proxy, session_id: str
     ) -> QueuedMessage | None:
         """认领队首一条待发送消息（pending → sending）。"""
-        response = await self._outbox_call(
-            bus_proxy,
-            SessionOutboxClaimEvent.name,
-            {},
-            SessionOutboxClaimReplyEvent.name,
-            session_id,
-        )
-        if isinstance(response, SessionOutboxClaimResponse):
-            return response.message
-        return None
+        try:
+            reply = await self._session(bus_proxy).claim_queued(session_id)
+        except Exception:
+            logger.warning("会话 %s 认领队列失败", session_id, exc_info=True)
+            return None
+        return reply.message
 
     async def complete(self, bus_proxy: EventBus.Proxy, message_id: str) -> None:
         """认领的消息跑完了：从队列删除。"""
-        await self._outbox_call(
-            bus_proxy,
-            SessionOutboxCompleteEvent.name,
-            {"message_id": message_id},
-            SessionOutboxCompleteReplyEvent.name,
-            None,
-        )
+        await self._outbox(bus_proxy, "complete_queued", message_id)
 
     async def fail(
         self, bus_proxy: EventBus.Proxy, message_id: str, error: str
     ) -> None:
         """认领的消息失败了：留错误原因，等自动/人工重试。"""
-        await self._outbox_call(
-            bus_proxy,
-            SessionOutboxFailEvent.name,
-            {"message_id": message_id, "error": error[:500]},
-            SessionOutboxFailReplyEvent.name,
-            None,
-        )
+        await self._outbox(bus_proxy, "fail_queued", message_id, error[:500])
 
     async def retry(
         self, bus_proxy: EventBus.Proxy, session_id: str, message_id: str
     ) -> None:
         """把失败项放回待发。"""
-        await self._outbox_call(
-            bus_proxy,
-            SessionOutboxRetryEvent.name,
-            {"message_id": message_id},
-            SessionOutboxRetryReplyEvent.name,
-            session_id,
-        )
+        await self._outbox(bus_proxy, "retry_queued", session_id, message_id)
 
     async def queued_sessions(self, bus_proxy: EventBus.Proxy) -> list[str]:
         """哪些会话还有待发消息（启动时恢复队列泵）。"""
         try:
-            reply = await request(
-                bus_proxy,
-                SessionStateEvent.name,
-                {},
-                SessionStateReplyEvent.name,
-                session_id="agent.outbox",
-                timeout=5.0,
-            )
+            reply = await self._session(bus_proxy).state()
         except Exception:
             logger.warning("读取会话状态失败（恢复队列泵）", exc_info=True)
             return []
-        if isinstance(reply, SessionStateResponse):
-            return [info.session_id for info in reply.sessions if info.queued > 0]
-        return []
+        return [info.session_id for info in reply.sessions if info.queued > 0]
 
-    async def _outbox_call(
-        self,
-        bus_proxy: EventBus.Proxy,
-        request_event: str,
-        payload: dict[str, object],
-        reply_event: str,
-        session_id: str | None,
-    ) -> object:
-        """发一个队列操作请求；失败只记日志，不打断调用方。"""
+    async def _outbox(
+        self, bus_proxy: EventBus.Proxy, action: str, *args: object
+    ) -> None:
+        """调一个队列操作；失败只记日志。"""
+        method = getattr(self._session(bus_proxy), action)
         try:
-            return await request(
-                bus_proxy,
-                request_event,
-                payload,
-                reply_event,
-                session_id=session_id or "agent.outbox",
-                timeout=10.0,
-            )
+            await method(*args)
         except Exception:
-            logger.warning("队列操作 %s 失败", request_event, exc_info=True)
-            return None
+            logger.warning("队列操作 %s 失败", action, exc_info=True)
+
+    # -- 会话读写 ------------------------------------------------------
 
     async def ensure(
         self,
@@ -233,21 +183,13 @@ class BusSessionGateway:
         system_prompt: str,
     ) -> SessionSnapshot:
         """取/建会话并返回快照。"""
-        response = await request(
-            bus_proxy,
-            SessionGetEvent.name,
-            {"system_prompt": system_prompt},
-            SessionGetReplyEvent.name,
-            session_id=session_id,
-            timeout=self._timeout,
-        )
-        if not isinstance(response, SessionGetResponse):
-            raise BlueError("收到非预期的会话获取响应类型")
-        if not response.success:
-            raise BlueError(response.error_msg or "会话获取失败")
-        if response.session is None:
+        try:
+            reply = await self._session(bus_proxy).get(session_id, system_prompt)
+        except SessionCallError as error:
+            raise BlueError(str(error) or "会话获取失败") from error
+        if reply.session is None:
             raise BlueError("会话服务返回了空快照")
-        return response.session
+        return reply.session
 
     async def append(
         self,
@@ -257,46 +199,31 @@ class BusSessionGateway:
         attachments: Iterable[SessionAttachmentBlob] = (),
         parent: int | None = None,
     ) -> list[int]:
-        """追加消息；附件与消息在同一次 RPC 里提交，由会话库按哈希去重。"""
+        """追加消息；附件与消息在同一次 RPC 里提交，由会话库按哈希去重。
+
+        :return: 新节点的 id，按插入顺序；末尾那个就是新的链尾
+        """
         blobs = [blob.model_dump(mode="json") for blob in attachments]
-        response = await request(
-            bus_proxy,
-            SessionAppendEvent.name,
-            {
-                "messages": encode_messages(messages),
-                "attachments": blobs,
-                "parent": parent,
-            },
-            SessionAppendReplyEvent.name,
-            session_id=session_id,
-            timeout=self._timeout,
-        )
-        if not isinstance(response, SessionAppendResponse):
-            raise BlueError("收到非预期的会话追加响应类型")
-        if not response.success:
-            raise BlueError(response.error_msg or "会话追加失败")
-        return list(response.nodes)
+        try:
+            reply = await self._session(bus_proxy).append(
+                session_id, encode_messages(messages), blobs, parent=parent
+            )
+        except SessionCallError as error:
+            raise BlueError(str(error) or "会话追加失败") from error
+        return list(reply.nodes)
 
     async def get_attachment(
         self, bus_proxy: EventBus.Proxy, digest: str
     ) -> AttachmentPayload | None:
-        """按内容哈希取附件；服务端回失败时视为不存在。"""
-        response = await request(
-            bus_proxy,
-            SessionAttachmentGetEvent.name,
-            {"hash": digest},
-            SessionAttachmentReplyEvent.name,
-            timeout=self._timeout,
-        )
-        if not isinstance(response, SessionAttachmentResponse):
-            raise BlueError("收到非预期的附件响应类型")
-        if not response.success:
-            return None
+        """按内容哈希取附件；不存在返回 ``None``。"""
+        try:
+            reply = await self._session(bus_proxy).attachment(digest)
+        except SessionCallError as error:
+            if "不存在" in str(error):
+                return None
+            raise BlueError(str(error) or "附件读取失败") from error
         return AttachmentPayload(
-            hash=response.hash,
-            mime=response.mime,
-            size=response.size,
-            data=response.data,
+            hash=reply.hash, mime=reply.mime, size=reply.size, data=reply.data
         )
 
     async def update(
@@ -306,15 +233,7 @@ class BusSessionGateway:
         steps: int,
     ) -> None:
         """更新会话步数。"""
-        response = await request(
-            bus_proxy,
-            SessionUpdateEvent.name,
-            {"steps": steps, "touch": True},
-            SessionUpdateReplyEvent.name,
-            session_id=session_id,
-            timeout=self._timeout,
-        )
-        if not isinstance(response, SessionUpdateResponse):
-            raise BlueError("收到非预期的会话更新响应类型")
-        if not response.success:
-            raise BlueError(response.error_msg or "会话更新失败")
+        try:
+            await self._session(bus_proxy).update(session_id, steps, touch=True)
+        except SessionCallError as error:
+            raise BlueError(str(error) or "会话更新失败") from error
