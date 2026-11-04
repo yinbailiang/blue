@@ -37,6 +37,8 @@ from blue.control.state import LockInfo, StateStore
 from blue.errors import BlueError
 from blue.runtime import RUNTIME_CONFIG_VERSION
 
+logger = logging.getLogger(__name__)
+
 __all__ = ["main"]
 
 
@@ -48,7 +50,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     try:
         match args.command:
             case "up":
-                return _up(config_path)
+                return _up(config_path, foreground=bool(args.foreground))
             case "apply":
                 return _apply(
                     config_path,
@@ -64,6 +66,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                     tail=int(args.tail),
                     follow=bool(args.follow),
                 )
+            case "_supervise":
+                return _up(config_path, foreground=True)
             case "down":
                 return _down(config_path, timeout=float(args.timeout))
             case "config-check":
@@ -95,11 +99,53 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 130
 
 
-def _up(config_path: str) -> int:
-    """前台运行 supervisor，直到收到 SIGINT / SIGTERM。"""
+def _up(config_path: str, *, foreground: bool = False) -> int:
+    """拉起调谐器进程。
+
+    默认**后台常驻**：``up`` 直接返回，调谐器独立成进程（新会话），因此
+    ``apply`` 可以让它 ``execv`` 重启自己来吃下 SDK 改动，不需要再 ``down``/``up``。
+    ``--foreground`` 保留旧行为（容器/调试里有用）。
+    """
     desired = load_desired(config_path)
-    asyncio.run(_run_supervisor(desired))
+    if foreground:
+        asyncio.run(_run_supervisor(desired))
+        return 0
+
+    state = StateStore(desired.supervisor.state_dir)
+    running, info = state.supervisor_running()
+    if running and info is not None:
+        print(f"supervisor 已在运行（pid={info.pid}）")
+        return 0
+
+    pid = _spawn_detached(config_path)
+    print(f"supervisor 已启动（pid={pid}）")
+    print(f"  日志：{state.log_dir}")
+    print("  改完配置用 blue apply 生效；停止用 blue down")
     return 0
+
+
+def _spawn_detached(config_path: str) -> int:
+    """以新会话拉起 ``blue _supervise``，把 PID 返回给调用方。
+
+    双 fork + ``setsid``：调谐器不再是终端的子进程，关掉终端也不会被 SIGHUP 带走；
+    它的 stdout/stderr 落到 ``.blue/logs/supervisor.log``。
+    """
+    desired = load_desired(config_path)
+    state = StateStore(desired.supervisor.state_dir)
+    state.ensure_dirs()
+    log_path = state.log_dir / "supervisor.log"
+    command = [sys.executable, "-m", "blue", "_supervise", str(desired.config_path)]
+    with log_path.open("ab") as log:
+        process = subprocess.Popen(
+            command,
+            stdin=subprocess.DEVNULL,
+            stdout=log,
+            stderr=subprocess.STDOUT,
+            start_new_session=True,
+            cwd=str(desired.base_dir),
+            env=dict(os.environ),
+        )
+    return process.pid
 
 
 async def _run_supervisor(desired: DesiredState) -> None:
@@ -122,23 +168,64 @@ async def _run_supervisor(desired: DesiredState) -> None:
 
     stop = asyncio.Event()
     reload_requested = asyncio.Event()
+    restart_requested = asyncio.Event()
     loop = asyncio.get_running_loop()
     for sig in (signal.SIGINT, signal.SIGTERM):
         with suppress(NotImplementedError):
             loop.add_signal_handler(sig, stop.set)
     with suppress(NotImplementedError, AttributeError):
         loop.add_signal_handler(signal.SIGHUP, reload_requested.set)
+    with suppress(NotImplementedError, AttributeError):
+        # SIGUSR1 = "你的代码变了，重启自己"：光重载配置换不掉正在跑的实现
+        loop.add_signal_handler(signal.SIGUSR1, restart_requested.set)
 
     await supervisor.start()
+    reexec = False
     try:
         while not stop.is_set():
             with suppress(TimeoutError):
                 await asyncio.wait_for(stop.wait(), timeout=0.2)
+            if restart_requested.is_set():
+                restart_requested.clear()
+                if await _maybe_self_restart(desired, supervisor):
+                    reexec = True
+                    break
             if reload_requested.is_set():
                 reload_requested.clear()
                 supervisor.request_reload()
     finally:
         await supervisor.stop()
+    if reexec:
+        _exec_self(desired)
+
+
+async def _maybe_self_restart(desired: DesiredState, supervisor: Supervisor) -> bool:
+    """代码真的变了才 execv；没变（比如误发信号）就只是重载配置。
+
+    判据用**磁盘上重新编译**的 SDK 指纹，而不是锁文件里的——锁文件是上一个镜像写的。
+    """
+    try:
+        fresh = load_desired(desired.config_path)
+    except BlueError as error:
+        logger.error("自重启检查失败（配置有问题），改为重载：%s", error)
+        supervisor.request_reload()
+        return False
+    if fresh.sdk.source_hash == supervisor.desired.sdk.source_hash:
+        logger.info("收到自重启信号，但 blue 代码未变化——按重载处理")
+        supervisor.request_reload()
+        return False
+    logger.info("blue 代码已变化，准备重启自己（全部服务会重新拉起）")
+    return True
+
+
+def _exec_self(desired: DesiredState) -> None:
+    """用新代码替换当前进程：PID 不变、锁不丢，服务随后按新代码全部拉起。"""
+    argv = [sys.executable, "-m", "blue", "_supervise", str(desired.config_path)]
+    logger.info("execv 重启调谐器：%s", " ".join(argv))
+    with suppress(OSError):
+        sys.stdout.flush()
+        sys.stderr.flush()
+    os.execv(sys.executable, argv)
 
 
 def _apply(config_path: str, *, wait: bool, timeout: float) -> int:
@@ -148,12 +235,15 @@ def _apply(config_path: str, *, wait: bool, timeout: float) -> int:
     running, info = state.supervisor_running()
     if not running or info is None:
         raise BlueError("supervisor 未运行；请先执行 blue up")
-    _ensure_supervisor_compatible(info)
+    restart = _needs_self_restart(info, desired=desired)
     try:
-        os.kill(info.pid, signal.SIGHUP)
+        os.kill(info.pid, signal.SIGUSR1 if restart else signal.SIGHUP)
     except ProcessLookupError as error:
         raise BlueError(f"supervisor 进程不存在：{info.pid}") from error
-    print(f"已通知 supervisor 重新加载（pid={info.pid}）")
+    if restart:
+        print(f"blue 代码已变化：已通知 supervisor 重启自己（pid={info.pid}）")
+    else:
+        print(f"已通知 supervisor 重新加载（pid={info.pid}）")
 
     if wait:
         deadline = time.monotonic() + timeout
@@ -170,23 +260,24 @@ def _apply(config_path: str, *, wait: bool, timeout: float) -> int:
     return 0
 
 
-def _ensure_supervisor_compatible(info: LockInfo) -> None:
-    """拒绝向配置格式或代码版本不一致的 supervisor 发送重载信号。"""
+def _needs_self_restart(info: LockInfo, *, desired: DesiredState) -> bool:
+    """运行中的调谐器是否需要**重启自己**（而不是热重载配置）。
+
+    三种情况必须自重启：blue 代码/SDK 指纹变了、包版本变了、运行时配置格式变了。
+    它们都换不掉一个**已经在跑的** Python 进程里的代码——只能 ``execv``。
+    只改服务配置/服务源码时返回 ``False``（SIGHUP 即可）。
+    """
+    if info.config_version != RUNTIME_CONFIG_VERSION:
+        return True
     current_version = _blue_version()
-    config_mismatch = info.config_version != RUNTIME_CONFIG_VERSION
-    version_mismatch = bool(
+    if (
         info.blue_version
         and current_version != "unknown"
         and info.blue_version != current_version
-    )
-    if not (config_mismatch or version_mismatch):
-        return
-    raise BlueError(
-        "运行中的 supervisor 与当前 blue 版本不一致，无法安全热重载"
-        f"（supervisor：blue={info.blue_version or '未知'}，"
-        f"配置格式 v{info.config_version}；当前：blue={current_version}，"
-        f"配置格式 v{RUNTIME_CONFIG_VERSION}）；请执行 blue down && blue up 后重试"
-    )
+    ):
+        return True
+    sdk_now = desired.sdk.source_hash
+    return bool(info.sdk_hash) and bool(sdk_now) and info.sdk_hash != sdk_now
 
 
 def _status(config_path: str, *, as_json: bool) -> int:
@@ -710,7 +801,12 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--verbose", "-v", action="store_true", help="输出 DEBUG 日志")
     subparsers = parser.add_subparsers(dest="command", required=True)
 
-    subparsers.add_parser("up", help="前台运行 supervisor")
+    up_parser = subparsers.add_parser("up", help="后台拉起调谐器（默认）")
+    up_parser.add_argument(
+        "--foreground",
+        action="store_true",
+        help="前台运行（容器/调试用；Ctrl-C 即停）",
+    )
 
     apply_parser = subparsers.add_parser("apply", help="重新加载配置")
     apply_parser.add_argument(

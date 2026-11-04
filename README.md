@@ -465,6 +465,35 @@ BLUE_BUS_URL=amqp://guest:guest@127.0.0.1:5672/blue \
 > **网络提示**：`weather` 会向 `wttr.in` 发起 HTTPS 请求；如需换源或镜像，
 > 在 `blue.infd` 里传 `WeatherService(base_url = ..., timeout = ...)`。
 
+## 调谐器是独立进程，能重启自己
+
+`blue up` 默认**后台拉起独立的调谐器进程**（`start_new_session`，日志落
+`.blue/logs/supervisor.log`），命令立刻返回：
+
+```
+$ blue up
+supervisor 已启动（pid=12345）
+  日志：.blue/logs
+  改完配置用 blue apply 生效；停止用 blue down
+```
+
+`--foreground` 保留旧行为（容器/调试用）。
+
+**为什么必须独立**：`apply` 要用上新的 SDK 代码，而一个已经在跑的 Python 进程
+换不掉自己的实现。现在 `apply` 会按情况选信号：
+
+| 变化 | 信号 | 调谐器做什么 |
+|---|---|---|
+| 服务配置 / 服务源码 / 契约 | `SIGHUP` | 重载配置，**只重启受影响的服务** |
+| **blue SDK / 蓝本版本 / 配置格式** | `SIGUSR1` | 优雅停掉全部服务 → `execv` 自己（PID 不变、锁不丢）→ 按新代码全部拉起 |
+
+**不会无限重启**：自重启时锁文件里写的是**新** SDK 指纹，下一次 `apply` 比对相同
+→ 走 SIGHUP，不再重启。也就是"一次 apply 只重启一次"。
+
+> 迁移提示：从旧版本升上来时，**运行中的调谐器还是旧代码**（没有 SIGUSR1 处理），
+> 所以升级后需要 `blue down && blue up` 一次；此后 `apply` 即可自理，不用再手动
+> 停起。
+
 ## 变更追踪：契约、服务包、SDK 三件都算
 
 `blue plan` / 调谐器判断「要不要重启」时比对三样东西：

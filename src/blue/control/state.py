@@ -33,6 +33,13 @@ class LockInfo(BaseModel):
     config_version: int = 0
     """运行时配置格式版本；旧版锁文件没有该字段。"""
 
+    sdk_hash: str = ""
+    """启动 supervisor 时的 blue SDK 指纹；用它判断"调谐器自己的代码变没变"。
+
+    代码变了就必须让 supervisor **重启自己**（execv）：它自己的 Python 进程里装的是
+    旧代码，SIGHUP 重载配置也换不掉正在跑的实现。
+    """
+
 
 class StateStore:
     """维护 ``.blue/`` 下的锁、状态文件与日志目录。"""
@@ -78,6 +85,7 @@ class StateStore:
         *,
         generation: str,
         blue_version: str = "",
+        sdk_hash: str = "",
         config_version: int = 0,
     ) -> LockInfo:
         """获取单实例锁并写入 PID 与版本信息。
@@ -102,6 +110,7 @@ class StateStore:
             started_at=time.time(),
             generation=generation,
             blue_version=blue_version,
+            sdk_hash=sdk_hash,
             config_version=config_version,
         )
         handle.seek(0)

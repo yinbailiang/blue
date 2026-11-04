@@ -190,10 +190,10 @@ def test_apply_without_supervisor_returns_error(tmp_path: Path) -> None:
     assert main(["--config", str(_config(tmp_path)), "apply"]) == 2
 
 
-def test_apply_rejects_old_config_format(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+def test_apply_asks_self_restart_when_config_format_is_old(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """运行中的 supervisor 配置格式过旧时拒绝热重载。"""
+    """配置格式过旧 → 让调谐器重启自己（不再要求人工 down/up）。"""
     config = _config(tmp_path)
     store = StateStore(tmp_path / ".blue")
     store.acquire(
@@ -201,32 +201,48 @@ def test_apply_rejects_old_config_format(
         blue_version="0.1.0",
         config_version=RUNTIME_CONFIG_VERSION - 1,
     )
+    signals: list[int] = []
+
+    def fake_kill(pid: int, sig: int) -> None:
+        if sig != 0:
+            signals.append(sig)
+
+    monkeypatch.setattr("blue.cli.os.kill", fake_kill)
     try:
         code = main(["--config", str(config), "apply"])
     finally:
         store.release()
 
-    assert code == 2
-    assert "blue down && blue up" in capsys.readouterr().err
+    assert code == 0
+    assert signals == [signal.SIGUSR1]
+    assert "重启自己" in capsys.readouterr().out
 
 
-def test_apply_rejects_blue_version_mismatch(
+def test_apply_asks_self_restart_on_blue_version_mismatch(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """代码版本不同也不允许热重载。"""
+    """blue 版本不同 → 自重启（SIGUSR1）。"""
     config = _config(tmp_path)
     monkeypatch.setattr("blue.cli._blue_version", lambda: "9.9.9")
     store = StateStore(tmp_path / ".blue")
     store.acquire(
         generation="gen-1", blue_version="0.0.0", config_version=RUNTIME_CONFIG_VERSION
     )
+    signals: list[int] = []
+
+    def fake_kill(pid: int, sig: int) -> None:
+        if sig != 0:
+            signals.append(sig)
+
+    monkeypatch.setattr("blue.cli.os.kill", fake_kill)
     try:
         code = main(["--config", str(config), "apply"])
     finally:
         store.release()
 
-    assert code == 2
-    assert "blue down && blue up" in capsys.readouterr().err
+    assert code == 0
+    assert signals == [signal.SIGUSR1]
+    assert "重启自己" in capsys.readouterr().out
 
 
 def test_apply_signals_compatible_supervisor(
@@ -268,3 +284,58 @@ def test_real_config_check(capsys: pytest.CaptureFixture[str]) -> None:
     assert code == 0
     assert "agent" in output
     assert "bus" in output
+
+
+def test_apply_asks_self_restart_only_when_sdk_hash_differs(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """SDK 指纹变了才自重启；没变就只重载——这是「不会无限重启」的关键。
+
+    apply 一次：指纹不同 → SIGUSR1 → 新镜像把新指纹写进锁；
+    再 apply 一次：指纹相同 → SIGHUP → 不再重启。一次 apply 只重启一次。
+    """
+    from blue.cli import _needs_self_restart  # pyright: ignore[reportPrivateUsage]
+    from blue.config import load_desired
+    from blue.control.state import LockInfo
+
+    # 用仓库真实配置：`src/blue` 只在项目根下才存在，SDK 指纹才有值
+    desired = load_desired(ROOT / "blue.infd")
+    old = LockInfo(
+        pid=1,
+        started_at=0.0,
+        generation="g",
+        blue_version="",
+        config_version=RUNTIME_CONFIG_VERSION,
+        sdk_hash="stale-hash",
+    )
+    same = LockInfo(
+        pid=1,
+        started_at=0.0,
+        generation="g",
+        blue_version="",
+        config_version=RUNTIME_CONFIG_VERSION,
+        sdk_hash=desired.sdk.source_hash,
+    )
+    assert _needs_self_restart(old, desired=desired) is True
+    assert _needs_self_restart(same, desired=desired) is False
+
+
+def test_exec_self_uses_the_supervise_subcommand(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """自重启走 ``blue _supervise <config>``：PID 不变、锁不丢。"""
+    from blue.cli import _exec_self  # pyright: ignore[reportPrivateUsage]
+    from blue.config import load_desired
+
+    config = _config(tmp_path)
+    desired = load_desired(config)
+    captured: list[tuple[str, list[str]]] = []
+
+    def fake_execv(path: str, argv: list[str]) -> None:
+        captured.append((path, list(argv)))
+        raise SystemExit(0)
+
+    monkeypatch.setattr("blue.cli.os.execv", fake_execv)
+    with pytest.raises(SystemExit):
+        _exec_self(desired)
+    assert captured and captured[0][1][-2:] == ["_supervise", str(desired.config_path)]

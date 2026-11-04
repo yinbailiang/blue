@@ -135,6 +135,7 @@ class Supervisor:
         self._state.acquire(
             generation=self._desired.generation,
             blue_version=self._blue_version,
+            sdk_hash=self._desired.sdk.source_hash,
             config_version=RUNTIME_CONFIG_VERSION,
         )
         try:
