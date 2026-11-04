@@ -247,6 +247,8 @@ class FakeBackend:
                 ),
             ):
                 self.stream_queue.put_nowait(payload)
+            # 让「watch 泵」把这几帧推完再返回，测试才能断言帧的顺序与次数
+            await asyncio.sleep(0.05)
         return SessionReplyResponse(
             session_id=session_id,
             request_id="req-1",

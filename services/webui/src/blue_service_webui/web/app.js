@@ -66,8 +66,12 @@
       nodes: [],
       chain: [],
       busy: false,
+      busyLabel: "",
       liveMessage: null,
       cancelled: false,
+      /* 已收尾的 request_id：晚到的增量直接丢弃，避免快照之后又追加一遍 */
+      lastRequestId: "",
+      closedRequests: new Set(),
       outbox: [],
       pendingAttachments: [],
       unread: 0,
@@ -172,20 +176,61 @@
    * 流式增量只 patch 变化的节点，避免整表 innerHTML 重建导致
    * 滚动抖动、折叠状态丢失与复制按钮复位。
    */
+  /*
+   * 渲染缓存：消息 key → DOM 节点。服务端消息用树节点 id 做 key，本地乐观/流式
+   * 消息用临时 key。这样「快照替换对象」「窗口滑动」「增量追加」都只是复用 / 新增 /
+   * 移除个别节点，不会整屏重建——整屏重建会让所有气泡重放入场动画（肉眼=闪烁）。
+   */
   const view = {
-    messages: [],
-    nodes: [],
-    signatures: [],
+    byKey: new Map(),
+    signatures: new Map(),
     parts: new WeakMap(),
-    start: -1,
   };
 
+  let localKeySeq = 0;
+
+  /** 消息的稳定 key：有树节点 id 用 id，没有就发一个本地 key。 */
+  function messageKey(message) {
+    const id = message.id;
+    if (id !== undefined && id !== null && id !== "") return `n${id}`;
+    if (!message.__key) {
+      localKeySeq += 1;
+      message.__key = `l${localKeySeq}`;
+    }
+    return message.__key;
+  }
+
+  /** 树结构（分支数、当前分支）变了要重画气泡脚注：复用节点后不会再整屏重建。 */
+  function refreshMessageFeet() {
+    for (const node of view.byKey.values()) {
+      const message = node.__message;
+      const main = node.querySelector(".message-main");
+      if (!message || !main) continue;
+      main.querySelector(".message-foot")?.remove();
+      const foot = createFoot(message);
+      if (foot) main.appendChild(foot);
+    }
+  }
+
   function resetView() {
-    view.messages = [];
-    view.nodes = [];
-    view.signatures = [];
-    view.start = -1;
+    view.byKey.clear();
+    view.signatures.clear();
     els.messageList.replaceChildren();
+  }
+
+  /** 只移动位置不对的节点；已经在位的跳过，避免无谓的 DOM 抖动与动画重启。 */
+  function placeInOrder(nodes) {
+    let cursor = els.messageList.firstElementChild;
+    while (cursor && cursor.classList.contains("load-earlier")) {
+      cursor = cursor.nextElementSibling;
+    }
+    for (const node of nodes) {
+      if (node === cursor) {
+        cursor = cursor.nextElementSibling;
+        continue;
+      }
+      els.messageList.insertBefore(node, cursor || null);
+    }
   }
 
   function readJson(key, fallback) {
@@ -347,10 +392,22 @@
   }
 
   /** 只刷新「当前会话」相关的忙碌 UI：按钮、输入态、提示条。 */
+  /**
+   * 思考药丸只在「会话忙、但还没有可见气泡」时出现。
+   * 一旦 live 气泡建起来，气泡本身就是进度指示器；两个同时显示就成了「双消息」。
+   */
+  function refreshTyping() {
+    const session = cur();
+    const live = Boolean(
+      session.liveMessage && session.messages.includes(session.liveMessage),
+    );
+    els.typing.hidden = !(session.busy && session.id !== null && !live);
+    els.typingLabel.textContent = session.busyLabel || "Agent 正在思考…";
+  }
+
   function applyBusyChrome(busy, label) {
-    const stuck = busy && cur().id !== null;
-    els.typing.hidden = !stuck;
-    els.typingLabel.textContent = label;
+    cur().busyLabel = label;
+    refreshTyping();
     els.send.classList.toggle("loading", busy && Boolean(state.sessionId));
     els.sendIcon.setAttribute("href", busy && state.sessionId ? "#i-target" : "#i-send");
     els.sendLabel.textContent = busy && state.sessionId ? "停止" : "发送";
@@ -1015,13 +1072,6 @@
     } else updateUserNode(parts, message);
   }
 
-  function mountMessage(message, names) {
-    const node = createMessageNode(message, names);
-    els.messageList.appendChild(node);
-    view.nodes.push(node);
-    view.messages.push(message);
-    view.signatures.push(messageSignature(message));
-  }
 
   /** 一次渲染的尾部条数；更早的消息由「加载更早」按需追加。 */
   const WINDOW_SIZE = 60;
@@ -1038,48 +1088,46 @@
     const slice = visibleSlice();
     const messages = slice.messages;
     if (!messages.length) {
+      resetView();
       showWelcome(true);
       return;
     }
     showWelcome(false);
     els.messageList.hidden = false;
-
-    // 窗口起点变了（切会话/加载更早）：整段重建，索引不能复用
-    if (view.start !== slice.start) {
-      resetView();
-      view.start = slice.start;
-    }
     renderEarlierButton(slice.hidden);
 
-    let common = 0;
-    while (
-      common < messages.length &&
-      common < view.messages.length &&
-      messages[common] === view.messages[common]
-    ) {
-      common += 1;
-    }
-
     const names = toolNameIndex(messages);
-    if (common < view.messages.length) {
-      resetView();
-      messages.forEach((message) => mountMessage(message, names));
-    } else {
-      for (let index = common; index < messages.length; index += 1) {
-        mountMessage(messages[index], names);
+    const wanted = [];
+    const keep = new Set();
+    for (const message of messages) {
+      const key = messageKey(message);
+      keep.add(key);
+      let node = view.byKey.get(key);
+      if (!node) {
+        node = createMessageNode(message, names);
+        node.__message = message;
+        view.byKey.set(key, node);
+        view.signatures.set(node, messageSignature(message));
+      } else {
+        node.__message = message;
+        const signature = messageSignature(message);
+        if (view.signatures.get(node) !== signature) {
+          view.signatures.set(node, signature);
+          updateMessageNode(node, message, names);
+        }
       }
-      for (let index = 0; index < common; index += 1) {
-        const signature = messageSignature(messages[index]);
-        if (signature === view.signatures[index]) continue;
-        view.signatures[index] = signature;
-        updateMessageNode(view.nodes[index], messages[index], names);
-      }
+      wanted.push(node);
     }
 
-    const live = cur().messages.find((message) => message.live);
-    if (live && (live.content || live.reasoning_content || live.tool_calls?.length)) {
-      els.typing.hidden = true;
+    for (const [key, node] of [...view.byKey]) {
+      if (keep.has(key)) continue;
+      node.remove();
+      view.signatures.delete(node);
+      view.byKey.delete(key);
     }
+    placeInOrder(wanted);
+
+    refreshTyping();
     if (options.scroll) scrollToBottom(options.force === true);
   }
 
@@ -1112,11 +1160,49 @@
    * 快照落到「它自己那个会话」的 store 里。后台会话的快照只更新缓存，
    * 不抢当前视图——这正是多会话并行不串台的关键。
    */
+  /**
+   * 快照替换消息数组时，把「本地乐观/流式气泡」的 DOM 节点过户给对应的服务端节点。
+   *
+   * 本地消息用临时 key，服务端消息用节点 id；不过户的话这一对会被判成「删旧建新」，
+   * 气泡会重新播放入场动画——用户看到的就是每轮结束闪一下。
+   */
+  function adoptProvisionalNodes(session, nextMessages) {
+    const locals = session.messages.filter(
+      (message) => !message.id || message.id === "",
+    );
+    if (!locals.length) return;
+    const used = new Set();
+    for (const local of locals) {
+      const localKey = messageKey(local);
+      const node = view.byKey.get(localKey);
+      if (!node) continue;
+      const text = String(local.content || "");
+      const target = nextMessages.find((message) => {
+        if (!message.id || used.has(message.id)) return false;
+        if (message.role !== local.role) return false;
+        const other = String(message.content || "");
+        if (!text) return other === "";
+        return other === text || other.startsWith(text.slice(0, 24));
+      });
+      if (!target) continue;
+      used.add(target.id);
+      view.byKey.delete(localKey);
+      view.byKey.set(messageKey(target), node);
+      const signature = messageSignature(target);
+      view.signatures.set(node, signature);
+      node.__message = target;
+    }
+  }
+
   function applySnapshot(snapshot, options = {}) {
     if (!snapshot) return;
     const session = store(snapshot.session_id);
     session.title = String(snapshot.title || session.title || "");
-    session.messages = Array.isArray(snapshot.messages) ? snapshot.messages : [];
+    const nextMessages = Array.isArray(snapshot.messages) ? snapshot.messages : [];
+    if (state.sessionId === snapshot.session_id) {
+      adoptProvisionalNodes(session, nextMessages);
+    }
+    session.messages = nextMessages;
     session.nodes = Array.isArray(snapshot.nodes) ? snapshot.nodes : [];
     session.chain = Array.isArray(snapshot.current) ? snapshot.current : [];
     session.liveMessage = null;
@@ -1141,6 +1227,7 @@
     if (state.sessionId === snapshot.session_id) {
       els.chatTitle.textContent = titleFor(snapshot.session_id);
       renderMessages({ scroll: true, force: options.force === true });
+      refreshMessageFeet();
     }
     renderSessions();
   }
@@ -1776,6 +1863,17 @@
   /* ------------------------------------------------------------------ */
   /* WebSocket                                                          */
   /* ------------------------------------------------------------------ */
+  /** 断线后自动重连（1s→2s→4s，上限 8s）；重连成功会重新订阅会话并拉一次快照。 */
+  function scheduleReconnect() {
+    if (state.reconnectTimer) return;
+    const delay = Math.min(state.reconnectDelay || 1000, 8000);
+    state.reconnectDelay = delay * 2;
+    state.reconnectTimer = window.setTimeout(() => {
+      state.reconnectTimer = null;
+      void ensureSocket().catch(() => {});
+    }, delay);
+  }
+
   function ensureSocket() {
     if (state.socket?.readyState === WebSocket.OPEN) return Promise.resolve(state.socket);
     if (state.socketPromise) return state.socketPromise;
@@ -1789,16 +1887,29 @@
       }, 5000);
       socket.onopen = () => {
         window.clearTimeout(timer);
+        const reconnected = state.everConnected === true;
+        state.everConnected = true;
         state.socket = socket;
         state.socketPromise = null;
+        state.reconnectDelay = 1000;
+        window.clearTimeout(state.reconnectTimer);
+        state.reconnectTimer = null;
         setSocketOnline(true, "实时连接");
         resolve(socket);
+        if (reconnected) {
+          // 断线期间的事件都丢了：重新订阅 + 后台拉一遍，别让界面停在旧状态
+          watchers.clear();
+          syncWatch();
+          void refreshSessions();
+          if (state.sessionId) void refreshSession(state.sessionId);
+        }
       };
       socket.onmessage = handleSocketMessage;
       socket.onerror = () => {
         window.clearTimeout(timer);
         state.socketPromise = null;
         setSocketOnline(false, "离线");
+        scheduleReconnect();
         reject(new Error("实时连接失败"));
       };
       socket.onclose = () => {
@@ -1822,7 +1933,8 @@
         }
         applyBusyChrome(false, "");
         renderSessions();
-        if (wasBusy) toast("实时连接已断开，请重试", "error");
+        if (wasBusy) toast("实时连接已断开，正在重连…", "error");
+        scheduleReconnect();
       };
     });
     return state.socketPromise;
@@ -1839,6 +1951,17 @@
       return last;
     }
     return null;
+  }
+
+  /** 标记该会话当前这轮请求已收尾；之后同 request_id 的增量一律丢弃。 */
+  function closeRequest(session) {
+    const requestId = session.lastRequestId;
+    if (!requestId) return;
+    session.closedRequests.add(requestId);
+    while (session.closedRequests.size > 8) {
+      const oldest = session.closedRequests.values().next().value;
+      session.closedRequests.delete(oldest);
+    }
   }
 
   function beginStreamStep(session) {
@@ -1860,6 +1983,8 @@
     };
     session.messages.push(message);
     session.liveMessage = message;
+    // 有气泡了立刻收掉「Agent 正在思考…」，否则两个指示器会同时占屏
+    if (session === cur()) refreshTyping();
     touchSession(session);
     return message;
   }
@@ -1888,6 +2013,11 @@
   }
 
   function handleStreamEvent(session, event) {
+    const requestId = String(event.request_id || "");
+    if (requestId) {
+      if (session.closedRequests.has(requestId)) return;
+      session.lastRequestId = requestId;
+    }
     const kind = event.kind;
     if (kind === "queued") {
       // 同一会话已有请求在跑（可能是另一台设备/另一个标签页）：进入等待态
@@ -2099,23 +2229,42 @@
     }
     if (frame.type === "cancelled") {
       const session = frameSession(frame) || cur();
-      if (session.liveMessage?.live) session.liveMessage.live = false;
+      closeRequest(session);
+      if (session.liveMessage) {
+        // 本地那半截气泡交给服务端快照（它才是真相），别和「已中断」那条并存
+        session.liveMessage.live = false;
+        const index = session.messages.indexOf(session.liveMessage);
+        if (index >= 0) session.messages.splice(index, 1);
+      }
       session.liveMessage = null;
       session.cancelled = true;
       setSessionBusy(session, false);
       toast("已中断生成", "info");
       if (session === cur()) renderMessages({ scroll: true, force: state.stickToBottom });
+      if (session.id) void refreshSession(session.id);
       return;
     }
     if (frame.type === "reply") {
       const session = frameSession(frame) || cur();
+      closeRequest(session);
       setSessionBusy(session, false);
       const wasCancelled = session.cancelled;
       session.cancelled = false;
       if (wasCancelled) {
-        // 中断提示已由 cancelled 帧给出，这里不再重复报错
+        // 中断提示已由 cancelled 帧给出，这里不再重复报错、也不再补气泡
       } else if (frame.success === false) {
-        toast(frame.text || "Agent 处理失败", "error");
+        // 真失败才在对话里留一条记号，并且只留一条
+        const reason = frame.text || "Agent 处理失败";
+        const last = session.messages.at(-1);
+        if (!(last?.role === "assistant" && String(last.content || "").startsWith("⚠️"))) {
+          session.messages.push({
+            role: "assistant",
+            content: `⚠️ ${reason}`,
+            tool_calls: [],
+          });
+          if (session === cur()) renderMessages({ scroll: true, force: true });
+        }
+        toast(reason, "error");
       } else {
         if (session === cur() && !session.liveMessage?.content) {
           appendAssistantText(frame.text);
@@ -2127,6 +2276,7 @@
     if (frame.type === "session") {
       const id = frame.session?.session_id;
       const isCurrent = !id || id === state.sessionId;
+      if (id) closeRequest(store(id));
       applySnapshot(frame.session, { force: state.stickToBottom });
       if (id) setSessionBusy(store(id), false);
       if (isCurrent && state.sessionId) applyBusyChrome(false, "");

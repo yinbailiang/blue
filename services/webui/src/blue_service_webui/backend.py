@@ -712,8 +712,8 @@ class BusBackend:
         )
         if not isinstance(response, SessionReplyResponse):
             raise WebUIError("收到非预期的 Agent 回复")
-        if not response.success:
-            raise WebUIError(response.error_msg or "Agent 处理失败")
+        # 失败/中断也照原样返回：交给上层用 reply 帧表达（「已中断」不是错误，
+        # 之前一路抛异常会让前端多画一个「⚠️ 已中断」气泡，和中断那条内容重复）
         return response
 
     async def activate(self, session_id: str, node: int) -> None:

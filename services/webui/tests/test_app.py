@@ -116,6 +116,8 @@ def test_chat_websocket_streams_reply() -> None:
     stream_kinds = [
         frame["event"]["kind"] for frame in frames if frame["type"] == "stream"
     ]
+    # 每个增量只能出现一次：多一路转发（watch 与 prompt 各订阅一份）就会翻倍，
+    # 前端会把同一段文字追加两遍（"海洋海洋潮潮汐汐" 那种）
     assert stream_kinds == ["step_start", "text", "text"]
     reply = next(frame for frame in frames if frame["type"] == "reply")
     assert reply["text"] == "收到：ping"

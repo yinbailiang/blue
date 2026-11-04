@@ -393,6 +393,19 @@ def create_app(*, backend: WebBackend, config: WebUIConfig) -> FastAPI:
         reader = asyncio.create_task(
             _read_frames(websocket, frames), name="webui.reader"
         )
+
+        def ensure_watcher(session_id: str) -> None:
+            """确保这条连接上只有**一个**该会话的流转发器。
+
+            之前 prompt 自己订阅了一份流、watch 又订阅一份，同一份增量会被推
+            两遍，前端把每个 delta 追加两次（表现成整段文字重复一遍）。
+            """
+            if session_id and session_id not in watchers:
+                watchers[session_id] = asyncio.create_task(
+                    _watch_stream(sender, backend, session_id),
+                    name=f"webui.watch.{session_id}",
+                )
+
         try:
             while True:
                 frame = await frames.get()
@@ -409,6 +422,7 @@ def create_app(*, backend: WebBackend, config: WebUIConfig) -> FastAPI:
                         continue
                     # 不再拦截「上一轮还在进行中」：会话忙时 agent 会把消息放进
                     # outbox 并立刻回 queued，前端据此显示待发送队列。
+                    ensure_watcher(request.session_id)
                     task = asyncio.create_task(
                         _stream_prompt(
                             sender,
@@ -418,7 +432,6 @@ def create_app(*, backend: WebBackend, config: WebUIConfig) -> FastAPI:
                             request.attachments,
                             parent=request.parent,
                             regenerate=request.regenerate,
-                            poll_interval=config.poll_interval,
                         ),
                         name=f"webui.prompt.{request.session_id}",
                     )
@@ -432,12 +445,7 @@ def create_app(*, backend: WebBackend, config: WebUIConfig) -> FastAPI:
                                 {"type": "cancelled", "session_id": session_id}
                             )
                 elif kind == "watch":
-                    session_id = str(frame.get("session_id") or "")
-                    if session_id and session_id not in watchers:
-                        watchers[session_id] = asyncio.create_task(
-                            _watch_stream(sender, backend, session_id),
-                            name=f"webui.watch.{session_id}",
-                        )
+                    ensure_watcher(str(frame.get("session_id") or ""))
                 elif kind == "unwatch":
                     session_id = str(frame.get("session_id") or "")
                     watcher = watchers.pop(session_id, None)
@@ -550,9 +558,11 @@ async def _stream_prompt(
     *,
     parent: int | None = None,
     regenerate: bool = False,
-    poll_interval: float,
 ) -> None:
-    """执行一轮 prompt，并把 Agent 实时流、最终回复与快照推给浏览器。
+    """执行一轮 prompt，并把状态、最终回复与快照推给浏览器。
+
+    **实时流不在这里转发**：同一条连接上 `_watch_stream` 是唯一的转发器。
+    两边都订阅会把每个增量推两遍，前端就会把文字追加两次。
 
     取消由连接主循环处理（``type=cancel`` 帧），这里只管把这一轮跑完。
     """
@@ -564,71 +574,43 @@ async def _stream_prompt(
             "label": "Agent 正在思考…",
         }
     )
-    async with backend.subscribe(session_id) as stream:
-        prompt_task = asyncio.create_task(
-            backend.prompt(
-                session_id, text, attachments, parent=parent, regenerate=regenerate
-            )
+    prompt_task = asyncio.create_task(
+        backend.prompt(
+            session_id, text, attachments, parent=parent, regenerate=regenerate
         )
-        stream_task = asyncio.create_task(stream.get())
-        try:
-            while True:
-                done, _ = await asyncio.wait(
-                    {prompt_task, stream_task},
-                    timeout=max(poll_interval * 5.0, 2.0),
-                    return_when=asyncio.FIRST_COMPLETED,
+    )
+    try:
+        reply = await prompt_task
+        if reply.queued:
+            # 会话忙：消息已进后端队列，本轮没有真正开始
+            await sender.send({"type": "queued_ack", "session_id": session_id})
+            return
+        await sender.send(
+            {
+                "type": "reply",
+                "session_id": session_id,
+                "success": reply.success,
+                "text": reply.text,
+                "steps": reply.steps,
+            }
+        )
+        with contextlib.suppress(BlueError):
+            snapshot = await backend.snapshot(session_id)
+            if snapshot is not None:
+                await sender.send(
+                    {
+                        "type": "session",
+                        "session": serialize_snapshot(snapshot).model_dump(mode="json"),
+                    }
                 )
-                if stream_task in done:
-                    payload = stream_task.result()
-                    await sender.send(_stream_frame(session_id, payload))
-                    stream_task = asyncio.create_task(stream.get())
-                if prompt_task in done:
-                    if stream_task.done() and not stream_task.cancelled():
-                        payload = stream_task.result()
-                    else:
-                        try:
-                            payload = await asyncio.wait_for(stream_task, timeout=0.1)
-                        except TimeoutError:
-                            payload = None
-                    if payload is not None:
-                        await sender.send(_stream_frame(session_id, payload))
-                    while not stream.empty():
-                        pending = stream.get_nowait()
-                        await sender.send(_stream_frame(session_id, pending))
-                    break
-
-            reply = await prompt_task
-            if reply.queued:
-                # 会话忙：消息已进后端队列，本轮没有真正开始
-                await sender.send({"type": "queued_ack", "session_id": session_id})
-                return
-            await sender.send(
-                {
-                    "type": "reply",
-                    "session_id": session_id,
-                    "success": reply.success,
-                    "text": reply.text,
-                    "steps": reply.steps,
-                }
-            )
-            with contextlib.suppress(BlueError):
-                snapshot = await backend.snapshot(session_id)
-                if snapshot is not None:
-                    await sender.send(
-                        {
-                            "type": "session",
-                            "session": serialize_snapshot(snapshot).model_dump(
-                                mode="json"
-                            ),
-                        }
-                    )
-        except asyncio.CancelledError:
-            raise
-        except (BlueError, TimeoutError) as error:
-            await sender.send({"type": "error", "message": str(error)})
-        finally:
-            for task in (stream_task, prompt_task):
-                if not task.done():
-                    task.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await asyncio.gather(stream_task, prompt_task, return_exceptions=True)
+    except asyncio.CancelledError:
+        raise
+    except (BlueError, TimeoutError) as error:
+        await sender.send(
+            {"type": "error", "session_id": session_id, "message": str(error)}
+        )
+    finally:
+        if not prompt_task.done():
+            prompt_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await asyncio.gather(prompt_task, return_exceptions=True)
