@@ -96,6 +96,9 @@ def test_project_root_falls_back_to_cwd(
 ) -> None:
     """没有基础设施配置时退回进程当前目录。"""
     monkeypatch.delenv("BLUE_CONFIG_FILE", raising=False)
+    # 在 supervisor 拉起的服务进程里跑测试时，这个变量还在，会被当成「由
+    # supervisor 启动」而拒绝回退；清掉才能模拟单进程手工运行
+    monkeypatch.delenv("BLUE_SERVICE_NAME", raising=False)
     monkeypatch.chdir(tmp_path)
     assert shell.project_root() == tmp_path.resolve()
 

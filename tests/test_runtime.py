@@ -82,6 +82,9 @@ def test_runtime_config_path_defaults_to_cwd(
 ) -> None:
     """未配置环境变量时使用 cwd 下的默认文件名。"""
     monkeypatch.delenv("BLUE_CONFIG_FILE", raising=False)
+    # 在 supervisor 拉起的服务进程里跑测试时，这个变量还在，会被当成「由
+    # supervisor 启动」而拒绝回退；清掉才能模拟单进程手工运行
+    monkeypatch.delenv("BLUE_SERVICE_NAME", raising=False)
     monkeypatch.chdir(tmp_path)
 
     assert runtime_config_path() == (tmp_path / DEFAULT_RUNTIME_CONFIG).resolve()
@@ -122,6 +125,9 @@ def test_project_root_falls_back_to_cwd(
 ) -> None:
     """没有基础设施配置时回退进程当前目录。"""
     monkeypatch.delenv("BLUE_CONFIG_FILE", raising=False)
+    # 在 supervisor 拉起的服务进程里跑测试时，这个变量还在，会被当成「由
+    # supervisor 启动」而拒绝回退；清掉才能模拟单进程手工运行
+    monkeypatch.delenv("BLUE_SERVICE_NAME", raising=False)
     monkeypatch.chdir(tmp_path)
 
     assert project_root() == tmp_path.resolve()
@@ -223,6 +229,9 @@ def test_registry_ttl_defaults_when_missing(
 ) -> None:
     """没有基础设施配置时回退缺省租约（15 秒）。"""
     monkeypatch.delenv("BLUE_CONFIG_FILE", raising=False)
+    # 在 supervisor 拉起的服务进程里跑测试时，这个变量还在，会被当成「由
+    # supervisor 启动」而拒绝回退；清掉才能模拟单进程手工运行
+    monkeypatch.delenv("BLUE_SERVICE_NAME", raising=False)
     monkeypatch.chdir(tmp_path)
 
     assert runtime.registry_ttl() == 15.0
@@ -278,6 +287,9 @@ def test_infra_config_falls_back_for_manual_run_without_section(
 ) -> None:
     """手工运行时缺少 infra 段仍回退开发默认值。"""
     monkeypatch.delenv("BLUE_CONFIG_FILE", raising=False)
+    # 在 supervisor 拉起的服务进程里跑测试时，这个变量还在，会被当成「由
+    # supervisor 启动」而拒绝回退；清掉才能模拟单进程手工运行
+    monkeypatch.delenv("BLUE_SERVICE_NAME", raising=False)
     monkeypatch.delenv("BLUE_SERVICE_NAME", raising=False)
     monkeypatch.chdir(tmp_path)
     (tmp_path / DEFAULT_RUNTIME_CONFIG).write_text(
