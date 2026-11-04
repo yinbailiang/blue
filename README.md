@@ -278,6 +278,10 @@ services/<name>/service_runtime_config.json
   "llm_connect_timeout": 10.0,
   "llm_retries": 1,
   "llm_http_retries": 3,
+  "compact_history": true,
+  "compact_keep_messages": 60,
+  "compact_text_chars": 200,
+  "compact_error_chars": 600,
   "session_timeout": 10.0,
   "system_prompt": "你是 blue，一个通过工具完成任务的智能体。",
   "tool_timeout": 30.0
@@ -306,6 +310,13 @@ services/<name>/service_runtime_config.json
   推过零个增量，重放安全）；已经出字后中断则不重放，改为把已生成内容落库；
 - `llm_http_retries`：HTTP 层重试（429/5xx，由底层客户端退避），与
   `llm_retries` 是两套机制；
+- `compact_history`（默认 `true`）：发送前压缩历史里的工具往返。blue 的工具
+  结果几乎都是 JSON，所以按**字段**投影而不是猜文本：`path`/`exit_code`/
+  `success` 原样保留，`stdout`/`content` 截成「开头 + `…[N chars omitted]`」，
+  失败时额外保留结尾（错误通常在尾部），列表只留前几条，`write_file` 的正文
+  直接省略（文件已落盘）。**只压较早的消息**，尾部 `compact_keep_messages`
+  （默认 60 条 ≈ 最近 2–3 轮）原样发送——模型正在用的工具结果不能被截断。
+  只影响发给模型的副本，库里始终是完整历史，需要细节时可以再读；
 - `database_path` 为相对路径时解析到 `BLUE_STATE_DIR`，默认
   `.blue/sessions.db`；
 - **`prune_enabled` 默认 `false`：不会自动删除任何会话或附件**，磁盘占满前

@@ -52,6 +52,18 @@ class AgentConfig(BaseModel):
         ),
     )
     session_timeout: float = Field(default=10.0, gt=0)
+    compact_history: bool = Field(
+        default=True, description="发送前压缩历史里的工具往返（不改持久化数据）"
+    )
+    compact_keep_messages: int = Field(
+        default=60, ge=0, description="尾部保留原文的消息条数（最近几轮不动）"
+    )
+    compact_text_chars: int = Field(
+        default=200, ge=20, description="成功结果里大文本字段保留的字符数"
+    )
+    compact_error_chars: int = Field(
+        default=600, ge=0, description="失败结果额外保留的结尾字符数"
+    )
 
     def resolve_api_key(self) -> str:
         """取模型访问密钥。

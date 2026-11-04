@@ -65,6 +65,7 @@ from blue_service_agent.attachments import (
     tool_attachment_parts,
 )
 from blue_service_agent.catalog import ToolCatalogClient
+from blue_service_agent.compact import compact_history, estimate_chars
 from blue_service_agent.config import AgentConfig
 from blue_service_agent.history import (
     interrupted_reply,
@@ -316,6 +317,23 @@ class AgentCore:
                 # 历史可能带着进程中断遗留的悬空 tool_calls，
                 # 直接回灌会被模型接口以 400 拒收
                 messages = sanitize_history(decode_messages(snapshot.messages))
+                if self._settings.compact_history:
+                    before = estimate_chars(messages)
+                    messages = compact_history(
+                        messages,
+                        keep_messages=self._settings.compact_keep_messages,
+                        text_chars=self._settings.compact_text_chars,
+                        error_chars=self._settings.compact_error_chars,
+                    )
+                    after = estimate_chars(messages)
+                    if before > after:
+                        logger.info(
+                            "历史压缩：%s 条消息，%s → %s 字符（−%s%%）",
+                            len(messages),
+                            before,
+                            after,
+                            round((1 - after / before) * 100),
+                        )
                 user_message, attachment_blobs = build_user_message(
                     payload.text, payload.attachments
                 )
