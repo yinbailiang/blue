@@ -34,13 +34,28 @@ from blue_contracts_session import (
     SessionNodeDeleteEvent,
     SessionNodeDeleteReplyEvent,
     SessionNodeDeleteResponse,
+    SessionOutboxClearEvent,
+    SessionOutboxClearReplyEvent,
+    SessionOutboxClearResponse,
     SessionOutboxEvent,
     SessionOutboxListEvent,
     SessionOutboxListReplyEvent,
     SessionOutboxListResponse,
+    SessionOutboxMoveEvent,
+    SessionOutboxMoveReplyEvent,
+    SessionOutboxMoveResponse,
     SessionOutboxPayload,
     SessionOutboxRemoveEvent,
     SessionOutboxRemoveReplyEvent,
+    SessionOutboxRetryEvent,
+    SessionOutboxRetryReplyEvent,
+    SessionOutboxRetryResponse,
+    SessionOutboxSendNowEvent,
+    SessionOutboxSendNowReplyEvent,
+    SessionOutboxSendNowResponse,
+    SessionOutboxUpdateEvent,
+    SessionOutboxUpdateReplyEvent,
+    SessionOutboxUpdateResponse,
     SessionPromptEvent,
     SessionRenameEvent,
     SessionRenameReplyEvent,
@@ -311,6 +326,32 @@ class WebBackend(Protocol):
         """给会话改名；空标题表示恢复自动标题。"""
         ...
 
+    async def update_queued(
+        self,
+        session_id: str,
+        message_id: str,
+        text: str,
+        attachments: list[SessionAttachment] | None = None,
+    ) -> bool:
+        """改一条排队消息的正文/附件。"""
+        ...
+
+    async def move_queued(self, session_id: str, message_id: str, to: str) -> bool:
+        """调整排队顺序（top/up/down）。"""
+        ...
+
+    async def send_queued_now(self, session_id: str, message_id: str) -> bool:
+        """把队列项置顶并叫醒 agent，立刻发送。"""
+        ...
+
+    async def retry_queued(self, session_id: str, message_id: str) -> bool:
+        """把失败项放回待发。"""
+        ...
+
+    async def clear_queued(self, session_id: str) -> int:
+        """清空队列（发送中的保留）。"""
+        ...
+
     def subscribe_outbox(
         self,
     ) -> AbstractAsyncContextManager[asyncio.Queue[SessionOutboxPayload]]:
@@ -476,6 +517,83 @@ class BusBackend:
         if isinstance(response, SessionOutboxListResponse):
             return list(response.messages)
         return []
+
+    async def update_queued(
+        self,
+        session_id: str,
+        message_id: str,
+        text: str,
+        attachments: list[SessionAttachment] | None = None,
+    ) -> bool:
+        """改一条排队消息的正文/附件。"""
+        response = await self._request(
+            SessionOutboxUpdateEvent.name,
+            {
+                "message_id": message_id,
+                "text": text,
+                "attachments": [
+                    item.model_dump(mode="json") for item in (attachments or [])
+                ],
+            },
+            SessionOutboxUpdateReplyEvent.name,
+            session_id=session_id,
+            timeout=10.0,
+        )
+        if not isinstance(response, SessionOutboxUpdateResponse):
+            raise WebUIError("收到非预期的队列更新响应")
+        return response.success
+
+    async def move_queued(self, session_id: str, message_id: str, to: str) -> bool:
+        """调整排队顺序（top/up/down）。"""
+        response = await self._request(
+            SessionOutboxMoveEvent.name,
+            {"message_id": message_id, "to": to},
+            SessionOutboxMoveReplyEvent.name,
+            session_id=session_id,
+            timeout=10.0,
+        )
+        if not isinstance(response, SessionOutboxMoveResponse):
+            raise WebUIError("收到非预期的队列重排响应")
+        return response.success
+
+    async def send_queued_now(self, session_id: str, message_id: str) -> bool:
+        """把队列项置顶并叫醒 agent，立刻发送。"""
+        response = await self._request(
+            SessionOutboxSendNowEvent.name,
+            {"message_id": message_id},
+            SessionOutboxSendNowReplyEvent.name,
+            session_id=session_id,
+            timeout=10.0,
+        )
+        if not isinstance(response, SessionOutboxSendNowResponse):
+            raise WebUIError("收到非预期的立刻发送响应")
+        return response.success
+
+    async def retry_queued(self, session_id: str, message_id: str) -> bool:
+        """把失败项放回待发。"""
+        response = await self._request(
+            SessionOutboxRetryEvent.name,
+            {"message_id": message_id},
+            SessionOutboxRetryReplyEvent.name,
+            session_id=session_id,
+            timeout=10.0,
+        )
+        if not isinstance(response, SessionOutboxRetryResponse):
+            raise WebUIError("收到非预期的重试响应")
+        return response.success
+
+    async def clear_queued(self, session_id: str) -> int:
+        """清空队列（发送中的保留）。"""
+        response = await self._request(
+            SessionOutboxClearEvent.name,
+            {},
+            SessionOutboxClearReplyEvent.name,
+            session_id=session_id,
+            timeout=10.0,
+        )
+        if not isinstance(response, SessionOutboxClearResponse):
+            raise WebUIError("收到非预期的清空响应")
+        return response.removed
 
     async def remove_queued(self, session_id: str, message_id: str) -> bool:
         """取消一条排队消息。"""

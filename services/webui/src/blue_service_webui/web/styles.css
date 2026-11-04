@@ -2322,19 +2322,24 @@ details[open] > summary > .chevron {
 }
 
 /* 待发送队列：等宽、贴输入区上方，占满时内部滚动 */
+/*
+ * 发件箱：宽度、圆角、边框与输入框保持一致，直接坐在输入框正上方，
+ * 看上去就是「输入框的延伸」而不是另起一块。
+ */
 .outbox {
   display: flex;
   flex-direction: column;
-  gap: 3px;
-  max-height: 28vh;
+  gap: 6px;
+  width: min(920px, 100%);
+  max-height: 32vh;
   overflow-y: auto;
-  margin: 0 0 8px;
-  padding: 6px 8px;
-  border: 1px dashed var(--border);
-  border-radius: 10px;
+  margin: 0 auto 8px;
+  padding: 8px 10px 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
   background: var(--panel);
-  font-family: var(--mono);
-  font-size: 11.5px;
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.08);
+  font-size: 12px;
   line-height: 1.5;
 }
 
@@ -2342,41 +2347,150 @@ details[open] > summary > .chevron {
   display: none;
 }
 
+.outbox-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding-bottom: 6px;
+  border-bottom: 1px solid var(--border);
+}
+
+.outbox-title {
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+}
+
+.outbox-actions {
+  display: flex;
+  gap: 6px;
+}
+
+.outbox-actions button,
+.outbox-ops button {
+  padding: 2px 9px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: transparent;
+  color: var(--text-dim);
+  font-family: inherit;
+  font-size: 11px;
+  cursor: pointer;
+  transition: background 140ms ease, color 140ms ease, border-color 140ms ease;
+}
+
+.outbox-actions button:hover,
+.outbox-ops button:hover {
+  border-color: var(--border-strong);
+  background: var(--accent-soft);
+  color: var(--text);
+}
+
+.outbox-actions button[data-act="outbox-clear"]:hover {
+  border-color: transparent;
+  background: var(--danger-soft);
+  color: var(--danger);
+}
+
+.outbox-list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
 .outbox-item {
   display: flex;
   align-items: center;
   gap: 8px;
   min-width: 0;
+  padding: 3px 2px;
+  border-radius: var(--radius-sm);
   color: var(--text-dim);
 }
 
+.outbox-item:hover {
+  background: var(--panel-raised);
+}
+
+.outbox-item[data-state="sending"] .outbox-state {
+  color: var(--accent-strong);
+}
+
+.outbox-item[data-state="failed"] .outbox-state {
+  color: var(--danger);
+}
+
 .outbox-index {
-  flex: 0 0 auto;
+  flex: 0 0 18px;
   color: var(--muted);
+  font-size: 10.5px;
+  font-variant-numeric: tabular-nums;
+  text-align: right;
 }
 
 .outbox-text {
   flex: 1 1 auto;
   min-width: 0;
   overflow: hidden;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: inherit;
+  font-family: inherit;
+  font-size: inherit;
   white-space: nowrap;
+  text-align: left;
   text-overflow: ellipsis;
+  cursor: text;
 }
 
-.outbox-remove {
-  flex: 0 0 auto;
-  padding: 0 6px;
-  border: none;
-  border-radius: 6px;
-  background: transparent;
-  color: var(--muted);
-  font-family: var(--mono);
-  font-size: 13px;
-  line-height: 1.2;
-  cursor: pointer;
-}
-
-.outbox-remove:hover {
-  background: var(--surface-hover, rgba(255, 255, 255, 0.08));
+.outbox-text:hover {
   color: var(--text);
+}
+
+.outbox-input {
+  flex: 1 1 auto;
+  min-width: 0;
+  padding: 2px 8px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  background: var(--bg-soft);
+  color: var(--text);
+  font-family: inherit;
+  font-size: inherit;
+}
+
+.outbox-input:focus {
+  outline: 2px solid var(--accent-soft);
+  outline-offset: 1px;
+}
+
+.outbox-state {
+  flex: 0 0 auto;
+  color: var(--muted);
+  font-size: 10.5px;
+  white-space: nowrap;
+}
+
+.outbox-ops {
+  display: flex;
+  flex: 0 0 auto;
+  gap: 4px;
+  opacity: 0;
+  transition: opacity 140ms ease;
+}
+
+.outbox-item:hover .outbox-ops,
+.outbox-item:focus-within .outbox-ops {
+  opacity: 1;
+}
+
+.outbox-ops button {
+  padding: 1px 7px;
+  font-size: 10.5px;
 }

@@ -1198,6 +1198,7 @@
     try {
       const snapshot = await api(`/api/sessions/${encodeURIComponent(sessionId)}`);
       applySnapshot(snapshot, { force: true });
+      void refreshOutbox(sessionId);
     } catch (error) {
       if (options.silent) {
         localStorage.removeItem("blue.session");
@@ -1384,6 +1385,7 @@
    * options.regenerate 表示只重新生成回复（重试某条消息）。
    */
   async function sendPrompt(rawText, options = {}) {
+    // 会话正忙：这一轮不会立刻开始，先按「排队」处理（消息进后端发件箱）
     const regenerate = options.regenerate === true;
     const parent = options.parent ?? null;
     const text = String(rawText || "").trim();
@@ -1594,32 +1596,137 @@
     renderSessions();
   }
 
+  /*
+   * 发件箱：和输入框同宽同风格，放在它正上方。
+   * 每条显示状态（待发/发送中/失败原因），可立刻发送、重试、取消，点正文可改。
+   */
+  function outboxStateLabel(item) {
+    if (item.state === "sending") return "发送中";
+    if (item.state === "failed") return "失败";
+    return "待发送";
+  }
+
   function renderOutbox() {
     if (!els.outbox) return;
     const items = cur().outbox;
     els.outbox.hidden = items.length === 0;
     els.outbox.innerHTML = "";
+    if (!items.length) return;
+
+    const busyCount = items.filter((item) => item.state === "sending").length;
+    const head = document.createElement("div");
+    head.className = "outbox-head";
+    head.innerHTML = `
+      <span class="outbox-title">发件箱 · ${items.length} 条${
+        busyCount ? `（${busyCount} 条发送中）` : ""
+      }</span>
+      <span class="outbox-actions">
+        <button type="button" data-act="outbox-send-now" title="把排在最前面的那条立刻发出去">立即发送</button>
+        <button type="button" data-act="outbox-clear" title="取消全部待发送（发送中的保留）">全部取消</button>
+      </span>`;
+    els.outbox.appendChild(head);
+
+    const list = document.createElement("ol");
+    list.className = "outbox-list";
     items.forEach((item, index) => {
-      const row = document.createElement("div");
+      const row = document.createElement("li");
       row.className = "outbox-item";
+      row.dataset.queue = item.id;
+      row.dataset.state = item.state || "pending";
+
       const number = document.createElement("span");
       number.className = "outbox-index";
       number.textContent = `${index + 1}`;
-      const body = document.createElement("span");
+
+      const body = document.createElement("button");
+      body.type = "button";
       body.className = "outbox-text";
-      const preview = String(item.text || "").replace(/\s+/g, " ").slice(0, 120);
-      const count = (item.attachments || []).length;
-      body.textContent = preview || "[图片]";
-      if (count) body.textContent += ` (+${count} 图)`;
-      const remove = document.createElement("button");
-      remove.type = "button";
-      remove.className = "outbox-remove";
-      remove.textContent = "×";
-      remove.title = "取消这条待发送消息";
-      remove.addEventListener("click", () => void dropQueued(item.id));
-      row.append(number, body, remove);
-      els.outbox.append(row);
+      body.dataset.act = "outbox-edit";
+      const preview = String(item.text || "").replace(/\s+/g, " ").trim();
+      const images = (item.attachments || []).length;
+      body.textContent = preview || (images ? "[图片]" : "(空消息)");
+      if (images) body.textContent += ` · ${images} 张图`;
+      body.title = "点击修改这条待发送消息";
+
+      const state = document.createElement("span");
+      state.className = "outbox-state";
+      state.textContent = outboxStateLabel(item);
+      if (item.state === "failed" && item.error) state.title = item.error;
+      if (item.attempts > 1) state.textContent += ` · 第 ${item.attempts} 次`;
+
+      const ops = document.createElement("span");
+      ops.className = "outbox-ops";
+      const addOp = (act, label, title) => {
+        const button = document.createElement("button");
+        button.type = "button";
+        button.dataset.act = act;
+        button.title = title;
+        button.textContent = label;
+        ops.appendChild(button);
+      };
+      if (item.state === "failed") addOp("outbox-retry", "重试", "重新排进待发送");
+      if (item.state !== "sending") addOp("outbox-now", "立刻", "置顶并马上发送");
+      addOp("outbox-drop", "✕", "取消这条");
+
+      row.append(number, body, state, ops);
+      list.appendChild(row);
     });
+    els.outbox.appendChild(list);
+  }
+
+  /** 发件箱的写操作统一走这里：调接口 → 用返回的队列刷新。 */
+  async function outboxAction(path, options = {}, successText = "") {
+    const sessionId = state.sessionId;
+    if (!sessionId) return;
+    try {
+      const payload = await api(
+        `/api/sessions/${encodeURIComponent(sessionId)}${path}`,
+        options,
+      );
+      applyOutbox(sessionId, payload.messages || []);
+      if (successText) toast(successText, "success");
+    } catch (error) {
+      toast(`发件箱操作失败：${error.message}`, "error");
+    }
+  }
+
+  /** 点正文就地改：Enter 保存、Esc 取消。 */
+  function beginEditQueued(row, item) {
+    if (row.querySelector("input.outbox-input")) return;
+    const body = row.querySelector(".outbox-text");
+    if (!body) return;
+    const input = document.createElement("input");
+    input.className = "outbox-input";
+    input.type = "text";
+    input.maxLength = 100_000;
+    input.value = String(item.text || "");
+    body.replaceWith(input);
+    input.focus();
+    input.select();
+    let done = false;
+    const finish = async (save) => {
+      if (done) return;
+      done = true;
+      const text = input.value.trim();
+      if (!save || text === String(item.text || "")) {
+        renderOutbox();
+        return;
+      }
+      await outboxAction(
+        `/outbox/${encodeURIComponent(item.id)}`,
+        { method: "PATCH", body: JSON.stringify({ text }) },
+      );
+    };
+    input.addEventListener("keydown", (event) => {
+      if (event.key === "Enter") {
+        event.preventDefault();
+        void finish(true);
+      } else if (event.key === "Escape") {
+        event.preventDefault();
+        void finish(false);
+      }
+    });
+    input.addEventListener("blur", () => void finish(true));
   }
 
   /** 拉取某个会话的队列；默认当前会话。 */
@@ -2214,6 +2321,60 @@
       if (!item) return;
       event.preventDefault();
       void loadSession(item.dataset.session);
+    });
+
+    /*
+     * 发件箱：全部取消 / 立即发送 / 单条立刻 / 重试 / 取消 / 改正文。
+     * 用一处事件委托，队列每次重渲染也不用重新绑。
+     */
+    els.outbox.addEventListener("click", async (event) => {
+      const action = event.target.closest("[data-act]");
+      if (!action) return;
+      const row = action.closest("[data-queue]");
+      const messageId = row?.dataset.queue || "";
+      const item = cur().outbox.find((entry) => entry.id === messageId);
+      const act = action.dataset.act;
+      if (act === "outbox-edit" && item && row) {
+        beginEditQueued(row, item);
+        return;
+      }
+      if (act === "outbox-clear") {
+        if (!cur().outbox.length) return;
+        await outboxAction("/outbox", { method: "DELETE" }, "已取消全部待发送");
+        return;
+      }
+      if (act === "outbox-send-now") {
+        const first = cur().outbox.find((entry) => entry.state !== "sending");
+        if (!first) {
+          toast("没有可发送的排队消息", "info");
+          return;
+        }
+        await outboxAction(
+          `/outbox/${encodeURIComponent(first.id)}/send-now`,
+          { method: "POST" },
+          "已置顶，马上发送",
+        );
+        return;
+      }
+      if (!messageId) return;
+      if (act === "outbox-now") {
+        await outboxAction(
+          `/outbox/${encodeURIComponent(messageId)}/send-now`,
+          { method: "POST" },
+          "已置顶，马上发送",
+        );
+      } else if (act === "outbox-retry") {
+        await outboxAction(
+          `/outbox/${encodeURIComponent(messageId)}/retry`,
+          { method: "POST" },
+          "已重新排队",
+        );
+      } else if (act === "outbox-drop") {
+        await outboxAction(
+          `/outbox/${encodeURIComponent(messageId)}`,
+          { method: "DELETE" },
+        );
+      }
     });
 
     els.messageList.addEventListener("click", async (event) => {

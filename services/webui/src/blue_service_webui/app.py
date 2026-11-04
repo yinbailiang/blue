@@ -6,7 +6,7 @@ import asyncio
 import contextlib
 import re
 from pathlib import Path
-from typing import Any, cast
+from typing import Any, Literal, cast
 
 from blue_contracts_session import (
     QueuedMessage,
@@ -83,6 +83,18 @@ class RenameRequest(BaseModel):
     """会话改名请求（空标题表示恢复自动标题）。"""
 
     title: str = Field(default="", max_length=80, description="新标题；空 = 自动")
+
+
+class QueueText(BaseModel):
+    """改排队消息正文。"""
+
+    text: str = Field(default="", max_length=100_000)
+
+
+class QueueMove(BaseModel):
+    """调整排队顺序。"""
+
+    to: Literal["top", "up", "down"] = Field(default="top")
 
 
 class SessionsResponse(BaseModel):
@@ -175,6 +187,67 @@ def create_app(*, backend: WebBackend, config: WebUIConfig) -> FastAPI:
             return OutboxResponse(messages=await backend.outbox(session_id))
         except BlueError as error:
             raise HTTPException(status_code=503, detail=str(error)) from error
+
+    @app.patch(
+        "/api/sessions/{session_id}/outbox/{message_id}",
+        response_model=OutboxResponse,
+    )
+    async def edit_queued(
+        session_id: str, message_id: str, request: QueueText
+    ) -> OutboxResponse:
+        """改一条排队消息的正文，返回最新队列。"""
+        try:
+            await backend.update_queued(session_id, message_id, request.text)
+        except BlueError as error:
+            raise HTTPException(status_code=503, detail=str(error)) from error
+        return OutboxResponse(messages=await backend.outbox(session_id))
+
+    @app.post(
+        "/api/sessions/{session_id}/outbox/{message_id}/move",
+        response_model=OutboxResponse,
+    )
+    async def move_queued(
+        session_id: str, message_id: str, request: QueueMove
+    ) -> OutboxResponse:
+        """调整排队顺序（置顶/上移/下移）。"""
+        try:
+            await backend.move_queued(session_id, message_id, request.to)
+        except BlueError as error:
+            raise HTTPException(status_code=503, detail=str(error)) from error
+        return OutboxResponse(messages=await backend.outbox(session_id))
+
+    @app.post(
+        "/api/sessions/{session_id}/outbox/{message_id}/send-now",
+        response_model=OutboxResponse,
+    )
+    async def send_queued_now(session_id: str, message_id: str) -> OutboxResponse:
+        """立刻发送：置顶并叫醒 agent。"""
+        try:
+            await backend.send_queued_now(session_id, message_id)
+        except BlueError as error:
+            raise HTTPException(status_code=503, detail=str(error)) from error
+        return OutboxResponse(messages=await backend.outbox(session_id))
+
+    @app.post(
+        "/api/sessions/{session_id}/outbox/{message_id}/retry",
+        response_model=OutboxResponse,
+    )
+    async def retry_queued(session_id: str, message_id: str) -> OutboxResponse:
+        """重试失败项。"""
+        try:
+            await backend.retry_queued(session_id, message_id)
+        except BlueError as error:
+            raise HTTPException(status_code=503, detail=str(error)) from error
+        return OutboxResponse(messages=await backend.outbox(session_id))
+
+    @app.delete("/api/sessions/{session_id}/outbox", response_model=OutboxResponse)
+    async def clear_outbox(session_id: str) -> OutboxResponse:
+        """全部取消（正在发送的那条保留）。"""
+        try:
+            await backend.clear_queued(session_id)
+        except BlueError as error:
+            raise HTTPException(status_code=503, detail=str(error)) from error
+        return OutboxResponse(messages=await backend.outbox(session_id))
 
     @app.delete("/api/sessions/{session_id}/outbox/{message_id}")
     async def drop_queued(session_id: str, message_id: str) -> dict[str, bool]:

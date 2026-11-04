@@ -65,6 +65,7 @@ class FakeBackend:
         self.rename_calls: list[tuple[str, str]] = []
         self.outbox_items: list[QueuedMessage] = []
         self.outbox_queue: asyncio.Queue[SessionOutboxPayload] | None = None
+        self.queue_calls: list[tuple[str, str, str, str]] = []
         # 默认选中的分支：system(1) → user(2) → assistant(3)
         self.nodes[0].current = 2
         self.nodes[1].current = 3
@@ -91,6 +92,58 @@ class FakeBackend:
             )
         ]
 
+    async def outbox(self, session_id: str) -> list[QueuedMessage]:
+        """读取队列（替身：直接给内存里的列表）。"""
+        del session_id
+        return list(self.outbox_items)
+
+    async def update_queued(
+        self,
+        session_id: str,
+        message_id: str,
+        text: str,
+        attachments: list[SessionAttachment] | None = None,
+    ) -> bool:
+        """改队列项正文。"""
+        del attachments
+        self.queue_calls.append(("update", session_id, message_id, text))
+        for item in self.outbox_items:
+            if item.id == message_id:
+                item.text = text
+                return True
+        return False
+
+    async def move_queued(self, session_id: str, message_id: str, to: str) -> bool:
+        """调整顺序。"""
+        self.queue_calls.append(("move", session_id, message_id, to))
+        return True
+
+    async def send_queued_now(self, session_id: str, message_id: str) -> bool:
+        """立刻发送。"""
+        self.queue_calls.append(("send_now", session_id, message_id, ""))
+        return True
+
+    async def retry_queued(self, session_id: str, message_id: str) -> bool:
+        """重试失败项。"""
+        self.queue_calls.append(("retry", session_id, message_id, ""))
+        return True
+
+    async def clear_queued(self, session_id: str) -> int:
+        """清空队列。"""
+        self.queue_calls.append(("clear", session_id, "", ""))
+        removed = len(self.outbox_items)
+        self.outbox_items = []
+        return removed
+
+    async def remove_queued(self, session_id: str, message_id: str) -> bool:
+        """取消一条。"""
+        self.queue_calls.append(("remove", session_id, message_id, ""))
+        before = len(self.outbox_items)
+        self.outbox_items = [
+            item for item in self.outbox_items if item.id != message_id
+        ]
+        return len(self.outbox_items) != before
+
     async def rename(self, session_id: str, title: str) -> str:
         """改名：空字符串表示恢复自动标题。"""
         self.rename_calls.append((session_id, title))
@@ -116,14 +169,6 @@ class FakeBackend:
         self.outbox_queue.put_nowait(
             SessionOutboxPayload(session_id="s1", messages=list(self.outbox_items))
         )
-
-    async def outbox(self, session_id: str) -> list[QueuedMessage]:
-        del session_id
-        return []
-
-    async def remove_queued(self, session_id: str, message_id: str) -> bool:
-        del session_id, message_id
-        return True
 
     async def activity(self) -> list[SessionActivity]:
         return list(self.activities)
