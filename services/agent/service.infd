@@ -7,7 +7,9 @@
   max_steps: <int, range(32, )> = 512
   tool_timeout: <float, positive> = 30.0
   llm_timeout: <float, positive> = 300.0
+  llm_connect_timeout: <float, positive> = 10.0
   llm_retries: <int, range(0, 5)> = 1
+  llm_http_retries: <int, range(0, 10)> = 3
   session_timeout: <float, positive> = 10.0
 }
 

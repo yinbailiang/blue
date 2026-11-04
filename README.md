@@ -274,6 +274,10 @@ services/<name>/service_runtime_config.json
   "max_steps": 8,
   "model": "deepseek-v4-flash",
   "provider": "deepseek",
+  "llm_timeout": 300.0,
+  "llm_connect_timeout": 10.0,
+  "llm_retries": 1,
+  "llm_http_retries": 3,
   "session_timeout": 10.0,
   "system_prompt": "你是 blue，一个通过工具完成任务的智能体。",
   "tool_timeout": 30.0
@@ -295,6 +299,13 @@ services/<name>/service_runtime_config.json
 }
 ```
 
+- `llm_timeout` / `llm_connect_timeout`：模型请求的读/连接超时。底层库默认读
+  超时只有 **60s**，长回答或大上下文会撞上 `SocketTimeoutError`，所以 blue
+  默认放到 300s，并把这两个值显式写进 `blue.infd`；
+- `llm_retries`：流式生成在**还没收到任何内容**时允许的重放次数（此时向前端
+  推过零个增量，重放安全）；已经出字后中断则不重放，改为把已生成内容落库；
+- `llm_http_retries`：HTTP 层重试（429/5xx，由底层客户端退避），与
+  `llm_retries` 是两套机制；
 - `database_path` 为相对路径时解析到 `BLUE_STATE_DIR`，默认
   `.blue/sessions.db`；
 - **`prune_enabled` 默认 `false`：不会自动删除任何会话或附件**，磁盘占满前

@@ -33,11 +33,23 @@ class AgentConfig(BaseModel):
         description="模型请求的**读**超时（秒）。库默认 60s，长回答/大上下文容易"
         "读超时（aiohttp SocketTimeoutError）",
     )
+    llm_connect_timeout: float = Field(
+        default=10.0, gt=0, description="模型请求的连接超时（秒）"
+    )
     llm_retries: int = Field(
         default=1,
         ge=0,
         le=5,
         description="流式生成在**还没收到任何内容**时允许的重试次数（重放安全）",
+    )
+    llm_http_retries: int = Field(
+        default=3,
+        ge=0,
+        le=10,
+        description=(
+            "HTTP 层重试次数（429/5xx，由底层客户端退避重试）；"
+            "与 llm_retries（流中断重放）是两套机制"
+        ),
     )
     session_timeout: float = Field(default=10.0, gt=0)
 

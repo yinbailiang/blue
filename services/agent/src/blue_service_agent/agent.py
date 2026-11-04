@@ -79,6 +79,19 @@ logger = logging.getLogger(__name__)
 __all__ = ["AgentCore", "build_client"]
 
 
+def _connection_config(settings: AgentConfig) -> OpenAIConnectionConfig:
+    """把 Agent 的超时/重试配置映射成客户端连接配置。
+
+    库的默认值是读超时 60s、连接 10s、HTTP 重试 3 次——60s 对长回答和大上下文
+    太紧，所以由 blue 统一控制，并通过 ``blue.infd`` 暴露出来。
+    """
+    return OpenAIConnectionConfig(
+        timeout=settings.llm_timeout,
+        connect_timeout=settings.llm_connect_timeout,
+        max_retries=settings.llm_http_retries,
+    )
+
+
 def build_client(settings: AgentConfig) -> LLMClient:
     """按配置创建 LLM 客户端。
 
@@ -91,7 +104,7 @@ def build_client(settings: AgentConfig) -> LLMClient:
                 model=settings.model,
                 api_key=api_key,
                 base_url=settings.base_url or "https://api.deepseek.com",
-                connection=OpenAIConnectionConfig(timeout=settings.llm_timeout),
+                connection=_connection_config(settings),
             )
         )
     return create_client(
@@ -99,7 +112,7 @@ def build_client(settings: AgentConfig) -> LLMClient:
             model=settings.model,
             api_key=api_key,
             base_url=settings.base_url or "https://api.openai.com/v1",
-            connection=OpenAIConnectionConfig(timeout=settings.llm_timeout),
+            connection=_connection_config(settings),
         )
     )
 

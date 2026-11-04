@@ -23,7 +23,7 @@ from blue_contracts_session import (
     SessionStreamEvent,
     SessionStreamPayload,
 )
-from blue_service_agent.agent import AgentCore
+from blue_service_agent.agent import AgentCore, build_client
 from blue_service_agent.config import AgentConfig
 from blue_service_agent.session_gateway import AttachmentPayload
 from blue_service_echo import echo
@@ -697,3 +697,31 @@ async def _keeps_partial() -> None:
     assert assistant.role is MessageRole.ASSISTANT
     assert isinstance(assistant.content, str)
     assert "已经生成的部分" in assistant.content
+
+
+def test_build_client_passes_timeout_and_retry_settings() -> None:
+    """llm_* 配置会透传到底层客户端的连接配置（deepseek / openai 都一致）。"""
+    for provider, model in (("deepseek", "deepseek-chat"), ("openai", "gpt-4o")):
+        settings = AgentConfig(
+            api_key="sk-test",
+            provider=cast(Any, provider),
+            model=model,
+            llm_timeout=123.0,
+            llm_connect_timeout=4.0,
+            llm_http_retries=1,
+        )
+        client = build_client(settings)
+        connection = getattr(getattr(client, "_config", None), "connection", None)
+        assert getattr(connection, "timeout", None) == 123.0
+        assert getattr(connection, "connect_timeout", None) == 4.0
+        assert getattr(connection, "max_retries", None) == 1
+
+
+def test_agent_config_defaults_are_generous_for_long_replies() -> None:
+    """默认读超时必须明显大于库的 60s，否则长回答会被截断。"""
+    config = AgentConfig(api_key="sk-test")
+
+    assert config.llm_timeout == 300.0
+    assert config.llm_retries == 1
+    assert config.llm_connect_timeout == 10.0
+    assert config.llm_http_retries == 3
