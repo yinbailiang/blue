@@ -31,6 +31,7 @@ from blue.control.model import (
     DesiredState,
     ServiceStatus,
 )
+from blue.control.plan import restart_reasons
 from blue.control.process import signal_tree
 from blue.control.runner import ProcessHandle, ProcessRunner
 from blue.control.state import StateStore
@@ -304,12 +305,16 @@ class Supervisor:
             if runtime is None:
                 self._runtimes[name] = _Runtime(desired=service)
                 continue
-            if (
-                runtime.desired.meta != service.meta
-                or runtime.desired.config_hash != service.config_hash
-                or runtime.desired.source_hash != service.source_hash
-                or bool(set(service.meta.depends_contracts) & changed_contracts)
-            ):
+            reasons = restart_reasons(
+                current=service,
+                previous_meta=runtime.desired.meta,
+                previous_config_hash=runtime.desired.config_hash,
+                previous_source_hash=runtime.desired.source_hash,
+                previous_version=runtime.desired.package_version,
+                changed_contracts=changed_contracts,
+            )
+            if reasons:
+                logger.info("将重启 %s：%s", name, "、".join(reasons))
                 runtime.desired = service
                 runtime.restart_pending = True
                 runtime.next_start_at = 0.0

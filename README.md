@@ -387,6 +387,7 @@ WebUI 通过 WebSocket 调用 Agent，并订阅 `session.stream` 实时展示模
 uv run blue up                  # 前台运行 supervisor
 uv run blue status [--json]     # 查看实际状态
 uv run blue logs echo -f        # 跟踪日志
+uv run blue plan                # 预览 apply 会新增/重启/删除哪些服务（对标 kubectl diff）
 uv run blue apply --wait        # SIGHUP 重载配置并等待生效
 uv run blue down                # 优雅停止 supervisor 与全部服务
 uv run blue config-check        # 编译校验 + 打印期望状态摘要
@@ -399,6 +400,30 @@ uv run blue mcp-tools kwin --json  # 只看一个 server，JSON 输出
 ```
 
 全局参数：`--config <path>`、`--verbose`。
+
+`blue plan` 是只读的：对比「刚编译出的 `blue.infd`」与 `.blue/state.json` 快照，
+列出每个服务的命运（`+` 新增 / `~` 重启 / `-` 删除 / 不变）与**原因**，
+契约变化还会点名受影响的依赖方：
+
+```text
+$ blue plan
+generation：当前 feb420fe3a3f → 期望 b26b9e477bfc
+
+服务变更
+  ~ agent             源码变化；依赖契约变化：session
+  ~ session           依赖契约变化：session
+  ~ webui             依赖契约变化：session
+
+契约变更
+  ~ session         453b5881 → f9efd306   影响：agent, session, webui
+
+汇总：新增 0 · 重启 3 · 删除 0 · 不变 14
+重启期间这些服务会短暂不可用：agent, session, webui
+```
+
+退出码：`0` 无变化、`1` 有变化、`2` 配置编译失败——可以写
+`if blue plan >/dev/null; then echo 已是期望状态; fi`。判定逻辑与调和器共用同一
+个 `restart_reasons()`，不会出现「预览说不动、apply 却重启」。
 
 接第三方 MCP server 的推荐顺序：先 `blue doctor` 确认启动命令可用 →
 `blue mcp-tools <server>` 拿到真实工具名（不同版本会改名，别照 README 抄）→

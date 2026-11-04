@@ -28,6 +28,7 @@ from blue.config import (
     write_runtime_configs,
 )
 from blue.control import mcp
+from blue.control import plan as planner
 from blue.control.logs import LogManager
 from blue.control.model import ActualState, ServiceStatus
 from blue.control.reconciler import Supervisor
@@ -70,6 +71,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                 return _render(config_path, full=bool(args.full))
             case "build":
                 return _build(config_path)
+            case "plan":
+                return _plan(config_path, as_json=bool(args.json))
             case "doctor":
                 return _doctor(config_path)
             case "mcp-tools":
@@ -441,6 +444,90 @@ def _build(config_path: str) -> int:
     return completed.returncode
 
 
+def _plan(config_path: str, *, as_json: bool) -> int:
+    """预览一次 apply 会做什么，不接触 supervisor、不改任何文件。
+
+    退出码：``0`` 无变化、``1`` 有变化、``2`` 配置无法编译——方便脚本用
+    ``if blue plan -q; then …`` 判断"要不要 apply"。
+    """
+    desired = _try_load(config_path)
+    if desired is None:
+        return 2
+    state = StateStore(desired.supervisor.state_dir)
+    actual = state.read_state()
+    result = planner.plan(desired, actual)
+
+    if as_json:
+        print(
+            json.dumps(
+                {
+                    "desired_generation": result.desired_generation,
+                    "actual_generation": result.actual_generation,
+                    "has_changes": result.has_changes,
+                    "counts": result.counts(),
+                    "services": [
+                        {
+                            "name": change.name,
+                            "action": change.action,
+                            "reasons": list(change.reasons),
+                            "status": change.status,
+                        }
+                        for change in result.services
+                    ],
+                    "contracts": [
+                        {
+                            "name": change.name,
+                            "action": change.action,
+                            "before": change.before,
+                            "after": change.after,
+                            "affected": list(change.affected),
+                        }
+                        for change in result.contracts
+                    ],
+                    "note": result.note,
+                },
+                ensure_ascii=False,
+                indent=2,
+            )
+        )
+        return 1 if result.has_changes else 0
+
+    current = result.actual_generation or "（未部署）"
+    print(f"generation：当前 {current[:12]} → 期望 {result.desired_generation[:12]}")
+
+    interesting = [c for c in result.services if c.changed]
+    unchanged = [c for c in result.services if not c.changed]
+    if interesting:
+        print("\n服务变更")
+        for change in interesting:
+            marker = {"create": "+", "restart": "~", "remove": "-"}[change.action]
+            reason = "；".join(change.reasons) or ""
+            detail = f"  {reason}" if reason else ""
+            print(f"  {marker} {change.name:<16}{detail}")
+    if result.contracts:
+        print("\n契约变更")
+        for change in result.contracts:
+            before = change.before.split(":")[1][:8] if ":" in change.before else "-"
+            after = change.after.split(":")[1][:8] if ":" in change.after else "-"
+            affected = ", ".join(change.affected) or "无"
+            print(f"  ~ {change.name:<16}{before} → {after}   影响：{affected}")
+    if unchanged and interesting:
+        names = ", ".join(change.name for change in unchanged)
+        print(f"\n不变（{len(unchanged)}）：{names}")
+
+    tally = result.counts()
+    print(
+        f"\n汇总：新增 {tally['create']} · 重启 {tally['restart']} · "
+        f"删除 {tally['remove']} · 不变 {tally['keep']}"
+    )
+    if interesting:
+        restarted = ", ".join(result.restarted) or "无"
+        print(f"重启期间这些服务会短暂不可用：{restarted}")
+    if result.note:
+        print(f"\n{result.note}")
+    return 1 if result.has_changes else 0
+
+
 def _mcp_tools(config_path: str, *, only: str, as_json: bool, timeout: float) -> int:
     """列出 MCP server 真正提供的工具名，并标出白名单覆盖情况。
 
@@ -618,6 +705,10 @@ def _parser() -> argparse.ArgumentParser:
     render_parser.add_argument("--full", action="store_true", help="不脱敏（包含密钥）")
 
     subparsers.add_parser("build", help="uv sync --all-packages")
+    plan_parser = subparsers.add_parser(
+        "plan", help="预览一次 apply 会新增/重启/删除哪些服务（对标 kubectl diff）"
+    )
+    plan_parser.add_argument("--json", action="store_true", help="输出 JSON")
     subparsers.add_parser("doctor", help="检查运行依赖")
     mcp_parser = subparsers.add_parser(
         "mcp-tools", help="列出 MCP server 真实提供的工具名（写白名单用）"
