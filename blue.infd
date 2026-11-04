@@ -75,6 +75,13 @@ agent = AgentService(
   llm_connect_timeout = 10.0,   # 连接超时（秒）
   llm_retries = 1,              # 还没出字就断开时，重放一次
   llm_http_retries = 3,         # HTTP 层重试（429/5xx，底层退避）
+  # 压缩规则：按工具精确控制历史里保留哪些字段。
+  # 字段路径用 a.b 表示嵌套，tool 支持 * 通配。没写规则的工具会自动走
+  # 「历史画像 + 字段名」策略，所以这里只写例外就够了。
+  compact_rules = [
+    # read_file 的正文在历史里没有价值（要细节时再读一次），只留路径
+    { tool = "read_file", drop = ["content"] },
+  ],
 )
 
 webui = WebUIService()

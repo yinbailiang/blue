@@ -5,7 +5,12 @@ from __future__ import annotations
 import json
 from typing import Any, cast
 
-from blue_service_agent.compact import compact_history, estimate_chars
+from blue_service_agent.compact import (
+    CompactRule,
+    compact_history,
+    estimate_chars,
+    learn_profiles,
+)
 from infinity_agent import FunctionCall, Message, ToolCall
 
 
@@ -181,3 +186,92 @@ def test_estimate_chars_counts_tool_arguments() -> None:
     )
 
     assert estimate_chars([Message.assistant(tool_calls=[call])]) > 500
+
+
+def _tool_named(tool: str, payload: object, *, call_id: str = "c1") -> list[Message]:
+    """造一条「assistant 调用 + 工具结果」，让压缩器能识别工具名。"""
+    call = ToolCall(id=call_id, function=FunctionCall(name=tool, arguments={"q": "x"}))
+    body = json.dumps(payload, ensure_ascii=False)
+    return [
+        Message.assistant(tool_calls=[call]),
+        Message.tool(content=body, tool_call_id=call_id),
+    ]
+
+
+def test_rule_drops_named_field() -> None:
+    """规则可以精确指定某个工具的某个字段直接省略。"""
+    messages = _tool_named("read_file", {"path": "a.py", "content": "x" * 5000})
+
+    compacted = compact_history(
+        messages,
+        keep_messages=0,
+        rules=[CompactRule(tool="read_file", drop=["content"])],
+    )
+    payload = _json(compacted[1])
+
+    assert payload["path"] == "a.py"
+    assert payload["content"] == "<omitted 5000 chars>"
+
+
+def test_rule_keeps_field_verbatim() -> None:
+    """keep 的字段即使很长也不截断。"""
+    messages = _tool_named("run_shell", {"stdout": "y" * 5000, "exit_code": 0})
+
+    compacted = compact_history(
+        messages, keep_messages=0, rules=[CompactRule(tool="*", keep=["stdout"])]
+    )
+
+    assert _json(compacted[1])["stdout"] == "y" * 5000
+
+
+def test_rule_overrides_head_length() -> None:
+    """规则里的 head 覆盖全局阈值。"""
+    messages = _tool_named("run_shell", {"stdout": "z" * 5000, "exit_code": 0})
+
+    compacted = compact_history(
+        messages, keep_messages=0, rules=[CompactRule(tool="run_shell", head=50)]
+    )
+    stdout = _json(compacted[1])["stdout"]
+
+    assert isinstance(stdout, str)
+    assert stdout.startswith("z" * 50)
+    assert "chars omitted" in stdout
+
+
+def test_profiles_drive_truncation_for_unknown_fields() -> None:
+    """画像观测到长文本后，连名字不在白名单的字段也会被截断。"""
+    history = _tool_named("custom_tool", {"blob": "x" * 5000}, call_id="old")
+    profiles = learn_profiles(history)
+    assert profiles["custom_tool"]["blob"].is_text
+
+    target = _tool_named("custom_tool", {"blob": "y" * 300}, call_id="new")
+    compacted = compact_history(target, keep_messages=0, profiles=profiles)
+
+    assert "chars omitted" in _json(compacted[1])["blob"]
+
+
+def test_profiles_keep_short_status_fields() -> None:
+    """始终是短标量的字段按状态信息保留。"""
+    history = _tool_named("custom_tool", {"status": "ok"}, call_id="old")
+    profiles = learn_profiles(history)
+    assert profiles["custom_tool"]["status"].keep
+
+    target = _tool_named("custom_tool", {"status": "o" * 300}, call_id="new")
+    compacted = compact_history(target, keep_messages=0, profiles=profiles)
+
+    assert _json(compacted[1])["status"] == "o" * 300
+
+
+def test_learn_profiles_maps_tool_names() -> None:
+    """画像按工具名归档（工具结果消息本身不带名字，要靠 tool_calls 反查）。"""
+    messages = [
+        *_tool_named("run_shell", {"stdout": "x" * 1000}, call_id="a"),
+        *_tool_named("read_file", {"content": "y" * 1000}, call_id="b"),
+    ]
+
+    profiles = learn_profiles(messages)
+
+    assert set(profiles) == {"run_shell", "read_file"}
+    # 观测到 1000 字符 > LONG_TEXT(400)，判定为大文本
+    assert profiles["run_shell"]["stdout"].is_text is True
+    assert profiles["read_file"]["content"].is_text is True

@@ -65,7 +65,7 @@ from blue_service_agent.attachments import (
     tool_attachment_parts,
 )
 from blue_service_agent.catalog import ToolCatalogClient
-from blue_service_agent.compact import compact_history, estimate_chars
+from blue_service_agent.compact import compact_history, estimate_chars, learn_profiles
 from blue_service_agent.config import AgentConfig
 from blue_service_agent.history import (
     interrupted_reply,
@@ -324,6 +324,8 @@ class AgentCore:
                         keep_messages=self._settings.compact_keep_messages,
                         text_chars=self._settings.compact_text_chars,
                         error_chars=self._settings.compact_error_chars,
+                        rules=self._settings.compact_rules,
+                        profiles=learn_profiles(messages),
                     )
                     after = estimate_chars(messages)
                     if before > after:

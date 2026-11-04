@@ -11,6 +11,7 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field
 
 from blue.errors import RuntimeConfigError
+from blue_service_agent.compact import CompactRule
 
 __all__ = ["AgentConfig"]
 
@@ -63,6 +64,10 @@ class AgentConfig(BaseModel):
     )
     compact_error_chars: int = Field(
         default=600, ge=0, description="失败结果额外保留的结尾字符数"
+    )
+    compact_rules: list[CompactRule] = Field(
+        default_factory=list[CompactRule],
+        description="按工具定制的压缩规则（字段路径用 a.b 表示嵌套，tool 支持 * 通配）",
     )
 
     def resolve_api_key(self) -> str:

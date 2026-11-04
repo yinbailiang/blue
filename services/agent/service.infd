@@ -14,6 +14,7 @@
   compact_keep_messages: <int, range(0, 1000)> = 60
   compact_text_chars: <int, range(20, 20000)> = 200
   compact_error_chars: <int, range(0, 20000)> = 600
+  compact_rules: <list, each(field(tool, str)), size(0, 32)> = []
   session_timeout: <float, positive> = 10.0
 }
 
