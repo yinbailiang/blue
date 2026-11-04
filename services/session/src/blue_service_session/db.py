@@ -89,7 +89,7 @@ CREATE INDEX IF NOT EXISTS idx_session_outbox_session
     ON session_outbox(session_id, created_at);
 """
 
-_SCHEMA_VERSION = 2
+_SCHEMA_VERSION = 3
 """schema 版本；所有建表语句都是 ``IF NOT EXISTS``，老库按需补表即可。"""
 
 

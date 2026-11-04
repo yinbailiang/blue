@@ -189,8 +189,8 @@ async def _sweep_keeps_referenced(tmp_path: Path) -> None:
         await db.close()
 
 
-def test_schema_version_is_two_and_survives_reopen(tmp_path: Path) -> None:
-    """schema 升到 2；重开连接后附件仍在。"""
+def test_schema_version_is_current_and_survives_reopen(tmp_path: Path) -> None:
+    """schema 版本随新表递增；重开连接后附件仍在。"""
     asyncio.run(_schema_version(tmp_path))
 
 
@@ -203,7 +203,7 @@ async def _schema_version(tmp_path: Path) -> None:
         cursor = await connection.execute("PRAGMA user_version")
         row = await cursor.fetchone()
         await cursor.close()
-        assert row is not None and row[0] == 2
+        assert row is not None and row[0] == 3
 
         digest, mime, data = _blob()
         await db.put_attachments([(digest, mime, data)], now=100.0)
