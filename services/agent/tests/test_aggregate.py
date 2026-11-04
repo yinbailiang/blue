@@ -3,14 +3,11 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Iterable
 
 from blue_contracts_session import (
-    SessionAttachmentBlob,
     SessionPromptEvent,
     SessionReplyEvent,
     SessionReplyResponse,
-    SessionSnapshot,
 )
 from blue_contracts_tool import (
     CatalogQueryEvent,
@@ -19,58 +16,14 @@ from blue_contracts_tool import (
 )
 from blue_service_agent.aggregate import AgentAggregate
 from blue_service_agent.config import AgentConfig
-from blue_service_agent.session_gateway import AttachmentPayload
 from blue_service_echo import echo
 from blue_service_registry import ToolRegistryService
 from infinity_agent import Message
-from infinity_bus import EventBus
 from infinity_bus.templates.request import request
-from tests.support import ScriptedClient, make_runtime, wait_until
+from tests.support import MemorySessionGateway, ScriptedClient, make_runtime, wait_until
 
-from blue.messages import encode_messages
 from blue.transport import MemoryFanout
 from blue.worker import ToolWorker
-
-
-class _MemorySessionGateway:
-    """测试用内存会话网关。"""
-
-    def __init__(self) -> None:
-        self._messages: dict[str, list[Message]] = {}
-
-    async def ensure(
-        self, bus_proxy: EventBus.Proxy, session_id: str, system_prompt: str
-    ) -> SessionSnapshot:
-        del bus_proxy
-        stored = self._messages.setdefault(session_id, [Message.system(system_prompt)])
-        return SessionSnapshot(
-            session_id=session_id,
-            messages=encode_messages(stored),
-            created_at=0.0,
-            updated_at=0.0,
-            message_count=len(stored),
-        )
-
-    async def append(
-        self,
-        bus_proxy: EventBus.Proxy,
-        session_id: str,
-        messages: list[Message],
-        attachments: Iterable[SessionAttachmentBlob] = (),
-    ) -> None:
-        del bus_proxy, attachments
-        self._messages.setdefault(session_id, []).extend(messages)
-
-    async def get_attachment(
-        self, bus_proxy: EventBus.Proxy, digest: str
-    ) -> AttachmentPayload | None:
-        del bus_proxy, digest
-        return None
-
-    async def update(
-        self, bus_proxy: EventBus.Proxy, session_id: str, steps: int
-    ) -> None:
-        del bus_proxy, session_id, steps
 
 
 def test_agent_and_registry_are_separate_services() -> None:
@@ -89,7 +42,7 @@ async def _scenario() -> None:
         runtime=make_runtime(hub, "core"),
         agent=AgentConfig(api_key="sk-test", max_steps=2),
         client=ScriptedClient([Message.assistant(content="聚合可用")]),
-        session_gateway=_MemorySessionGateway(),
+        session_gateway=MemorySessionGateway(),
     )
     worker = ToolWorker(runtime=make_runtime(hub, "tool.echo"), tool=echo, ttl=5.0)
     ui = make_runtime(hub, "ui")

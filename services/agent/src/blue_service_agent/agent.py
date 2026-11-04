@@ -64,9 +64,10 @@ from infinity_agent.clients.open_ai.config import OpenAIConnectionConfig
 from infinity_bus import EventBus
 from infinity_bus.templates.request import request
 
-from blue.errors import ConfigError
+from blue.errors import BlueError, ConfigError
 from blue.messages import decode_messages
 from blue.transport import BusRuntime
+from blue.tree import ROOT_ID, Tree
 from blue_service_agent.attachments import (
     AttachmentMaterializer,
     build_user_message,
@@ -459,7 +460,12 @@ class AgentCore:
     async def _run_prompt(
         self, payload: SessionPromptRequest, bus_proxy: EventBus.Proxy
     ) -> SessionReplyResponse:
-        """串行执行该会话的完整推理-调用循环。"""
+        """串行执行该会话的完整推理-调用循环。
+
+        历史以「根到挂载点的路径」为准：正常发言挂在当前链末端，重试与编辑
+        则挂在用户指定的节点下——于是每个分支拿到的上下文都恰好是它自己那条链，
+        兄弟分支的内容不会串味。
+        """
         lock = self._session_locks.setdefault(payload.session_id, asyncio.Lock())
         steps = 0
         async with self._turn_slot(payload, bus_proxy, lock):
@@ -468,9 +474,19 @@ class AgentCore:
                     bus_proxy, payload.session_id, self._settings.system_prompt
                 )
                 steps = snapshot.steps
+                tree = Tree(snapshot.nodes, root_current=snapshot.root_current)
+                target = payload.parent
+                if target is None:
+                    target = tree.leaf()
+                elif tree.get(target) is None:
+                    raise BlueError(f"消息不存在或已被删除：{target}")
+                mount = ROOT_ID if target is None else target
+                base = tree.collect(tree.chain_to(mount)) if mount != ROOT_ID else []
                 # 历史可能带着进程中断遗留的悬空 tool_calls，
                 # 直接回灌会被模型接口以 400 拒收
-                messages = sanitize_history(decode_messages(snapshot.messages))
+                messages = sanitize_history(
+                    decode_messages(node.message for node in base)
+                )
                 if self._settings.compact_history:
                     before = estimate_chars(messages)
                     messages = compact_history(
@@ -490,16 +506,28 @@ class AgentCore:
                             after,
                             round((1 - after / before) * 100),
                         )
-                user_message, attachment_blobs = build_user_message(
-                    payload.text, payload.attachments
-                )
-                messages.append(user_message)
-                # 附件与消息同一事务落库：内容寻址天然去重
-                await self._sessions.append(
-                    bus_proxy, payload.session_id, [user_message], attachment_blobs
-                )
+                head = mount
+                if not payload.regenerate:
+                    user_message, attachment_blobs = build_user_message(
+                        payload.text, payload.attachments
+                    )
+                    messages.append(user_message)
+                    # 附件与消息同一事务落库：内容寻址天然去重
+                    head = (
+                        await self._sessions.append(
+                            bus_proxy,
+                            payload.session_id,
+                            [user_message],
+                            attachment_blobs,
+                            parent=mount,
+                        )
+                    )[-1]
                 text, steps = await self._run_turn(
-                    payload.session_id, payload.request_id, messages, bus_proxy
+                    payload.session_id,
+                    payload.request_id,
+                    messages,
+                    bus_proxy,
+                    head=head,
                 )
                 try:
                     await self._sessions.update(bus_proxy, payload.session_id, steps)
@@ -562,8 +590,14 @@ class AgentCore:
         request_id: str,
         messages: list[Message],
         bus_proxy: EventBus.Proxy,
+        *,
+        head: int,
     ) -> tuple[str, int]:
-        """执行一轮对话：模型可多次调用工具，直到最终答复或达到步数上限。"""
+        """执行一轮对话：模型可多次调用工具，直到最终答复或达到步数上限。
+
+        ``head`` 是本轮开始时的链尾节点 id，每一步落库都挂在它下面，落库后
+        ``head`` 前移到新消息——于是整轮对话始终是一条连续的链。
+        """
         reply = ""
         steps = 0
         materializer = AttachmentMaterializer(
@@ -592,14 +626,24 @@ class AgentCore:
             # 库里存的是附件伪 URL，模型只接受 data URL：发请求前换一份副本
             request_messages = await materializer.materialize(messages)
             chunks = await self._stream_step(
-                bus_proxy, session_id, request_id, steps, request_messages, tools
+                bus_proxy,
+                session_id,
+                request_id,
+                steps,
+                request_messages,
+                tools,
+                head=head,
             )
             assistant = self._require_client().chunks_to_message(chunks)
             messages.append(assistant)
             if isinstance(assistant.content, str) and assistant.content.strip():
                 reply = assistant.content.strip()
             if not assistant.tool_calls:
-                await self._sessions.append(bus_proxy, session_id, [assistant])
+                head = (
+                    await self._sessions.append(
+                        bus_proxy, session_id, [assistant], parent=head
+                    )
+                )[-1]
                 break
             tool_messages: list[Message] = []
             tool_blobs: list[SessionAttachmentBlob] = []
@@ -617,14 +661,20 @@ class AgentCore:
                 )
             except asyncio.CancelledError:
                 await self._commit_interrupted_step(
-                    bus_proxy, session_id, assistant, tool_messages
+                    bus_proxy, session_id, assistant, tool_messages, head=head
                 )
                 raise
             # assistant 与其全部工具结果一次提交：
             # 中断不会卡在「有 tool_calls 没结果」的中间态
-            await self._sessions.append(
-                bus_proxy, session_id, [assistant, *tool_messages], tool_blobs
-            )
+            head = (
+                await self._sessions.append(
+                    bus_proxy,
+                    session_id,
+                    [assistant, *tool_messages],
+                    tool_blobs,
+                    parent=head,
+                )
+            )[-1]
         else:
             notice = f"（已达到最大步数 {self._settings.max_steps}，任务可能未完成）"
             reply = f"{reply}\n\n{notice}".strip() if reply else notice
@@ -648,6 +698,8 @@ class AgentCore:
         step: int,
         messages: list[Message],
         tools: list[ToolDefinition],
+        *,
+        head: int,
     ) -> list[StreamChunk]:
         """跑一步模型流式生成，网络中断时能救就救。
 
@@ -672,13 +724,15 @@ class AgentCore:
                     )
                 return chunks
             except asyncio.CancelledError:
-                await self._commit_interrupted_stream(bus_proxy, session_id, chunks)
+                await self._commit_interrupted_stream(
+                    bus_proxy, session_id, chunks, head=head
+                )
                 raise
             except Exception as error:
                 if chunks or attempts >= self._settings.llm_retries:
                     if chunks:
                         await self._commit_interrupted_stream(
-                            bus_proxy, session_id, chunks
+                            bus_proxy, session_id, chunks, head=head
                         )
                         logger.warning(
                             "模型流在第 %s 步中断，已落库流出的 %s 个增量：%s",
@@ -765,12 +819,17 @@ class AgentCore:
             tool_messages.append(tool_message)
 
     async def _commit_interrupted_stream(
-        self, bus_proxy: EventBus.Proxy, session_id: str, chunks: list[StreamChunk]
+        self,
+        bus_proxy: EventBus.Proxy,
+        session_id: str,
+        chunks: list[StreamChunk],
+        *,
+        head: int,
     ) -> None:
         """生成阶段被中断：落库已经流出的内容；什么都没流出就一条都不写。"""
         message = interrupted_reply(chunks)
         if message is not None:
-            await self._sessions.append(bus_proxy, session_id, [message])
+            await self._sessions.append(bus_proxy, session_id, [message], parent=head)
 
     async def _commit_interrupted_step(
         self,
@@ -778,11 +837,13 @@ class AgentCore:
         session_id: str,
         assistant: Message,
         tool_messages: list[Message],
+        *,
+        head: int,
     ) -> None:
         """工具执行阶段被中断：只落库已完成的调用与结果。"""
         messages = interrupted_step_messages(assistant, tool_messages)
         if messages:
-            await self._sessions.append(bus_proxy, session_id, messages)
+            await self._sessions.append(bus_proxy, session_id, messages, parent=head)
 
     async def _forward_chunk(
         self,

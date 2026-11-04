@@ -4,15 +4,12 @@ from __future__ import annotations
 
 import asyncio
 import base64
-from collections.abc import Iterable
 
 from blue_contracts_session import (
     SessionAttachment,
-    SessionAttachmentBlob,
     SessionPromptEvent,
     SessionReplyEvent,
     SessionReplyResponse,
-    SessionSnapshot,
     attachment_url,
     parse_attachment_url,
     sha256_hex,
@@ -27,14 +24,11 @@ from blue_service_agent.attachments import (
 )
 from blue_service_agent.config import AgentConfig
 from blue_service_agent.history import sanitize_history
-from blue_service_agent.session_gateway import AttachmentPayload
 from blue_service_registry import ToolRegistryService
 from infinity_agent import Message, MessageRole, MultiModalContent
-from infinity_bus import EventBus
 from infinity_bus.templates.request import request
-from tests.support import ScriptedClient, make_runtime
+from tests.support import MemorySessionGateway, ScriptedClient, make_runtime
 
-from blue.messages import encode_messages
 from blue.transport import MemoryFanout
 
 PNG = b"\x89PNG\r\n\x1a\nblue-image"
@@ -192,55 +186,6 @@ def test_sanitize_history_keeps_multimodal_user_message() -> None:
     ]
 
 
-class _Gateway:
-    """记录消息与附件的内存网关。"""
-
-    def __init__(self) -> None:
-        self.messages: dict[str, list[Message]] = {}
-        self.blobs: dict[str, AttachmentPayload] = {}
-
-    async def ensure(
-        self, bus_proxy: EventBus.Proxy, session_id: str, system_prompt: str
-    ) -> SessionSnapshot:
-        del bus_proxy
-        stored = self.messages.setdefault(session_id, [Message.system(system_prompt)])
-        return SessionSnapshot(
-            session_id=session_id,
-            messages=encode_messages(stored),
-            created_at=0.0,
-            updated_at=0.0,
-            message_count=len(stored),
-        )
-
-    async def append(
-        self,
-        bus_proxy: EventBus.Proxy,
-        session_id: str,
-        messages: list[Message],
-        attachments: Iterable[SessionAttachmentBlob] = (),
-    ) -> None:
-        del bus_proxy
-        self.messages.setdefault(session_id, []).extend(messages)
-        for blob in attachments:
-            self.blobs[blob.hash] = AttachmentPayload(
-                hash=blob.hash,
-                mime=blob.mime,
-                size=len(base64.b64decode(blob.data)),
-                data=blob.data,
-            )
-
-    async def get_attachment(
-        self, bus_proxy: EventBus.Proxy, digest: str
-    ) -> AttachmentPayload | None:
-        del bus_proxy
-        return self.blobs.get(digest)
-
-    async def update(
-        self, bus_proxy: EventBus.Proxy, session_id: str, steps: int
-    ) -> None:
-        del bus_proxy, session_id, steps
-
-
 def test_agent_stores_pseudo_url_and_sends_data_url() -> None:
     """端到端：库里存伪 URL，发给模型的是 data URL。"""
     asyncio.run(_agent_round_trip())
@@ -252,7 +197,7 @@ async def _agent_round_trip() -> None:
         runtime=make_runtime(hub, "registry"), ttl=5.0, sweep_interval=0.05
     )
     client = ScriptedClient([Message.assistant(content="看到了")])
-    gateway = _Gateway()
+    gateway = MemorySessionGateway()
     core = AgentCore(
         runtime=make_runtime(hub, "agent"),
         settings=AgentConfig(api_key="sk-test", max_steps=2),

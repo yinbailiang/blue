@@ -1,13 +1,19 @@
-"""测试辅助：进程内总线运行时、脚本化 LLM 客户端与等待工具。"""
+"""测试辅助：进程内总线运行时、脚本化 LLM 客户端、内存会话网关与等待工具。"""
 
 from __future__ import annotations
 
 import asyncio
 import types
-from collections.abc import AsyncGenerator, Callable
+from collections.abc import AsyncGenerator, Callable, Iterable
 
 from blue_contracts_session import EVENTS as SESSION_EVENTS
+from blue_contracts_session import (
+    SessionAttachmentBlob,
+    SessionNode,
+    SessionSnapshot,
+)
 from blue_contracts_tool import EVENTS as TOOL_EVENTS
+from blue_service_agent.session_gateway import AttachmentPayload
 from infinity_agent import (
     DoneChunk,
     FinishChunk,
@@ -18,8 +24,11 @@ from infinity_agent import (
     ToolCallCompleteChunk,
 )
 from infinity_agent.clients import LLMClient, RequestConfig
+from infinity_bus import EventBus
 
+from blue.messages import decode_messages, encode_messages
 from blue.transport import MemoryFanout, MemoryRuntime
+from blue.tree import ROOT_ID, Tree
 
 
 def make_runtime(hub: MemoryFanout, member_id: str) -> MemoryRuntime:
@@ -78,3 +87,134 @@ async def wait_until(
             return
         await asyncio.sleep(interval)
     raise AssertionError(f"等待条件超时（{timeout}s）：{predicate}")
+
+
+class MemorySessionGateway:
+    """测试用内存会话网关：与 session 服务同一套树语义。
+
+    节点 id 按插入顺序自增；``append`` 的 ``parent`` 与线上一致
+    （``None`` = 当前链末端），一次追加拿到的最后一个 id 就是新的链尾。
+    ``messages`` 给出每个会话当前链上的消息，方便断言「模型看到了什么」。
+    """
+
+    def __init__(self) -> None:
+        self._nodes: dict[str, list[SessionNode]] = {}
+        self._root_current: dict[str, int | None] = {}
+        self._next_id = 1
+        self.steps: dict[str, int] = {}
+        self.blobs: dict[str, AttachmentPayload] = {}
+
+    @property
+    def messages(self) -> dict[str, list[Message]]:
+        """每个会话当前链上的消息。"""
+        return {
+            session_id: decode_messages(
+                [node.message for node in self.chain(session_id)]
+            )
+            for session_id in self._nodes
+        }
+
+    def tree(self, session_id: str) -> Tree[SessionNode]:
+        """该会话的树视图。"""
+        return Tree(
+            self._nodes.get(session_id, []),
+            root_current=self._root_current.get(session_id),
+        )
+
+    def chain(self, session_id: str) -> list[SessionNode]:
+        """当前链上的节点。"""
+        tree = self.tree(session_id)
+        return tree.collect(tree.chain())
+
+    def seed(self, session_id: str, messages: Iterable[Message]) -> list[int]:
+        """把一组消息装成一条单链（测试预置历史用）。"""
+        return self._append(session_id, list(messages), parent=None)
+
+    async def ensure(
+        self, bus_proxy: EventBus.Proxy, session_id: str, system_prompt: str
+    ) -> SessionSnapshot:
+        del bus_proxy
+        if session_id not in self._nodes:
+            self._nodes[session_id] = []
+            self._root_current[session_id] = None
+            if system_prompt:
+                self._append(session_id, [Message.system(system_prompt)], parent=None)
+        return self._snapshot(session_id)
+
+    async def append(
+        self,
+        bus_proxy: EventBus.Proxy,
+        session_id: str,
+        messages: list[Message],
+        attachments: Iterable[SessionAttachmentBlob] = (),
+        parent: int | None = None,
+    ) -> list[int]:
+        del bus_proxy
+        for blob in attachments:
+            self.blobs[blob.hash] = AttachmentPayload(
+                hash=blob.hash,
+                mime=blob.mime,
+                size=len(blob.data),
+                data=blob.data,
+            )
+        return self._append(session_id, messages, parent=parent)
+
+    async def get_attachment(
+        self, bus_proxy: EventBus.Proxy, digest: str
+    ) -> AttachmentPayload | None:
+        del bus_proxy
+        return self.blobs.get(digest)
+
+    async def update(
+        self, bus_proxy: EventBus.Proxy, session_id: str, steps: int
+    ) -> None:
+        del bus_proxy
+        self.steps[session_id] = steps
+
+    def _append(
+        self, session_id: str, messages: list[Message], *, parent: int | None
+    ) -> list[int]:
+        """按真实语义挂链：显式 parent 优先，否则挂到当前链末端。"""
+        nodes = self._nodes.setdefault(session_id, [])
+        self._root_current.setdefault(session_id, None)
+        mount = parent
+        if mount is None:
+            chain = self.tree(session_id).chain()
+            mount = chain[-1] if chain else ROOT_ID
+        created: list[int] = []
+        previous = mount
+        for message in messages:
+            node = SessionNode(
+                id=self._next_id,
+                parent=previous,
+                message=encode_messages([message])[0],
+            )
+            self._next_id += 1
+            nodes.append(node)
+            self._select(session_id, previous, node.id)
+            previous = node.id
+            created.append(node.id)
+        return created
+
+    def _select(self, session_id: str, parent: int, child: int) -> None:
+        """把父节点的当前分支指向 ``child``。"""
+        if parent == ROOT_ID:
+            self._root_current[session_id] = child
+            return
+        for node in self._nodes[session_id]:
+            if node.id == parent:
+                node.current = child
+                return
+
+    def _snapshot(self, session_id: str) -> SessionSnapshot:
+        tree = self.tree(session_id)
+        return SessionSnapshot(
+            session_id=session_id,
+            nodes=list(self._nodes.get(session_id, [])),
+            current=tree.chain(),
+            root_current=self._root_current.get(session_id),
+            created_at=0.0,
+            updated_at=0.0,
+            steps=self.steps.get(session_id, 0),
+            message_count=len(self._nodes.get(session_id, [])),
+        )

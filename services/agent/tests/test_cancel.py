@@ -4,18 +4,15 @@ from __future__ import annotations
 
 import asyncio
 import types
-from collections.abc import AsyncGenerator, Iterable
+from collections.abc import AsyncGenerator
 
 from blue_contracts_session import (
-    SessionAttachmentBlob,
     SessionPromptRequest,
-    SessionSnapshot,
 )
 from blue_service_agent.agent import AgentCore
 from blue_service_agent.config import AgentConfig
-from blue_service_agent.session_gateway import AttachmentPayload
 from blue_service_registry import ToolRegistryService
-from infinity_agent import Message, MessageRole, Messages
+from infinity_agent import MessageRole, Messages
 from infinity_agent.clients import (
     FinishChunk,
     LLMClient,
@@ -25,54 +22,9 @@ from infinity_agent.clients import (
     ThinkingChunk,
 )
 from infinity_bus import EventBus
-from tests.support import make_runtime, wait_until
+from tests.support import MemorySessionGateway, make_runtime, wait_until
 
-from blue.messages import encode_messages
 from blue.transport import MemoryFanout
-
-
-class RecordingGateway:
-    """只记录消息的内存会话网关。"""
-
-    def __init__(self) -> None:
-        self.messages: dict[str, list[Message]] = {}
-        self.steps: dict[str, int] = {}
-
-    async def ensure(
-        self, bus_proxy: EventBus.Proxy, session_id: str, system_prompt: str
-    ) -> SessionSnapshot:
-        del bus_proxy
-        stored = self.messages.setdefault(session_id, [Message.system(system_prompt)])
-        return SessionSnapshot(
-            session_id=session_id,
-            messages=encode_messages(stored),
-            created_at=0.0,
-            updated_at=0.0,
-            steps=self.steps.get(session_id, 0),
-            message_count=len(stored),
-        )
-
-    async def append(
-        self,
-        bus_proxy: EventBus.Proxy,
-        session_id: str,
-        messages: list[Message],
-        attachments: Iterable[SessionAttachmentBlob] = (),
-    ) -> None:
-        del bus_proxy, attachments
-        self.messages.setdefault(session_id, []).extend(messages)
-
-    async def get_attachment(
-        self, bus_proxy: EventBus.Proxy, digest: str
-    ) -> AttachmentPayload | None:
-        del bus_proxy, digest
-        return None
-
-    async def update(
-        self, bus_proxy: EventBus.Proxy, session_id: str, steps: int
-    ) -> None:
-        del bus_proxy
-        self.steps[session_id] = steps
 
 
 class HangingClient(LLMClient):
@@ -112,7 +64,7 @@ class HangingClient(LLMClient):
 async def _start_core(
     hub: MemoryFanout,
     client: LLMClient,
-    gateway: RecordingGateway,
+    gateway: MemorySessionGateway,
 ) -> tuple[AgentCore, ToolRegistryService, EventBus.Proxy]:
     """启动一个最小的 agent 运行环境，返回核心、注册中心与调用方代理。"""
     registry = ToolRegistryService(
@@ -135,7 +87,7 @@ def test_cancel_without_active_turn_returns_false() -> None:
     """没有进行中的回复时，取消请求返回 False。"""
 
     async def scenario() -> None:
-        gateway = RecordingGateway()
+        gateway = MemorySessionGateway()
         core = AgentCore(
             runtime=make_runtime(MemoryFanout(), "agent"),
             settings=AgentConfig(api_key="sk-test"),
@@ -152,7 +104,7 @@ def test_cancel_mid_stream_keeps_partial_answer_marked() -> None:
 
     async def scenario() -> None:
         hub = MemoryFanout()
-        gateway = RecordingGateway()
+        gateway = MemorySessionGateway()
         client = HangingClient(text="半截回答")
         core, registry, proxy = await _start_core(hub, client, gateway)
         try:
@@ -195,7 +147,7 @@ def test_cancel_mid_stream_without_output_leaves_no_message() -> None:
 
     async def scenario() -> None:
         hub = MemoryFanout()
-        gateway = RecordingGateway()
+        gateway = MemorySessionGateway()
         client = HangingClient()
         core, registry, proxy = await _start_core(hub, client, gateway)
         try:

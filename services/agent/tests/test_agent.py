@@ -3,8 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-import base64
-from collections.abc import AsyncGenerator, Iterable
+from collections.abc import AsyncGenerator
 from typing import Any, cast
 
 import pytest
@@ -14,18 +13,15 @@ from blue_contracts_session import (
     SessionActivityQueryEvent,
     SessionActivityQueryResponse,
     SessionActivityReplyEvent,
-    SessionAttachmentBlob,
     SessionPromptEvent,
     SessionPromptRequest,
     SessionReplyEvent,
     SessionReplyResponse,
-    SessionSnapshot,
     SessionStreamEvent,
     SessionStreamPayload,
 )
 from blue_service_agent.agent import AgentCore, build_client
 from blue_service_agent.config import AgentConfig
-from blue_service_agent.session_gateway import AttachmentPayload
 from blue_service_echo import echo
 from blue_service_registry import ToolRegistryService
 from infinity_agent import (
@@ -42,10 +38,14 @@ from infinity_agent.clients import RequestConfig
 from infinity_bus import Event, EventBus, EventHandler
 from infinity_bus.templates.request import request
 from pydantic import BaseModel
-from tests.support import ScriptedClient, make_runtime, wait_until
+from tests.support import (
+    MemorySessionGateway,
+    ScriptedClient,
+    make_runtime,
+    wait_until,
+)
 
 from blue.errors import RuntimeConfigError
-from blue.messages import encode_messages
 from blue.transport import MemoryFanout
 from blue.worker import ToolWorker
 
@@ -162,58 +162,6 @@ class GatedClient(ScriptedClient):
         await self.release.wait()
         async for chunk in super().stream_chat(messages, config):
             yield chunk
-
-
-class MemorySessionGateway:
-    """测试用内存会话网关。"""
-
-    def __init__(self) -> None:
-        self.messages: dict[str, list[Message]] = {}
-        self.steps: dict[str, int] = {}
-        self.blobs: dict[str, AttachmentPayload] = {}
-
-    async def ensure(
-        self, bus_proxy: EventBus.Proxy, session_id: str, system_prompt: str
-    ) -> SessionSnapshot:
-        del bus_proxy
-        stored = self.messages.setdefault(session_id, [Message.system(system_prompt)])
-        return SessionSnapshot(
-            session_id=session_id,
-            messages=encode_messages(stored),
-            created_at=0.0,
-            updated_at=0.0,
-            steps=self.steps.get(session_id, 0),
-            message_count=len(stored),
-        )
-
-    async def append(
-        self,
-        bus_proxy: EventBus.Proxy,
-        session_id: str,
-        messages: list[Message],
-        attachments: Iterable[SessionAttachmentBlob] = (),
-    ) -> None:
-        del bus_proxy
-        self.messages.setdefault(session_id, []).extend(messages)
-        for blob in attachments:
-            self.blobs[blob.hash] = AttachmentPayload(
-                hash=blob.hash,
-                mime=blob.mime,
-                size=len(base64.b64decode(blob.data)),
-                data=blob.data,
-            )
-
-    async def get_attachment(
-        self, bus_proxy: EventBus.Proxy, digest: str
-    ) -> AttachmentPayload | None:
-        del bus_proxy
-        return self.blobs.get(digest)
-
-    async def update(
-        self, bus_proxy: EventBus.Proxy, session_id: str, steps: int
-    ) -> None:
-        del bus_proxy
-        self.steps[session_id] = steps
 
 
 def _echo_call(call_id: str, text: str) -> ToolCall:
@@ -441,18 +389,21 @@ def test_agent_repairs_dangling_tool_call_from_history() -> None:
 async def _agent_repairs_dangling_tool_call_from_history() -> None:
     hub = MemoryFanout()
     gateway = MemorySessionGateway()
-    gateway.messages["session-broken"] = [
-        Message.system("sys"),
-        Message.user("去查一下"),
-        Message.assistant(
-            tool_calls=[
-                ToolCall(
-                    id="call-lost",
-                    function=FunctionCall(name="echo", arguments={"text": "ping"}),
-                )
-            ]
-        ),
-    ]
+    gateway.seed(
+        "session-broken",
+        [
+            Message.system("sys"),
+            Message.user("去查一下"),
+            Message.assistant(
+                tool_calls=[
+                    ToolCall(
+                        id="call-lost",
+                        function=FunctionCall(name="echo", arguments={"text": "ping"}),
+                    )
+                ]
+            ),
+        ],
+    )
     client = ScriptedClient([Message.assistant(content="继续完成")])
     core = AgentCore(
         runtime=make_runtime(hub, "agent"),

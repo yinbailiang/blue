@@ -65,8 +65,12 @@ class SessionGateway(Protocol):
         session_id: str,
         messages: list[Message],
         attachments: Iterable[SessionAttachmentBlob] = (),
-    ) -> None:
-        """追加消息（可同时提交附件负载）。"""
+        parent: int | None = None,
+    ) -> list[int]:
+        """追加消息（可同时提交附件负载）。
+
+        :return: 新节点的 id，按插入顺序；末尾那个就是新的链尾
+        """
         ...
 
     async def get_attachment(
@@ -120,13 +124,18 @@ class BusSessionGateway:
         session_id: str,
         messages: list[Message],
         attachments: Iterable[SessionAttachmentBlob] = (),
-    ) -> None:
+        parent: int | None = None,
+    ) -> list[int]:
         """追加消息；附件与消息在同一次 RPC 里提交，由会话库按哈希去重。"""
         blobs = [blob.model_dump(mode="json") for blob in attachments]
         response = await request(
             bus_proxy,
             SessionAppendEvent.name,
-            {"messages": encode_messages(messages), "attachments": blobs},
+            {
+                "messages": encode_messages(messages),
+                "attachments": blobs,
+                "parent": parent,
+            },
             SessionAppendReplyEvent.name,
             session_id=session_id,
             timeout=self._timeout,
@@ -135,6 +144,7 @@ class BusSessionGateway:
             raise BlueError("收到非预期的会话追加响应类型")
         if not response.success:
             raise BlueError(response.error_msg or "会话追加失败")
+        return list(response.nodes)
 
     async def get_attachment(
         self, bus_proxy: EventBus.Proxy, digest: str
