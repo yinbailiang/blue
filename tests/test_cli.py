@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import os
+import signal
 from pathlib import Path
 
 import pytest
@@ -15,6 +17,7 @@ from blue.control.model import (
     ServiceStatus,
 )
 from blue.control.state import StateStore
+from blue.runtime import RUNTIME_CONFIG_VERSION
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -185,6 +188,72 @@ def test_status_reads_actual_contracts(
 def test_apply_without_supervisor_returns_error(tmp_path: Path) -> None:
     """无 supervisor 时 apply 返回配置错误码。"""
     assert main(["--config", str(_config(tmp_path)), "apply"]) == 2
+
+
+def test_apply_rejects_old_config_format(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """运行中的 supervisor 配置格式过旧时拒绝热重载。"""
+    config = _config(tmp_path)
+    store = StateStore(tmp_path / ".blue")
+    store.acquire(
+        generation="gen-1",
+        blue_version="0.1.0",
+        config_version=RUNTIME_CONFIG_VERSION - 1,
+    )
+    try:
+        code = main(["--config", str(config), "apply"])
+    finally:
+        store.release()
+
+    assert code == 2
+    assert "blue down && blue up" in capsys.readouterr().err
+
+
+def test_apply_rejects_blue_version_mismatch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """代码版本不同也不允许热重载。"""
+    config = _config(tmp_path)
+    monkeypatch.setattr("blue.cli._blue_version", lambda: "9.9.9")
+    store = StateStore(tmp_path / ".blue")
+    store.acquire(
+        generation="gen-1", blue_version="0.0.0", config_version=RUNTIME_CONFIG_VERSION
+    )
+    try:
+        code = main(["--config", str(config), "apply"])
+    finally:
+        store.release()
+
+    assert code == 2
+    assert "blue down && blue up" in capsys.readouterr().err
+
+
+def test_apply_signals_compatible_supervisor(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """版本一致时正常发送 SIGHUP。"""
+    config = _config(tmp_path)
+    monkeypatch.setattr("blue.cli._blue_version", lambda: "9.9.9")
+    store = StateStore(tmp_path / ".blue")
+    store.acquire(
+        generation="gen-1", blue_version="9.9.9", config_version=RUNTIME_CONFIG_VERSION
+    )
+    signals: list[tuple[int, int]] = []
+
+    def fake_kill(pid: int, sig: int) -> None:
+        if sig != 0:
+            signals.append((pid, sig))
+
+    monkeypatch.setattr("blue.cli.os.kill", fake_kill)
+    try:
+        code = main(["--config", str(config), "apply"])
+    finally:
+        store.release()
+
+    assert code == 0
+    assert signals == [(os.getpid(), signal.SIGHUP)]
+    assert "已通知 supervisor" in capsys.readouterr().out
 
 
 def test_logs_missing_returns_error(tmp_path: Path) -> None:

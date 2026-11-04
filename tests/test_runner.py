@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import sys
 from pathlib import Path
 
@@ -20,7 +21,19 @@ def _desired(tmp_path: Path, mode: str) -> DesiredService:
     service_dir = tmp_path / "service"
     service_dir.mkdir(parents=True, exist_ok=True)
     config_path = service_dir / "service_runtime_config.json"
-    config_path.write_text("{}", encoding="utf-8")
+    config_path.write_text(
+        json.dumps(
+            {
+                "config": {},
+                "infra": {
+                    "project_root": str(tmp_path),
+                    "bus_url": "amqp://guest:guest@127.0.0.1:5672/",
+                    "state_dir": str(tmp_path / ".blue"),
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
     return DesiredService(
         meta=ServiceMeta(
             name="demo",
@@ -62,7 +75,6 @@ async def _runner_scenario(tmp_path: Path) -> None:
     handle = await runner.start(
         service,
         instance_id="demo-test",
-        env={"BLUE_TEST": "1"},
     )
     try:
         await asyncio.sleep(0.5)
@@ -85,4 +97,4 @@ def test_runner_requires_runtime_config(tmp_path: Path) -> None:
     service.config_path.unlink()
 
     with pytest.raises(SupervisorError, match="运行时配置"):
-        asyncio.run(runner.start(service, instance_id="demo-test", env={}))
+        asyncio.run(runner.start(service, instance_id="demo-test"))

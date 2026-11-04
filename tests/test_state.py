@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import subprocess
 import sys
@@ -73,6 +74,40 @@ def test_second_acquire_fails_while_held(tmp_path: Path) -> None:
             second.acquire(generation="gen-2")
     finally:
         first.release()
+
+
+def test_lock_records_versions(tmp_path: Path) -> None:
+    """锁文件记录启动时的 blue 版本与配置格式版本。"""
+    store = StateStore(tmp_path / ".blue")
+
+    info = store.acquire(generation="gen-1", blue_version="1.2.3", config_version=7)
+    try:
+        loaded = store.read_lock_info()
+    finally:
+        store.release()
+
+    assert info.blue_version == "1.2.3"
+    assert info.config_version == 7
+    assert loaded is not None
+    assert loaded.blue_version == "1.2.3"
+    assert loaded.config_version == 7
+
+
+def test_legacy_lock_without_versions(tmp_path: Path) -> None:
+    """旧版锁文件缺少版本字段时按 0/空串读取。"""
+    state_dir = tmp_path / ".blue"
+    state_dir.mkdir()
+    (state_dir / "supervisor.lock").write_text(
+        json.dumps({"pid": os.getpid(), "started_at": 1.0, "generation": "gen"}),
+        encoding="utf-8",
+    )
+    store = StateStore(state_dir)
+
+    info = store.read_lock_info()
+
+    assert info is not None
+    assert info.blue_version == ""
+    assert info.config_version == 0
 
 
 def test_state_dir_permissions(tmp_path: Path) -> None:

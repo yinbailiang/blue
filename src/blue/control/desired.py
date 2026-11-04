@@ -6,7 +6,9 @@
 - ``supervisor`` 是唯一保留的非服务顶层键；
 - 每个服务的元数据来自 ``services/<name>/service.infd`` 的 ``service`` 块；
 - 每个契约包的元数据来自 ``contracts/<name>/contract.infd`` 的 ``contract`` 块。
-- supervisor 把服务配置写入 ``services/<name>/service_runtime_config.json``。
+- supervisor 把每个服务的运行时配置写入
+  ``services/<name>/service_runtime_config.json``，文件内 ``config`` 段是该服务的
+  业务配置，``infra`` 段是所有服务共享的基础设施参数。
 """
 
 from __future__ import annotations
@@ -32,6 +34,7 @@ from blue.control.model import (
     SupervisorSettings,
 )
 from blue.errors import ConfigError
+from blue.runtime import CONFIG_SECTION, INFRA_SECTION
 
 __all__ = [
     "DEFAULT_BUS_URL",
@@ -135,25 +138,44 @@ def topological_order(services: dict[str, DesiredService]) -> list[str]:
     return order
 
 
+def _runtime_config_content(service: DesiredService, desired: DesiredState) -> str:
+    """生成服务的运行时配置文件内容：业务配置 + 共享基础设施参数。"""
+    settings = desired.supervisor
+    payload = {
+        CONFIG_SECTION: service.config,
+        INFRA_SECTION: {
+            "project_root": str(desired.base_dir),
+            "bus_url": desired.bus_url,
+            "state_dir": str(settings.state_dir),
+            "registry_ttl": settings.registry_ttl,
+            "registry_sweep_interval": settings.registry_sweep_interval,
+        },
+    }
+    return (
+        json.dumps(
+            payload,
+            ensure_ascii=False,
+            indent=2,
+            sort_keys=True,
+            default=_json_default,
+        )
+        + "\n"
+    )
+
+
 def write_runtime_configs(
     desired: DesiredState, *, only_changed: bool = True
 ) -> list[str]:
-    """把每个服务的配置实例写入其目录下的 ``service_runtime_config.json``。
+    """把运行时配置写入每个服务目录下的 ``service_runtime_config.json``。
+
+    单个文件里分成两段：``config`` 是该服务的 ``ServiceTemplate`` 实例，
+    ``infra`` 是所有服务共享的基础设施参数。服务只需定位一份配置。
 
     :return: 实际被写入（内容或权限发生变化）的服务名列表。
     """
     changed: list[str] = []
     for name, service in desired.services.items():
-        content = (
-            json.dumps(
-                service.config,
-                ensure_ascii=False,
-                indent=2,
-                sort_keys=True,
-                default=_json_default,
-            )
-            + "\n"
-        )
+        content = _runtime_config_content(service, desired)
         path = service.config_path
         if only_changed and path.is_file():
             try:

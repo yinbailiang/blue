@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
@@ -11,7 +13,6 @@ import blue.runtime as runtime
 from blue.errors import RuntimeConfigError
 from blue.runtime import (
     DEFAULT_RUNTIME_CONFIG,
-    PROJECT_ROOT_ENV,
     Workspace,
     WorkspaceConfig,
     configure_workspace,
@@ -26,6 +27,33 @@ from blue.runtime import (
 
 class DemoConfig(BaseModel):
     value: str = "default"
+
+
+@pytest.fixture(autouse=True)
+def _isolate_infra() -> Iterator[None]:
+    """基础设施配置有进程级缓存，每个用例前后都清空。"""
+    runtime.reset_infra_config()
+    yield
+    runtime.reset_infra_config()
+
+
+def _install_infra(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, **overrides: object
+) -> Path:
+    """写一份运行时配置并指向它，模拟 supervisor 下发的基础设施参数。"""
+    config_path = tmp_path / DEFAULT_RUNTIME_CONFIG
+    infra: dict[str, object] = {
+        "project_root": str(tmp_path),
+        "bus_url": runtime.DEFAULT_BUS_URL,
+        "state_dir": str(tmp_path / ".blue"),
+    }
+    infra.update(overrides)
+    config_path.write_text(
+        json.dumps({runtime.CONFIG_SECTION: {}, runtime.INFRA_SECTION: infra}),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("BLUE_CONFIG_FILE", str(config_path))
+    return config_path
 
 
 def test_load_runtime_config_from_explicit_path(tmp_path: Path) -> None:
@@ -66,11 +94,11 @@ def test_load_runtime_config_missing_file(tmp_path: Path) -> None:
 
 
 def test_load_runtime_config_invalid_json(tmp_path: Path) -> None:
-    """内容非法时给出校验错误。"""
+    """内容非法时明确报告「不是合法 JSON」，而不是笼统的校验失败。"""
     path = tmp_path / "bad.json"
     path.write_text("not-json", encoding="utf-8")
 
-    with pytest.raises(RuntimeConfigError, match="校验失败"):
+    with pytest.raises(RuntimeConfigError, match="不是合法 JSON"):
         load_runtime_config(DemoConfig, path)
 
 
@@ -80,27 +108,30 @@ def _reset_workspace(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(runtime, "_workspace", None)
 
 
-def test_project_root_prefers_injected_env(
+def test_project_root_reads_infra_config(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """supervisor 注入的项目根优先。"""
-    monkeypatch.setenv(PROJECT_ROOT_ENV, str(tmp_path))
+    """supervisor 下发的项目根优先。"""
+    _install_infra(tmp_path, monkeypatch, project_root=str(tmp_path / "root"))
+
+    assert project_root() == (tmp_path / "root").resolve()
+
+
+def test_project_root_falls_back_to_cwd(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """没有基础设施配置时回退进程当前目录。"""
+    monkeypatch.delenv("BLUE_CONFIG_FILE", raising=False)
+    monkeypatch.chdir(tmp_path)
 
     assert project_root() == tmp_path.resolve()
-
-
-def test_project_root_falls_back_to_cwd(monkeypatch: pytest.MonkeyPatch) -> None:
-    """未注入时回退进程当前目录。"""
-    monkeypatch.delenv(PROJECT_ROOT_ENV, raising=False)
-
-    assert project_root() == Path.cwd().resolve()
 
 
 def test_resolve_workspace_defaults_to_project_root(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """workdir 缺省为项目根。"""
-    monkeypatch.setenv(PROJECT_ROOT_ENV, str(tmp_path))
+    _install_infra(tmp_path, monkeypatch)
 
     assert resolve_workspace(WorkspaceConfig()) == tmp_path.resolve()
 
@@ -109,7 +140,7 @@ def test_resolve_workspace_relative_to_project_root(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """相对 workdir 按项目根解析。"""
-    monkeypatch.setenv(PROJECT_ROOT_ENV, str(tmp_path))
+    _install_infra(tmp_path, monkeypatch)
 
     config = WorkspaceConfig(workdir="packages/app")
 
@@ -120,7 +151,7 @@ def test_resolve_workspace_accepts_absolute(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """绝对 workdir 不受项目根影响。"""
-    monkeypatch.setenv(PROJECT_ROOT_ENV, str(tmp_path / "root"))
+    _install_infra(tmp_path, monkeypatch, project_root=str(tmp_path / "root"))
     target = tmp_path / "elsewhere"
 
     config = WorkspaceConfig(workdir=str(target))
@@ -155,7 +186,7 @@ def test_workspace_defaults_to_project_root_without_configure(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """未调用 configure_workspace 时锚定项目根。"""
-    monkeypatch.setenv(PROJECT_ROOT_ENV, str(tmp_path))
+    _install_infra(tmp_path, monkeypatch)
 
     assert workspace().workdir == tmp_path.resolve()
 
@@ -164,7 +195,7 @@ def test_configure_workspace_sets_anchor(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """注入配置后锚点切换到解析结果。"""
-    monkeypatch.setenv(PROJECT_ROOT_ENV, str(tmp_path))
+    _install_infra(tmp_path, monkeypatch)
 
     configure_workspace(WorkspaceConfig(workdir="sub"))
 
@@ -178,26 +209,82 @@ def test_workspace_rejects_empty_path() -> None:
         Workspace(Path("/tmp")).resolve("   ")
 
 
-def test_registry_ttl_reads_injected_value(monkeypatch: pytest.MonkeyPatch) -> None:
-    """supervisor 注入 ``BLUE_REGISTRY_TTL`` 时以其为准。"""
-    monkeypatch.setenv("BLUE_REGISTRY_TTL", "7.5")
+def test_registry_ttl_reads_infra_config(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """supervisor 下发的租约时长优先。"""
+    _install_infra(tmp_path, monkeypatch, registry_ttl=7.5)
 
     assert runtime.registry_ttl() == 7.5
 
 
-def test_registry_ttl_defaults_when_missing(monkeypatch: pytest.MonkeyPatch) -> None:
-    """缺失时回退缺省租约（15 秒）。"""
-    monkeypatch.delenv("BLUE_REGISTRY_TTL", raising=False)
-
-    assert runtime.registry_ttl() == 15.0
-    assert runtime.registry_ttl(default=3.0) == 3.0
-
-
-@pytest.mark.parametrize("raw", ["", "abc", "0", "-2"])
-def test_registry_ttl_rejects_bad_values(
-    monkeypatch: pytest.MonkeyPatch, raw: str
+def test_registry_ttl_defaults_when_missing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """坏值不能变成「立刻过期」的租约。"""
-    monkeypatch.setenv("BLUE_REGISTRY_TTL", raw)
+    """没有基础设施配置时回退缺省租约（15 秒）。"""
+    monkeypatch.delenv("BLUE_CONFIG_FILE", raising=False)
+    monkeypatch.chdir(tmp_path)
 
     assert runtime.registry_ttl() == 15.0
+
+
+@pytest.mark.parametrize("raw", [0, -2])
+def test_infra_config_rejects_non_positive_ttl(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, raw: float
+) -> None:
+    """非正数租约在加载时就报错，不会变成「立刻过期」的租约。"""
+    _install_infra(tmp_path, monkeypatch, registry_ttl=raw)
+
+    with pytest.raises(RuntimeConfigError):
+        runtime.registry_ttl()
+
+
+def test_infra_config_rejects_unknown_field(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """拼错的字段直接报错，避免静默忽略。"""
+    _install_infra(tmp_path, monkeypatch, registry_ttll=7.5)
+
+    with pytest.raises(RuntimeConfigError):
+        runtime.registry_ttl()
+
+
+def test_infra_config_requires_section_when_supervised(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """supervisor 启动的进程缺少 infra 段时直接报错，不回退默认总线。"""
+    path = tmp_path / DEFAULT_RUNTIME_CONFIG
+    path.write_text(json.dumps({runtime.CONFIG_SECTION: {}}), encoding="utf-8")
+    monkeypatch.setenv("BLUE_CONFIG_FILE", str(path))
+    monkeypatch.setenv("BLUE_SERVICE_NAME", "demo")
+
+    with pytest.raises(RuntimeConfigError, match="缺少 'infra' 段"):
+        runtime.load_infra_config()
+
+
+def test_infra_config_requires_file_when_supervised(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """supervisor 下发的配置文件缺失时直接报错，而不是回退默认值。"""
+    monkeypatch.setenv("BLUE_CONFIG_FILE", str(tmp_path / "missing.json"))
+    monkeypatch.setenv("BLUE_SERVICE_NAME", "demo")
+
+    with pytest.raises(RuntimeConfigError, match="supervisor 下发的运行时配置不可用"):
+        runtime.load_infra_config()
+
+
+def test_infra_config_falls_back_for_manual_run_without_section(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """手工运行时缺少 infra 段仍回退开发默认值。"""
+    monkeypatch.delenv("BLUE_CONFIG_FILE", raising=False)
+    monkeypatch.delenv("BLUE_SERVICE_NAME", raising=False)
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / DEFAULT_RUNTIME_CONFIG).write_text(
+        json.dumps({runtime.CONFIG_SECTION: {}}), encoding="utf-8"
+    )
+
+    config = runtime.load_infra_config()
+
+    assert config.bus_url == runtime.DEFAULT_BUS_URL
+    assert config.state_dir == Path(".blue")

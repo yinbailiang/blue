@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
-import os
 from pathlib import Path
 
 from pydantic import BaseModel, ConfigDict, Field
+
+from blue.runtime import state_dir
 
 __all__ = ["SessionConfig"]
 
@@ -39,10 +40,8 @@ class SessionConfig(BaseModel):
     attachment_grace: float = Field(default=3600.0, gt=0)
 
     def resolve_database_path(self) -> Path:
-        """相对路径解析到 ``BLUE_STATE_DIR``（缺省 cwd/.blue）。"""
+        """相对路径解析到 supervisor 状态目录（缺省 cwd/.blue）。"""
         path = Path(self.database_path).expanduser()
         if path.is_absolute():
             return path
-        state_dir = os.environ.get("BLUE_STATE_DIR")
-        base = Path(state_dir) if state_dir else (Path.cwd() / ".blue")
-        return (base / path).resolve()
+        return (state_dir() / path).resolve()

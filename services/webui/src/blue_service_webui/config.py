@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
-import os
 from pathlib import Path
 
 from pydantic import BaseModel, ConfigDict, Field
+
+from blue.runtime import state_dir
 
 __all__ = ["WebUIConfig"]
 
@@ -26,5 +27,4 @@ class WebUIConfig(BaseModel):
 
     def resolve_state_dir(self) -> Path:
         """解析 supervisor 状态目录，供系统状态面板读取。"""
-        configured = os.environ.get("BLUE_STATE_DIR")
-        return Path(configured).expanduser().resolve() if configured else Path(".blue")
+        return state_dir()

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from pathlib import Path
 
 import pytest
@@ -78,7 +79,9 @@ def _isolate_workspace(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def test_relative_path_anchors_project_root_not_service_dir(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    install_infra: Callable[..., None],
 ) -> None:
     """回归：相对路径改的是项目根下的文件，而不是服务目录里的同名文件。"""
     project = tmp_path / "project"
@@ -88,7 +91,7 @@ def test_relative_path_anchors_project_root_not_service_dir(
     target.write_text("alpha\n", encoding="utf-8")
     decoy = service_dir / "notes.txt"
     decoy.write_text("alpha\n", encoding="utf-8")
-    monkeypatch.setenv("BLUE_PROJECT_ROOT", str(project))
+    install_infra(project)
     monkeypatch.chdir(service_dir)
 
     result = edit_file("notes.txt", "alpha", "beta")
@@ -99,14 +102,14 @@ def test_relative_path_anchors_project_root_not_service_dir(
 
 
 def test_relative_path_honours_configured_workdir(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, install_infra: Callable[..., None]
 ) -> None:
     """workdir 配置为相对路径时按项目根解析。"""
     root = tmp_path / "root"
     nested = root / "sub"
     nested.mkdir(parents=True)
     (nested / "a.txt").write_text("alpha\n", encoding="utf-8")
-    monkeypatch.setenv("BLUE_PROJECT_ROOT", str(root))
+    install_infra(root)
     configure_workspace(WorkspaceConfig(workdir="sub"))
 
     result = edit_file("a.txt", "alpha", "beta")

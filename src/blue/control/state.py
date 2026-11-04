@@ -28,6 +28,10 @@ class LockInfo(BaseModel):
     pid: int
     started_at: float
     generation: str
+    blue_version: str = ""
+    """启动 supervisor 的 blue 包版本；旧版锁文件没有该字段。"""
+    config_version: int = 0
+    """运行时配置格式版本；旧版锁文件没有该字段。"""
 
 
 class StateStore:
@@ -69,8 +73,14 @@ class StateStore:
         with suppress(OSError):
             self._log_dir.chmod(0o700)
 
-    def acquire(self, *, generation: str) -> LockInfo:
-        """获取单实例锁并写入 PID 信息。
+    def acquire(
+        self,
+        *,
+        generation: str,
+        blue_version: str = "",
+        config_version: int = 0,
+    ) -> LockInfo:
+        """获取单实例锁并写入 PID 与版本信息。
 
         :raises SupervisorError: 已有 supervisor 持有锁。
         """
@@ -87,7 +97,13 @@ class StateStore:
                 f"{existing or '未知进程'}"
             ) from error
 
-        info = LockInfo(pid=os.getpid(), started_at=time.time(), generation=generation)
+        info = LockInfo(
+            pid=os.getpid(),
+            started_at=time.time(),
+            generation=generation,
+            blue_version=blue_version,
+            config_version=config_version,
+        )
         handle.seek(0)
         handle.truncate()
         handle.write(info.model_dump_json())

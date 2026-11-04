@@ -18,7 +18,7 @@ from blue.control.model import (
     ServiceStatus,
     SupervisorSettings,
 )
-from blue.control.reconciler import Supervisor, build_service_env
+from blue.control.reconciler import Supervisor
 from blue.control.runner import ProcessRunner
 from blue.control.state import StateStore
 
@@ -281,19 +281,6 @@ async def _source_change_reload(tmp_path: Path) -> None:
         await supervisor.stop()
 
     assert supervisor.desired.services["echo"].package_version == "0.1.0"
-
-
-def test_build_service_env_injects_project_root(tmp_path: Path) -> None:
-    """服务进程收到项目根，供工具解析相对路径。"""
-    desired = _desired(tmp_path, services={"echo": ("ok", ())})
-    service = desired.services["echo"]
-
-    env = build_service_env(desired, service, log_dir=tmp_path / "logs")
-
-    assert env["BLUE_PROJECT_ROOT"] == str(tmp_path)
-    assert env["BLUE_STATE_DIR"] == str(tmp_path / ".blue")
-    assert env["BLUE_LOG_DIR"] == str(tmp_path / "logs")
-    assert env["BLUE_SERVICE_KIND"] == "tool"
 
 
 async def _dependency(tmp_path: Path) -> None:

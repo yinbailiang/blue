@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from pathlib import Path
 
 import pytest
@@ -59,13 +60,15 @@ def _isolate_workspace(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def test_relative_path_anchors_project_root_not_service_dir(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    install_infra: Callable[..., None],
 ) -> None:
     """回归：相对路径写到项目根，而不是工具进程的 cwd（服务目录）。"""
     project = tmp_path / "project"
     service_dir = project / "services" / "write_file"
     service_dir.mkdir(parents=True)
-    monkeypatch.setenv("BLUE_PROJECT_ROOT", str(project))
+    install_infra(project)
     monkeypatch.chdir(service_dir)
 
     result = write_file("tmp/out.txt", "hello")
@@ -76,13 +79,13 @@ def test_relative_path_anchors_project_root_not_service_dir(
 
 
 def test_relative_path_honours_configured_workdir(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, install_infra: Callable[..., None]
 ) -> None:
     """workdir 配置为相对路径时按项目根解析。"""
     root = tmp_path / "root"
     nested = root / "sub"
     nested.mkdir(parents=True)
-    monkeypatch.setenv("BLUE_PROJECT_ROOT", str(root))
+    install_infra(root)
     configure_workspace(WorkspaceConfig(workdir="sub"))
 
     result = write_file("a.txt", "x")

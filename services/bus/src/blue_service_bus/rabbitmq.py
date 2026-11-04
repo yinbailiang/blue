@@ -11,11 +11,11 @@ import signal
 import socket
 import sys
 from dataclasses import dataclass
-from pathlib import Path
 from typing import Any
 from urllib.parse import unquote, urlsplit
 
 from blue.errors import RuntimeConfigError
+from blue.runtime import state_dir
 from blue_service_bus.config import BusConfig
 
 logger = logging.getLogger(__name__)
@@ -135,9 +135,7 @@ class RabbitMQManager:
             )
         data_dir = self._config.data_dir
         if not data_dir.is_absolute():
-            state_dir = os.environ.get("BLUE_STATE_DIR")
-            base = Path(state_dir) if state_dir else (Path.cwd() / ".blue")
-            data_dir = (base / data_dir).resolve()
+            data_dir = (state_dir() / data_dir).resolve()
         data_dir.mkdir(parents=True, exist_ok=True)
         env = dict(os.environ)
         env.update(

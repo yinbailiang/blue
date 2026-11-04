@@ -37,10 +37,11 @@ from blue.control.process import signal_tree
 from blue.control.runner import ProcessHandle, ProcessRunner
 from blue.control.state import StateStore
 from blue.errors import BlueError, ConfigError
+from blue.runtime import DEFAULT_RUNTIME_CONFIG, RUNTIME_CONFIG_VERSION
 
 logger = logging.getLogger(__name__)
 
-__all__ = ["Supervisor", "build_service_env"]
+__all__ = ["Supervisor"]
 
 
 def _changed_contracts(
@@ -58,27 +59,6 @@ def _changed_contracts(
         ):
             changed.add(name)
     return changed
-
-
-def build_service_env(
-    desired: DesiredState, service: DesiredService, *, log_dir: Path
-) -> dict[str, str]:
-    """组装服务进程的环境变量。
-
-    包含总线连接信息、状态/日志目录、项目根（``blue.infd`` 所在目录）
-    与当前服务的元数据。
-    """
-    settings = desired.supervisor
-    return {
-        "BLUE_PROJECT_ROOT": str(desired.base_dir),
-        "BLUE_BUS_URL": desired.bus_url,
-        "BLUE_BUS_TRANSPORT": desired.bus_transport,
-        "BLUE_REGISTRY_TTL": str(settings.registry_ttl),
-        "BLUE_REGISTRY_SWEEP_INTERVAL": str(settings.registry_sweep_interval),
-        "BLUE_STATE_DIR": str(settings.state_dir),
-        "BLUE_LOG_DIR": str(log_dir),
-        "BLUE_SERVICE_KIND": service.meta.kind,
-    }
 
 
 @dataclass
@@ -111,6 +91,7 @@ class Supervisor:
         logs: LogManager,
         runner: ProcessRunner,
         clock: Callable[[], float] = time.monotonic,
+        blue_version: str = "",
     ) -> None:
         self._config_path = config_path.resolve()
         self._desired = desired
@@ -118,6 +99,7 @@ class Supervisor:
         self._logs = logs
         self._runner = runner
         self._clock = clock
+        self._blue_version = blue_version
         self._backoff = Backoff(
             base=desired.supervisor.restart_backoff,
             maximum=desired.supervisor.restart_backoff_max,
@@ -149,7 +131,11 @@ class Supervisor:
     async def start(self) -> None:
         """获取单实例锁、清理孤儿进程、写入配置并启动调谐循环。"""
         previous = self._state.read_state()
-        self._state.acquire(generation=self._desired.generation)
+        self._state.acquire(
+            generation=self._desired.generation,
+            blue_version=self._blue_version,
+            config_version=RUNTIME_CONFIG_VERSION,
+        )
         try:
             cleaned = await self._state.cleanup_orphans(previous)
             if cleaned:
@@ -157,13 +143,8 @@ class Supervisor:
             if previous is not None:
                 for name in previous.services:
                     if name not in self._desired.services:
-                        stale = (
-                            self._desired.base_dir
-                            / "services"
-                            / name
-                            / "service_runtime_config.json"
-                        )
-                        stale.unlink(missing_ok=True)
+                        service_dir = self._desired.base_dir / "services" / name
+                        (service_dir / DEFAULT_RUNTIME_CONFIG).unlink(missing_ok=True)
             changed = write_runtime_configs(self._desired)
             if changed:
                 logger.info("已生成运行时配置：%s", ", ".join(changed))
@@ -349,11 +330,7 @@ class Supervisor:
         service = runtime.desired
         instance_id = f"{service.meta.name}-{uuid.uuid4().hex[:12]}"
         try:
-            handle = await self._runner.start(
-                service,
-                instance_id=instance_id,
-                env=self._service_env(service),
-            )
+            handle = await self._runner.start(service, instance_id=instance_id)
         except Exception as error:
             runtime.last_error = str(error)
             runtime.status = ServiceStatus.BACKOFF
@@ -505,9 +482,6 @@ class Supervisor:
             if runtime is None or runtime.status is not ServiceStatus.READY:
                 return False
         return True
-
-    def _service_env(self, service: DesiredService) -> dict[str, str]:
-        return build_service_env(self._desired, service, log_dir=self._logs.log_dir)
 
     async def _shutdown(self) -> None:
         services = {name: runtime.desired for name, runtime in self._runtimes.items()}

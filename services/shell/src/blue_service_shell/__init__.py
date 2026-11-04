@@ -12,7 +12,6 @@ from typing import Annotated
 from pydantic import BaseModel, ConfigDict, Field
 
 from blue.runtime import (
-    PROJECT_ROOT_ENV,
     WorkspaceConfig,
     load_runtime_config,
     project_root,
@@ -63,7 +62,6 @@ def default_workdir() -> Path:
 __all__ = [
     "CONFIG_MODEL",
     "MAX_OUTPUT_CHARS",
-    "PROJECT_ROOT_ENV",
     "ShellConfig",
     "ShellResult",
     "configure",

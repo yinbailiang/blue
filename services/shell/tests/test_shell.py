@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import shlex
 import sys
+from collections.abc import Callable
 from pathlib import Path
 
 import blue_service_shell as shell
@@ -83,51 +84,54 @@ def test_max_output_chars_is_positive() -> None:
 
 
 def test_project_root_prefers_injected_env(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    install_infra: Callable[..., None], tmp_path: Path
 ) -> None:
-    """supervisor 注入的 BLUE_PROJECT_ROOT 即项目根。"""
-    monkeypatch.setenv("BLUE_PROJECT_ROOT", str(tmp_path))
+    """supervisor 下发的项目根即项目根。"""
+    install_infra(tmp_path)
     assert shell.project_root() == tmp_path.resolve()
 
 
-def test_project_root_falls_back_to_cwd(monkeypatch: pytest.MonkeyPatch) -> None:
-    """未注入环境变量时退回进程当前目录。"""
-    monkeypatch.delenv("BLUE_PROJECT_ROOT", raising=False)
-    assert shell.project_root() == Path.cwd().resolve()
+def test_project_root_falls_back_to_cwd(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """没有基础设施配置时退回进程当前目录。"""
+    monkeypatch.delenv("BLUE_CONFIG_FILE", raising=False)
+    monkeypatch.chdir(tmp_path)
+    assert shell.project_root() == tmp_path.resolve()
 
 
 def test_resolve_workdir_defaults_to_project_root(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    install_infra: Callable[..., None], tmp_path: Path
 ) -> None:
     """workdir 缺省时落在项目根，而不是服务目录。"""
-    monkeypatch.setenv("BLUE_PROJECT_ROOT", str(tmp_path))
+    install_infra(tmp_path)
     assert shell.resolve_workdir(shell.ShellConfig()) == tmp_path.resolve()
 
 
 def test_resolve_workdir_relative_to_project_root(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    install_infra: Callable[..., None], tmp_path: Path
 ) -> None:
     """相对 workdir 按项目根解析。"""
-    monkeypatch.setenv("BLUE_PROJECT_ROOT", str(tmp_path))
+    install_infra(tmp_path)
     config = shell.ShellConfig(workdir="packages/app")
     assert shell.resolve_workdir(config) == (tmp_path / "packages/app").resolve()
 
 
 def test_resolve_workdir_accepts_absolute(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    install_infra: Callable[..., None], tmp_path: Path
 ) -> None:
     """绝对 workdir 不受项目根影响。"""
-    monkeypatch.setenv("BLUE_PROJECT_ROOT", str(tmp_path / "root"))
+    install_infra(tmp_path / "root")
     target = tmp_path / "elsewhere"
     config = shell.ShellConfig(workdir=str(target))
     assert shell.resolve_workdir(config) == target.resolve()
 
 
 def test_run_shell_uses_configured_default_workdir(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    install_infra: Callable[..., None], tmp_path: Path
 ) -> None:
     """configure() 之后默认命令在项目根执行。"""
-    monkeypatch.setenv("BLUE_PROJECT_ROOT", str(tmp_path))
+    install_infra(tmp_path)
     shell.configure(shell.ShellConfig())
 
     result = asyncio.run(run_shell("pwd"))
@@ -137,10 +141,10 @@ def test_run_shell_uses_configured_default_workdir(
 
 
 def test_run_shell_defaults_to_project_root_without_configure(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    install_infra: Callable[..., None], tmp_path: Path
 ) -> None:
     """未调用 configure() 时同样回退到项目根。"""
-    monkeypatch.setenv("BLUE_PROJECT_ROOT", str(tmp_path))
+    install_infra(tmp_path)
 
     result = asyncio.run(run_shell("pwd"))
 
@@ -148,13 +152,13 @@ def test_run_shell_defaults_to_project_root_without_configure(
 
 
 def test_run_shell_explicit_cwd_overrides_default(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    install_infra: Callable[..., None], tmp_path: Path
 ) -> None:
     """显式 cwd 参数优先于服务默认工作目录。"""
     project, explicit = tmp_path / "project", tmp_path / "explicit"
     project.mkdir()
     explicit.mkdir()
-    monkeypatch.setenv("BLUE_PROJECT_ROOT", str(project))
+    install_infra(project)
     shell.configure(shell.ShellConfig())
 
     result = asyncio.run(run_shell("pwd", cwd=str(explicit)))

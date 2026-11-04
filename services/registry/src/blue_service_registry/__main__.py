@@ -2,11 +2,9 @@
 
 from __future__ import annotations
 
-import os
-
 from blue_contracts_tool import EVENTS as TOOL_EVENTS
 
-from blue.runtime import build_runtime, run_service
+from blue.runtime import build_runtime, load_infra_config, run_service
 from blue_service_registry.config import RegistryConfig
 from blue_service_registry.registry import ToolRegistryService
 
@@ -15,9 +13,10 @@ __all__ = ["main"]
 
 def main() -> int:
     """进程入口。"""
+    infra = load_infra_config()
     config = RegistryConfig(
-        ttl=float(os.environ.get("BLUE_REGISTRY_TTL", "15")),
-        sweep_interval=float(os.environ.get("BLUE_REGISTRY_SWEEP_INTERVAL", "2")),
+        ttl=infra.registry_ttl,
+        sweep_interval=infra.registry_sweep_interval,
     )
     return run_service(
         ToolRegistryService(

@@ -33,8 +33,9 @@ from blue.control.logs import LogManager
 from blue.control.model import ActualState, ServiceStatus
 from blue.control.reconciler import Supervisor
 from blue.control.runner import ProcessRunner
-from blue.control.state import StateStore
+from blue.control.state import LockInfo, StateStore
 from blue.errors import BlueError
+from blue.runtime import RUNTIME_CONFIG_VERSION
 
 __all__ = ["main"]
 
@@ -116,6 +117,7 @@ async def _run_supervisor(desired: DesiredState) -> None:
         state=state,
         logs=logs,
         runner=runner,
+        blue_version=_blue_version(),
     )
 
     stop = asyncio.Event()
@@ -146,6 +148,7 @@ def _apply(config_path: str, *, wait: bool, timeout: float) -> int:
     running, info = state.supervisor_running()
     if not running or info is None:
         raise BlueError("supervisor 未运行；请先执行 blue up")
+    _ensure_supervisor_compatible(info)
     try:
         os.kill(info.pid, signal.SIGHUP)
     except ProcessLookupError as error:
@@ -165,6 +168,25 @@ def _apply(config_path: str, *, wait: bool, timeout: float) -> int:
             time.sleep(0.1)
         raise BlueError(f"等待配置生效超时（{timeout}s）")
     return 0
+
+
+def _ensure_supervisor_compatible(info: LockInfo) -> None:
+    """拒绝向配置格式或代码版本不一致的 supervisor 发送重载信号。"""
+    current_version = _blue_version()
+    config_mismatch = info.config_version != RUNTIME_CONFIG_VERSION
+    version_mismatch = bool(
+        info.blue_version
+        and current_version != "unknown"
+        and info.blue_version != current_version
+    )
+    if not (config_mismatch or version_mismatch):
+        return
+    raise BlueError(
+        "运行中的 supervisor 与当前 blue 版本不一致，无法安全热重载"
+        f"（supervisor：blue={info.blue_version or '未知'}，"
+        f"配置格式 v{info.config_version}；当前：blue={current_version}，"
+        f"配置格式 v{RUNTIME_CONFIG_VERSION}）；请执行 blue down && blue up 后重试"
+    )
 
 
 def _status(config_path: str, *, as_json: bool) -> int:

@@ -236,7 +236,7 @@ demo = DemoService(unknown = 1)
 
 
 def test_write_runtime_configs_is_atomic_and_private(tmp_path: Path) -> None:
-    """运行时配置写入服务目录，权限 0600，内容为配置实例。"""
+    """运行时配置写入服务目录，权限 0600，含业务配置与基础设施两段。"""
     _workspace(tmp_path)
     config = _config(
         tmp_path,
@@ -253,7 +253,11 @@ demo = DemoService(value = "hello")
 
     assert set(changed) == {"bus", "demo"}
     target = desired.services["demo"].config_path
-    assert json.loads(target.read_text(encoding="utf-8")) == {"value": "hello"}
+    payload = json.loads(target.read_text(encoding="utf-8"))
+    assert payload["config"] == {"value": "hello"}
+    assert payload["infra"]["project_root"] == str(tmp_path)
+    assert payload["infra"]["bus_url"] == desired.bus_url
+    assert payload["infra"]["state_dir"] == str(tmp_path / ".blue")
     assert stat.S_IMODE(target.stat().st_mode) == 0o600
 
     assert write_runtime_configs(desired) == []

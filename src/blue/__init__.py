@@ -10,6 +10,7 @@ from blue.config import (
 from blue.control import Supervisor, render_state, write_runtime_configs
 from blue.errors import BlueError, RuntimeConfigError, SupervisorError
 from blue.runtime import (
+    RUNTIME_CONFIG_VERSION,
     build_runtime,
     load_runtime_config,
     registry_ttl,
@@ -26,6 +27,7 @@ from blue.worker import ToolLease, ToolRegistrar, ToolWorker
 
 __all__ = [
     "DEFAULT_CONFIG_PATH",
+    "RUNTIME_CONFIG_VERSION",
     "BlueError",
     "BusRuntime",
     "ConfigError",

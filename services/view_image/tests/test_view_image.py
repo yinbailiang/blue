@@ -4,13 +4,47 @@ from __future__ import annotations
 
 import base64
 import io
+import json
+from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
 from blue_service_view_image import ViewImageConfig, configure, view_image
 from PIL import Image
 
-from blue.runtime import PROJECT_ROOT_ENV
+from blue.runtime import (
+    CONFIG_SECTION,
+    DEFAULT_RUNTIME_CONFIG,
+    INFRA_SECTION,
+    reset_infra_config,
+)
+
+
+@pytest.fixture(autouse=True)
+def _isolate_infra() -> Iterator[None]:
+    """基础设施配置有进程级缓存，每个用例前后都清空。"""
+    reset_infra_config()
+    yield
+    reset_infra_config()
+
+
+def _install_infra(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """模拟 supervisor 下发：项目根指向 ``tmp_path``。"""
+    config_path = tmp_path / DEFAULT_RUNTIME_CONFIG
+    config_path.write_text(
+        json.dumps(
+            {
+                CONFIG_SECTION: {},
+                INFRA_SECTION: {
+                    "project_root": str(tmp_path),
+                    "bus_url": "amqp://guest:guest@127.0.0.1:5672/",
+                    "state_dir": str(tmp_path / ".blue"),
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("BLUE_CONFIG_FILE", str(config_path))
 
 
 def _write_png(path: Path, width: int = 800, height: int = 600) -> None:
@@ -40,7 +74,7 @@ def test_relative_path_anchors_at_project_root(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """相对路径锚定项目根，而不是进程 cwd。"""
-    monkeypatch.setenv(PROJECT_ROOT_ENV, str(tmp_path))
+    _install_infra(tmp_path, monkeypatch)
     configure(ViewImageConfig())
     _write_png(tmp_path / "chart.png", 400, 200)
 

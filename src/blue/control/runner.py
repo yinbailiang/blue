@@ -70,9 +70,12 @@ class ProcessRunner:
         service: DesiredService,
         *,
         instance_id: str,
-        env: dict[str, str],
     ) -> ProcessHandle:
         """启动一个服务进程。
+
+        只注入三个进程元信息环境变量（``BLUE_SERVICE_NAME`` /
+        ``BLUE_INSTANCE_ID`` / ``BLUE_CONFIG_FILE``）；其余配置统一走服务目录下的
+        ``service_runtime_config.json``（``config`` + ``infra`` 两段）。
 
         :raises SupervisorError: 命令不可执行或运行时配置缺失。
         """
@@ -84,7 +87,6 @@ class ProcessRunner:
         command = build_command(service.meta, uv_frozen=self._uv_frozen)
         merged_env = dict(os.environ)
         merged_env.update(service.meta.env)
-        merged_env.update(env)
         merged_env["BLUE_SERVICE_NAME"] = service.meta.name
         merged_env["BLUE_INSTANCE_ID"] = instance_id
         merged_env["BLUE_CONFIG_FILE"] = str(service.config_path)
