@@ -23,10 +23,12 @@ from blue.transport import (
     MemoryRuntime,
     RabbitRuntime,
 )
+from blue.tree import ROOT_ID, Tree, TreeError, TreeNode
 from blue.worker import ToolLease, ToolRegistrar, ToolWorker
 
 __all__ = [
     "DEFAULT_CONFIG_PATH",
+    "ROOT_ID",
     "RUNTIME_CONFIG_VERSION",
     "BlueError",
     "BusRuntime",
@@ -42,6 +44,9 @@ __all__ = [
     "ToolLease",
     "ToolRegistrar",
     "ToolWorker",
+    "Tree",
+    "TreeError",
+    "TreeNode",
     "build_runtime",
     "load_desired",
     "load_runtime_config",
