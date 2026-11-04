@@ -158,6 +158,7 @@ def restart_reasons(
     previous_source_hash: str,
     previous_version: str,
     changed_contracts: set[str],
+    sdk_changed: bool = False,
 ) -> tuple[str, ...]:
     """判断一个服务为什么需要（重新）启动；返回空元组表示不用动。
 
@@ -177,7 +178,24 @@ def restart_reasons(
     affected = sorted(set(current.meta.depends_contracts) & changed_contracts)
     if affected:
         reasons.append(f"依赖契约变化：{', '.join(affected)}")
+    if sdk_changed:
+        # SDK 是每个服务的隐式运行时依赖（worker/runtime/transport 都在里面）
+        reasons.append("SDK 变化")
     return tuple(reasons)
+
+
+def sdk_changed(desired: DesiredState, actual: ActualState | None) -> bool:
+    """blue SDK 自身是否变了（它不进 depends_contracts，但每个服务都依赖它）。
+
+    ``actual.sdk is None`` 说明快照是老格式写的——此时无法判断，按"变了"处理，
+    宁可多重启一次也不要让服务悄悄跑旧代码。
+    """
+    if actual is None or actual.sdk is None:
+        return True
+    return (
+        actual.sdk.package_version,
+        actual.sdk.source_hash,
+    ) != (desired.sdk.package_version, desired.sdk.source_hash)
 
 
 def changed_contracts(
@@ -214,6 +232,7 @@ def plan(desired: DesiredState, actual: ActualState | None) -> PlanResult:
     touched = set(contract_changes)
     services: list[ServiceChange] = []
 
+    sdk_touched = sdk_changed(desired, actual)
     for name, service in sorted(desired.services.items()):
         previous = actual.services.get(name) if actual is not None else None
         if previous is None:
@@ -229,6 +248,7 @@ def plan(desired: DesiredState, actual: ActualState | None) -> PlanResult:
                 previous_source_hash=previous.source_hash,
                 previous_version=previous.package_version,
                 changed_contracts=touched,
+                sdk_changed=sdk_touched,
             )
         )
         if previous.status in _UNHEALTHY:

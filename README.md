@@ -465,6 +465,25 @@ BLUE_BUS_URL=amqp://guest:guest@127.0.0.1:5672/blue \
 > **网络提示**：`weather` 会向 `wttr.in` 发起 HTTPS 请求；如需换源或镜像，
 > 在 `blue.infd` 里传 `WeatherService(base_url = ..., timeout = ...)`。
 
+## 变更追踪：契约、服务包、SDK 三件都算
+
+`blue plan` / 调谐器判断「要不要重启」时比对三样东西：
+
+| 维度 | 覆盖范围 | 变化时的后果 |
+|---|---|---|
+| **契约**（`contracts/*`） | 事件、载荷、代理 | 只重启 `depends_contracts` 里声明了它的服务 |
+| **服务包**（`services/<name>/`） | pyproject + `src/**/*.py` | 只重启该服务 |
+| **blue SDK**（`src/blue/**` + 根 pyproject） | worker、runtime、transport、tool_context | **重启全部服务** |
+
+第三行是后补的：`ToolWorker`/`BusRuntime` 这些运行时宿主留在 SDK 里，而服务包的
+`source_hash` 只覆盖自己的目录——SDK 改了调谐器**完全看不见**，进程会一直跑旧代码。
+现在 SDK 指纹（版本 + `src/blue/**` 内容）进期望状态、写进 `.blue/state.json`，
+变化时 `plan` 会显示 `SDK 变化` 并重启所有服务。
+
+判据（为什么 worker 不搬进契约包）：能放进"别的语言也能实现"的包 → 契约；
+只有"我们的运行时"才懂 → SDK。搬进契约会把 `BusRuntime`/`ContextVar`/生命周期
+塞进协议包，还会让"改一行实现"变成全机重启（契约 hash 是重启信号）。
+
 ## 注册中心是单实例（工具登记走请求/应答）
 
 `tool.register` / `tool.heartbeat` / `tool.unregister` 是**请求/应答**，不是单向广播：

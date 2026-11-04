@@ -25,6 +25,7 @@ from blue.control.health import readiness_target, wait_ready
 from blue.control.logs import LogManager
 from blue.control.model import (
     ActualContract,
+    ActualSdk,
     ActualService,
     ActualState,
     DesiredContract,
@@ -274,6 +275,13 @@ class Supervisor:
                 ", ".join(affected) or "无",
             )
 
+        sdk_touched = (
+            self._desired.sdk.package_version,
+            self._desired.sdk.source_hash,
+        ) != (desired.sdk.package_version, desired.sdk.source_hash)
+        if sdk_touched:
+            logger.info("blue SDK 已变化，全部服务将重启（worker/runtime 在 SDK 里）")
+
         try:
             write_runtime_configs(desired)
         except OSError as error:
@@ -294,6 +302,7 @@ class Supervisor:
                 previous_source_hash=runtime.desired.source_hash,
                 previous_version=runtime.desired.package_version,
                 changed_contracts=changed_contracts,
+                sdk_changed=sdk_touched,
             )
             if reasons:
                 logger.info("将重启 %s：%s", name, "、".join(reasons))
@@ -533,6 +542,10 @@ class Supervisor:
             updated_at=time.time(),
             config_error=self._config_error,
             services=services,
+            sdk=ActualSdk(
+                package_version=self._desired.sdk.package_version,
+                source_hash=self._desired.sdk.source_hash,
+            ),
             contracts={
                 name: ActualContract(
                     name=name,

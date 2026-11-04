@@ -28,6 +28,7 @@ from pydantic import ValidationError
 from blue.control.model import (
     ContractMeta,
     DesiredContract,
+    DesiredSdk,
     DesiredService,
     DesiredState,
     ServiceMeta,
@@ -93,13 +94,15 @@ def load_desired(path: str | Path = DEFAULT_CONFIG_PATH) -> DesiredState:
     _validate_dependencies(services)
     _validate_contract_dependencies(services, contracts)
     bus_url, bus_transport = _bus_endpoint(services)
+    sdk = _load_sdk(base_dir)
     return DesiredState(
-        generation=_generation(supervisor, services, contracts),
+        generation=_generation(supervisor, services, contracts, sdk),
         config_path=config_path,
         base_dir=base_dir,
         supervisor=supervisor,
         services=services,
         contracts=contracts,
+        sdk=sdk,
         bus_url=bus_url,
         bus_transport=bus_transport,
     )
@@ -403,6 +406,38 @@ def _load_contracts(base_dir: Path) -> dict[str, DesiredContract]:
     return contracts
 
 
+def _load_sdk(base_dir: Path) -> DesiredSdk:
+    """计算 blue SDK 自身的指纹（版本 + ``src/blue/**`` 内容）。
+
+    SDK 是每个服务的**隐式**运行时依赖：worker / runtime / transport / tool_context
+    都在里面，但服务包的 ``source_hash`` 只覆盖 ``services/<name>/``，所以 SDK 改了
+    调谐器察觉不到——服务会一直跑旧代码。这里把它显式纳入期望状态。
+    """
+    sdk_dir = base_dir / "src" / "blue"
+    if not sdk_dir.is_dir():
+        return DesiredSdk()
+    entries = scan_package(base_dir / "src" / "blue")
+    # 版本声明在项目根的 pyproject.toml 里，指纹也带上它
+    root_pyproject = base_dir / "pyproject.toml"
+    digest = hashlib.sha256()
+    if root_pyproject.is_file():
+        digest.update(b"pyproject.toml\0")
+        digest.update(root_pyproject.read_bytes())
+        digest.update(b"\0")
+    for name, _size, _mtime in entries:
+        digest.update(name.encode("utf-8"))
+        digest.update(b"\0")
+        try:
+            digest.update((sdk_dir / name).read_bytes())
+        except OSError:
+            digest.update(b"<missing>")
+        digest.update(b"\0")
+    return DesiredSdk(
+        package_version=read_package_version(root_pyproject),
+        source_hash=digest.hexdigest(),
+    )
+
+
 def _load_service(name: str, config: dict[str, Any], base_dir: Path) -> DesiredService:
     service_dir = (base_dir / "services" / name).resolve()
     service_file = service_dir / "service.infd"
@@ -487,9 +522,11 @@ def _generation(
     supervisor: SupervisorSettings,
     services: dict[str, DesiredService],
     contracts: dict[str, DesiredContract],
+    sdk: DesiredSdk,
 ) -> str:
     payload = {
         "supervisor": supervisor.model_dump(mode="json"),
+        "sdk": sdk.model_dump(mode="json"),
         "contracts": {
             name: {
                 "meta": contract.meta.model_dump(mode="json"),

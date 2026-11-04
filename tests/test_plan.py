@@ -13,6 +13,7 @@ import pytest
 from blue.config import load_desired
 from blue.control.model import (
     ActualContract,
+    ActualSdk,
     ActualService,
     ActualState,
     DesiredState,
@@ -48,6 +49,10 @@ def _actual(desired: DesiredState, *, generation: str = "old") -> ActualState:
             )
             for name, service in desired.services.items()
         },
+        sdk=ActualSdk(
+            package_version=desired.sdk.package_version,
+            source_hash=desired.sdk.source_hash,
+        ),
         contracts={
             name: ActualContract(
                 name=name,
@@ -268,3 +273,32 @@ def test_plan_omits_diff_when_snapshot_has_no_config(
 
     assert change.action == "restart"
     assert change.config_diff == ()
+
+
+def test_sdk_change_restarts_every_service(desired: DesiredState) -> None:
+    """SDK 变了（worker/runtime 在里面）→ 所有服务都要重启。
+
+    这是调谐器原来的盲区：服务包的 source_hash 只覆盖 services/<name>/，
+    SDK 改了完全察觉不到，进程会一直跑旧代码。
+    """
+    snapshot = _actual(desired)
+    snapshot.sdk = ActualSdk(package_version="0.0.1", source_hash="deadbeef")
+    result = plan(desired, snapshot)
+    assert result.counts()["restart"] == len(desired.services)
+    for change in result.services:
+        assert "SDK 变化" in change.reasons
+
+
+def test_sdk_unchanged_does_not_restart(desired: DesiredState) -> None:
+    """SDK 没变就不该因为这条规则重启（否则会陷入永久重启循环）。"""
+    result = plan(desired, _actual(desired))
+    assert result.counts()["restart"] == 0
+    assert all("SDK 变化" not in change.reasons for change in result.services)
+
+
+def test_missing_sdk_snapshot_counts_as_changed(desired: DesiredState) -> None:
+    """老格式快照没有 sdk 段：无法判断，按「变了」处理，宁多重启一次。"""
+    snapshot = _actual(desired)
+    snapshot.sdk = None
+    result = plan(desired, snapshot)
+    assert result.counts()["restart"] == len(desired.services)

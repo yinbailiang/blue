@@ -123,6 +123,17 @@ class DesiredContract(BaseModel):
     contract_path: Path
 
 
+class DesiredSdk(BaseModel):
+    """blue SDK 自身的指纹：它是每个服务的隐式运行时依赖。
+
+    worker / runtime / transport / tool_context 都在 SDK 里，服务进程全都 import 它——
+    所以 SDK 一改，`source_hash`（只覆盖服务包）察觉不到，必须单独跟踪。
+    """
+
+    package_version: str = ""
+    source_hash: str = ""
+
+
 class DesiredState(BaseModel):
     """一次配置编译得到的完整期望状态。"""
 
@@ -134,6 +145,7 @@ class DesiredState(BaseModel):
     supervisor: SupervisorSettings
     services: dict[str, DesiredService]
     contracts: dict[str, DesiredContract] = Field(default_factory=dict)
+    sdk: DesiredSdk = Field(default_factory=DesiredSdk)
     bus_url: str
     bus_transport: Literal["rabbit", "memory"]
 
@@ -194,6 +206,13 @@ class ActualContract(BaseModel):
     source_hash: str = ""
 
 
+class ActualSdk(BaseModel):
+    """上一轮部署时蓝本 SDK 的指纹（用于发现「SDK 改了但服务没重启」）。"""
+
+    package_version: str = ""
+    source_hash: str = ""
+
+
 class ActualState(BaseModel):
     """supervisor 写入 `.blue/state.json` 的实际状态。"""
 
@@ -207,3 +226,5 @@ class ActualState(BaseModel):
     config_error: str | None = None
     services: dict[str, ActualService] = Field(default_factory=dict)
     contracts: dict[str, ActualContract] = Field(default_factory=dict)
+    sdk: ActualSdk | None = None
+    """旧快照没有这一段；缺省表示「无法判断」，首次升级会把所有服务重启一遍。"""
