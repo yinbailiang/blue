@@ -109,6 +109,31 @@ contract {
 契约指纹覆盖 `pyproject.toml`、`contract.infd` 与 `src/**/*.py`；因此只改契约
 源码、不改服务源码，也会触发依赖服务重启。
 
+## 会话树的协议增量（2026-11-05）
+
+会话从线性消息表升级为树之后，`session.*` 增加了两个事件与三个字段；事件名
+本身不变，语义向后兼容（旧记录在升级时折成单链，等同于「只有一条分支」）。
+
+| 事件 | 方向 | 载荷 | 说明 |
+| --- | --- | --- | --- |
+| `session.branch.activate` | 请求 | `node` | 把该节点的父节点 `current` 指针指向它 |
+| `session.branch.activate.reply` | 应答 | `success` / `error_msg` | 切换结果 |
+| `session.node.delete` | 请求 | `node` | 删除该节点及其全部后代 |
+| `session.node.delete.reply` | 应答 | `removed` | 删除条数（含后代） |
+
+字段增量：
+
+- `SessionSnapshot`：`nodes`（整棵树）+ `current`（当前链的节点 id）+
+  `root_current`（根选中的顶层分支）取代原来的线性 `messages`；
+  每个 `SessionNode` 只带 `id` / `parent` / `current` / `message` / `created_at`，
+  消息正文仍是 `blue.messages` 编码的 JSON 文本，避免 `Message` 的序列化特例。
+- `SessionAppendRequest`：`parent`（`null` = 当前链末端，显式 id = 开新分支）；
+  `SessionAppendResponse`：`nodes`（新节点 id，末尾即新链尾）。
+- `SessionPromptRequest`：`parent` / `regenerate`（只生成回复、不追加用户消息）。
+
+指针语义是「父节点记住当前选中哪个孩子」，因此切换分支不产生写放大，删除分支
+只需要修一个指针；几何运算统一在 `blue.tree`，session 服务与 agent 不各算一套。
+
 ## 迁移阶段
 
 - **Phase 1（本次）**

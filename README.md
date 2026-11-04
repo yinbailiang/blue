@@ -542,7 +542,7 @@ Ready / Running → Stopping → Stopped
 | --- | --- |
 | `bus` | 管理 RabbitMQ、vhost/用户/权限配置，可选 AMQP TCP 代理 |
 | `registry` | 工具运行时注册中心：租约、心跳、目录版本与 `catalog.changed` 广播 |
-| `session` | SQLite（WAL）会话持久化 + 内容寻址附件表（去重、级联、GC），独立进程、支持重启后恢复 |
+| `session` | SQLite（WAL）会话**树**持久化（分支、切换、删子树）+ 内容寻址附件表（去重、级联、GC），独立进程、支持重启后恢复 |
 | `agent` | 模型推理 + 工具目录缓存，本身不保存会话正文；加载历史时自愈悬空 `tool_calls`，未知工具立即失败 |
 | `webui` | FastAPI + 静态单页 Chat UI，WebSocket 实时进度，托管在 supervisor 中 |
 | `clock` / `echo` / `text_stats` | 基础工具 |
@@ -669,6 +669,57 @@ uv run pytest -q
   升级时必须同步该目录的 `README.md` 与许可证文件
 - 生成物（`.blue/`、`services/*/service_runtime_config.json`）已在 `.gitignore`
 
+## 对话树
+
+会话不是一条线性消息表，而是一棵树：每条消息记 `parent`（挂在谁下面）与
+`current`（当前选中哪个孩子）。沿 `current` 从根走到底，就是界面显示、也是发给
+模型的那条**当前链**；在同一个父节点下再挂一个孩子，就得到一条新分支，旧分支
+原样保留。几何运算统一放在 `blue.tree`（`Tree` 只读视图：当前链、路径、子树），
+session 服务与 agent 共用同一份实现。
+
+```text
+root(0)
+└─ 1 system
+   └─ 2 user「帮我查一下」
+      ├─ 3 assistant「第一版回答」   ← 旧分支，保留
+      └─ 4 assistant「第二版回答」   ← current 指向它，界面显示它
+```
+
+| 概念 | 含义 |
+| --- | --- |
+| `SessionNode.parent` | 父节点 id；`0` 表示会话根（第一条消息的父节点） |
+| `SessionNode.current` | 该节点当前选中的子节点；`None` 表示叶子 |
+| `SessionSnapshot.current` | 派生字段：当前链的节点 id（早 → 新），界面直接照它渲染 |
+| `SessionSnapshot.nodes` | 全部节点（含未选中的分支），用来画分支切换条 |
+
+协议增量：
+
+- `session.append` 带 `parent`：`null` 挂到当前链末端（普通发言），显式给 id
+  就是在该消息下开新分支；一次追加的若干条消息自动串成一条链，回复里带新节点 id。
+  `assistant + 它的工具结果` 仍是一次原子提交，所以一步落库不会断开。
+- `session.branch.activate`：只把父节点的 `current` 指过去，不动任何消息；
+  `session.node.delete`：删掉该节点及其全部后代，父节点回落到剩下的最新分支。
+- `session.prompt` 带 `parent` / `regenerate`：`regenerate` 表示**只生成回复**、
+  不追加用户消息。于是三种界面动作落到同一套语义上：
+
+| 界面动作 | 协议 | 结果 |
+| --- | --- | --- |
+| 发言 | `text` 不带 `parent` | 追加用户消息并生成回复，链继续变长 |
+| 重试 | `regenerate=true` + `parent` | 同一父节点下多一条回复分支，旧的保留 |
+| 编辑 | `text` + `parent=原消息父节点` | 新用户消息成为兄弟分支，随后生成新回复 |
+
+每一轮送给模型的历史是**「根到挂载点的路径」**，不是整棵树：所以在旧分支上继续
+追问，只会带上那条链的上下文，兄弟分支的内容不会串味。挂载点已过期（被删）时
+立即失败，不会写半条消息。
+
+存储侧：`messages` 多了 `parent_id` / `current_id`，`sessions` 多了
+`root_current_id`。老库（schema 3）在启动时自动补列，并把线性历史折成一条单链
+（前一条是父、后一条是选中分支），顺序与升级前完全一致。
+
+前端：每条消息底部有脚注——父节点下有多个分支时显示 `‹ 2/3 ›`，另有「编辑」
+（内联文本框，`Ctrl/⌘+Enter` 保存）、「重试」、「删除分支」。分支操作共用一处
+事件委托，切换分支后由接口返回的快照整体重渲染。
+
 ## 多模态附件
 
 WebUI 支持**粘贴 / 拖入 / 选择**图片（PNG、JPEG、GIF、WebP），随消息一起送给模型：
@@ -704,7 +755,9 @@ WebUI 支持**粘贴 / 拖入 / 选择**图片（PNG、JPEG、GIF、WebP），�
 `catalog.reply` / `session.prompt` / `session.reply` / `session.stream` /
 `session.cancel` / `session.cancel.reply` /
 `session.get` / `session.get.reply` / `session.append` /
-`session.append.reply` / `session.update` / `session.update.reply` /
+`session.append.reply` / `session.branch.activate` /
+`session.branch.activate.reply` / `session.node.delete` /
+`session.node.delete.reply` / `session.update` / `session.update.reply` /
 `session.reset` / `session.reset.reply` / `session.state` /
 `session.state.reply` / `session.attachment.get` / `session.attachment.reply`。
 
