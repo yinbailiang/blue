@@ -46,7 +46,6 @@ MANAGED = {
     "registry",
     "session",
     "shell",
-    "text_stats",
     "view_image",
     "weather",
     "webui",
