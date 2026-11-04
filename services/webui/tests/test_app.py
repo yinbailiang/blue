@@ -8,6 +8,8 @@ from contextlib import asynccontextmanager
 from typing import Any
 
 from blue_contracts_session import (
+    SessionActivity,
+    SessionActivityPayload,
     SessionAttachment,
     SessionInfo,
     SessionReplyResponse,
@@ -33,6 +35,9 @@ class FakeBackend:
         self.blobs: dict[str, tuple[str, bytes]] = {}
         self.cancel_calls: list[str] = []
         self.stream_queue: asyncio.Queue[SessionStreamPayload] | None = None
+        self.activities: list[SessionActivity] = []
+        self.activity_queue: asyncio.Queue[SessionActivityPayload] | None = None
+        self.pending_stream: SessionStreamPayload | None = None
 
     async def start(self) -> None:
         return
@@ -52,6 +57,9 @@ class FakeBackend:
                 updated_at=1_700_000_000.0,
             )
         ]
+
+    async def activity(self) -> list[SessionActivity]:
+        return list(self.activities)
 
     async def snapshot(self, session_id: str) -> SessionSnapshot | None:
         if session_id != "s1":
@@ -136,11 +144,25 @@ class FakeBackend:
         )
 
     @asynccontextmanager
+    async def subscribe_activity(
+        self,
+    ) -> AsyncGenerator[asyncio.Queue[SessionActivityPayload]]:
+        queue: asyncio.Queue[SessionActivityPayload] = asyncio.Queue()
+        self.activity_queue = queue
+        try:
+            yield queue
+        finally:
+            self.activity_queue = None
+
+    @asynccontextmanager
     async def subscribe(
         self, session_id: str
     ) -> AsyncGenerator[asyncio.Queue[SessionStreamPayload]]:
         del session_id
         queue: asyncio.Queue[SessionStreamPayload] = asyncio.Queue()
+        if self.pending_stream is not None:
+            queue.put_nowait(self.pending_stream)
+            self.pending_stream = None
         self.stream_queue = queue
         try:
             yield queue
@@ -235,6 +257,7 @@ def test_chat_websocket_streams_reply() -> None:
     client = _client()
     with client.websocket_connect("/ws/chat") as socket:
         assert socket.receive_json()["type"] == "ready"
+        assert socket.receive_json()["type"] == "activity"
         socket.send_json({"type": "prompt", "session_id": "s1", "text": "ping"})
         frames: list[dict[str, Any]] = []
         while True:
@@ -289,10 +312,79 @@ def test_websocket_cancel_interrupts_running_prompt() -> None:
 
     with client.websocket_connect("/ws/chat") as socket:
         assert socket.receive_json()["type"] == "ready"
+        assert socket.receive_json()["type"] == "activity"
         socket.send_json({"type": "prompt", "session_id": "s1", "text": "你好"})
         assert socket.receive_json()["type"] == "status"
         socket.send_json({"type": "cancel", "session_id": "s1"})
-        frame: dict[str, Any] = socket.receive_json()
+        # cancelled 与 reply/session 可能竞争，读到 cancelled 为止
+        kinds: list[str] = []
+        while "cancelled" not in kinds:
+            kinds.append(socket.receive_json()["type"])
 
-    assert frame["type"] == "cancelled"
+    assert "cancelled" in kinds
     assert backend.cancelled_sessions == ["s1"]
+
+
+def test_sessions_include_running_state() -> None:
+    """/api/sessions 带出「谁正在运行」，刷新后靠它恢复列表标记。"""
+    backend = FakeBackend()
+    backend.activities = [
+        SessionActivity(
+            session_id="s1",
+            running=True,
+            phase="streaming",
+            step=2,
+            started_at=1_700_000_000.0,
+            updated_at=1_700_000_001.0,
+        )
+    ]
+    app = create_app(backend=backend, config=WebUIConfig(poll_interval=0.01))
+    client: Any = TestClient(app)
+
+    payload = client.get("/api/sessions").json()
+    assert payload["sessions"][0]["session_id"] == "s1"
+    assert payload["sessions"][0]["running"] is True
+    assert payload["sessions"][0]["phase"] == "streaming"
+    assert payload["sessions"][0]["step"] == 2
+
+    activity = client.get("/api/activity").json()
+    assert [item["session_id"] for item in activity["sessions"]] == ["s1"]
+
+
+def test_websocket_pushes_activity_snapshot_on_connect() -> None:
+    """刚连上就先收到运行状态快照（换设备/刷新后不再两眼一抹黑）。"""
+    backend = FakeBackend()
+    backend.activities = [
+        SessionActivity(session_id="s1", running=True, phase="tool", step=3)
+    ]
+    app = create_app(backend=backend, config=WebUIConfig(poll_interval=0.01))
+    client: Any = TestClient(app)
+
+    with client.websocket_connect("/ws/chat") as socket:
+        assert socket.receive_json()["type"] == "ready"
+        frame = socket.receive_json()
+
+    assert frame["type"] == "activity"
+    assert frame["sessions"][0]["session_id"] == "s1"
+    assert frame["sessions"][0]["running"] is True
+    assert frame["sessions"][0]["phase"] == "tool"
+
+
+def test_websocket_watch_forwards_stream_without_prompt() -> None:
+    """watch 帧让新页面接上正在进行的回复，而不必重新发一条消息。"""
+    backend = FakeBackend()
+    backend.pending_stream = SessionStreamPayload(
+        session_id="s1", kind="text", step=1, text="接续中"
+    )
+    app = create_app(backend=backend, config=WebUIConfig(poll_interval=0.01))
+    client: Any = TestClient(app)
+
+    with client.websocket_connect("/ws/chat") as socket:
+        assert socket.receive_json()["type"] == "ready"
+        assert socket.receive_json()["type"] == "activity"
+        socket.send_json({"type": "watch", "session_id": "s1"})
+        frame = socket.receive_json()
+
+    assert frame["type"] == "stream"
+    assert frame["event"]["text"] == "接续中"
+    assert frame["event"]["session_id"] == "s1"

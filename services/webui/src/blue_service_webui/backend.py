@@ -10,6 +10,12 @@ from pathlib import Path
 from typing import Any, Protocol
 
 from blue_contracts_session import (
+    SessionActivity,
+    SessionActivityEvent,
+    SessionActivityPayload,
+    SessionActivityQueryEvent,
+    SessionActivityQueryResponse,
+    SessionActivityReplyEvent,
     SessionAttachment,
     SessionAttachmentGetEvent,
     SessionAttachmentReplyEvent,
@@ -50,6 +56,8 @@ from blue.errors import BlueError
 from blue.transport import BusRuntime
 
 __all__ = [
+    "ActivityHandler",
+    "ActivitySink",
     "BusBackend",
     "MessagePartView",
     "MessageView",
@@ -62,6 +70,10 @@ __all__ = [
     "WebUIError",
     "serialize_snapshot",
 ]
+
+
+ACTIVITY_QUERY_TIMEOUT = 5.0
+"""查询会话运行状态的超时：查不到就当没有，不能拖慢启动。"""
 
 
 class WebUIError(BlueError):
@@ -95,6 +107,35 @@ class SessionStreamHandler(EventHandler):
         del bus_proxy, raw_event
         if isinstance(payload, SessionStreamPayload):
             self._sink.dispatch_stream(payload)
+
+
+class ActivitySink(Protocol):
+    """会话运行状态的汇聚目标。"""
+
+    def dispatch_activity(self, payload: SessionActivityPayload) -> None:
+        """把状态变化分发给所有订阅者。"""
+        ...
+
+
+class ActivityHandler(EventHandler):
+    """把总线上的会话运行状态投递到 WebUI 订阅队列。"""
+
+    def __init__(self, sink: ActivitySink) -> None:
+        super().__init__(
+            subscriptions=[SessionActivityEvent.name],
+            handle_timeout=1.0,
+        )
+        self._sink = sink
+
+    async def handle(
+        self,
+        payload: BaseModel | None,
+        bus_proxy: EventBus.Proxy,
+        raw_event: Event,
+    ) -> None:
+        del bus_proxy, raw_event
+        if isinstance(payload, SessionActivityPayload):
+            self._sink.dispatch_activity(payload)
 
 
 class ToolCallView(BaseModel):
@@ -175,6 +216,16 @@ class WebBackend(Protocol):
         """列出会话。"""
         ...
 
+    async def activity(self) -> list[SessionActivity]:
+        """当前正在运行的会话（刷新后恢复「进行中」状态用）。"""
+        ...
+
+    def subscribe_activity(
+        self,
+    ) -> AbstractAsyncContextManager[asyncio.Queue[SessionActivityPayload]]:
+        """订阅会话运行状态变化。"""
+        ...
+
     async def snapshot(self, session_id: str) -> SessionSnapshot | None:
         """读取会话快照。"""
         ...
@@ -230,6 +281,8 @@ class BusBackend:
         self._state_dir = state_dir or Path(".blue")
         self._proxy: EventBus.Proxy | None = None
         self._stream_queues: dict[str, set[asyncio.Queue[SessionStreamPayload]]] = {}
+        self._activity: dict[str, SessionActivity] = {}
+        self._activity_queues: set[asyncio.Queue[SessionActivityPayload]] = set()
 
     async def start(self) -> None:
         """启动总线成员并注册流式事件订阅。"""
@@ -237,20 +290,72 @@ class BusBackend:
         self._proxy = self._runtime.proxy("ui.webui")
         try:
             await self._runtime.register(SessionStreamHandler(self))
+            await self._runtime.register(ActivityHandler(self))
         except Exception:
             await self._runtime.stop()
             raise
+        await self.refresh_activity()
 
     async def stop(self) -> None:
         """停止总线成员并清空订阅队列。"""
         self._proxy = None
         self._stream_queues.clear()
+        self._activity.clear()
+        self._activity_queues.clear()
         await self._runtime.stop()
 
     def dispatch_stream(self, payload: SessionStreamPayload) -> None:
         """把流式事件推给该会话当前打开的 WebSocket。"""
         for queue in tuple(self._stream_queues.get(payload.session_id, ())):
             queue.put_nowait(payload)
+
+    def dispatch_activity(self, payload: SessionActivityPayload) -> None:
+        """更新运行状态缓存，并推给所有打开的 WebSocket。"""
+        activity = payload.activity
+        if activity.running:
+            self._activity[activity.session_id] = activity
+        else:
+            self._activity.pop(activity.session_id, None)
+        for queue in tuple(self._activity_queues):
+            queue.put_nowait(payload)
+
+    async def activity(self) -> list[SessionActivity]:
+        """当前正在运行的会话。"""
+        return [item for item in self._activity.values() if item.running]
+
+    async def refresh_activity(self) -> None:
+        """向 Agent 拉一次运行状态快照。
+
+        用短超时：Agent 没起/还是旧版本时不能把 WebUI 启动拖住，状态查不到就
+        当作「当前没有会话在跑」，后续广播会补上。
+        """
+        try:
+            response = await self._request(
+                SessionActivityQueryEvent.name,
+                {},
+                SessionActivityReplyEvent.name,
+                session_id=self._runtime.member_id,
+                timeout=ACTIVITY_QUERY_TIMEOUT,
+            )
+        except BlueError:
+            return
+        if not isinstance(response, SessionActivityQueryResponse):
+            return
+        self._activity = {
+            item.session_id: item for item in response.running if item.running
+        }
+
+    @asynccontextmanager
+    async def subscribe_activity(
+        self,
+    ) -> AsyncGenerator[asyncio.Queue[SessionActivityPayload]]:
+        """订阅运行状态变化（当前 WebSocket 生命周期内有效）。"""
+        queue: asyncio.Queue[SessionActivityPayload] = asyncio.Queue()
+        self._activity_queues.add(queue)
+        try:
+            yield queue
+        finally:
+            self._activity_queues.discard(queue)
 
     @asynccontextmanager
     async def subscribe(
@@ -420,6 +525,7 @@ class BusBackend:
         reply_event: str,
         *,
         session_id: str,
+        timeout: float | None = None,
     ) -> ResponseProtocol:
         if self._proxy is None:
             raise WebUIError("WebUI 总线尚未启动")
@@ -430,7 +536,7 @@ class BusBackend:
                 payload,
                 reply_event,
                 session_id=session_id,
-                timeout=self._timeout,
+                timeout=timeout if timeout is not None else self._timeout,
             )
         except TimeoutError as error:
             raise WebUIError("等待后端响应超时") from error

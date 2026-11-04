@@ -438,6 +438,51 @@ kbd {
   font-size: 10.5px;
 }
 
+/* 会话正在运行：列表里给一个会呼吸的小圆点，刷新后也知道谁在跑 */
+.session-running {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  margin-left: 6px;
+  padding: 1px 6px 1px 5px;
+  border-radius: 999px;
+  background: rgba(94, 226, 168, 0.14);
+  color: var(--mint, #5ee2a8);
+  font-size: 10px;
+  font-weight: 600;
+  vertical-align: middle;
+}
+
+.session-running-dot {
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: currentColor;
+  animation: session-running-pulse 1.4s ease-in-out infinite;
+}
+
+.session-item.is-running .session-avatar {
+  box-shadow: 0 0 0 2px rgba(94, 226, 168, 0.35);
+}
+
+@keyframes session-running-pulse {
+  0%,
+  100% {
+    opacity: 1;
+    transform: scale(1);
+  }
+  50% {
+    opacity: 0.35;
+    transform: scale(0.72);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .session-running-dot {
+    animation: none;
+  }
+}
+
 .session-delete {
   display: grid;
   place-items: center;

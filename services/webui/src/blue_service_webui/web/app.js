@@ -48,6 +48,9 @@
     liveMessage: null,
     streamRenderTimer: null,
     pendingAttachments: [],
+    activities: {},
+    watching: null,
+    cancelled: false,
   };
 
   const MAX_ATTACHMENTS = 4;
@@ -173,6 +176,51 @@
     els.welcome.hidden = !show;
     els.messageList.hidden = show;
     if (show) resetView();
+  }
+
+  function activityLabel(activity) {
+    const phase = activity?.phase || "";
+    if (phase === "tool") return "执行工具中";
+    if (phase === "streaming") return "生成中";
+    if (phase === "thinking") return "思考中";
+    return "运行中";
+  }
+
+  function sessionRunning(session) {
+    if (!session) return false;
+    return Boolean(session.running) || Boolean(state.activities[session.session_id]?.running);
+  }
+
+  function sendFrame(frame) {
+    const socket = state.socket;
+    if (socket && socket.readyState === WebSocket.OPEN) {
+      socket.send(JSON.stringify(frame));
+      return true;
+    }
+    return false;
+  }
+
+  /*
+   * 「接续」：另一个页面/设备（或刷新后的本页）订阅某个会话的实时流。
+   * 不发起新一轮 prompt，只把正在生成的内容接上来。
+   */
+  async function startWatching(sessionId) {
+    if (!sessionId || state.watching === sessionId) return;
+    try {
+      await ensureSocket();
+    } catch {
+      return;
+    }
+    state.watching = sessionId;
+    sendFrame({ type: "watch", session_id: sessionId });
+    const activity = state.activities[sessionId];
+    setBusy(true, `Agent ${activityLabel(activity)}…（已接续）`);
+  }
+
+  function stopWatching() {
+    const sessionId = state.watching;
+    state.watching = null;
+    if (sessionId) sendFrame({ type: "unwatch", session_id: sessionId });
   }
 
   function setBusy(busy, label = "Agent 正在思考…") {
@@ -440,13 +488,21 @@
   function sessionItem(session, active) {
     const id = session.session_id;
     const count = Number(session.message_count || 0);
-    return `<div class="session-item ${active ? "active" : ""}" data-session="${escapeHtml(
+    const running = sessionRunning(session);
+    const badge = running
+      ? `<span class="session-running"><span class="session-running-dot"></span>${escapeHtml(
+          activityLabel(state.activities[id] || session),
+        )}</span>`
+      : "";
+    return `<div class="session-item ${active ? "active" : ""} ${
+      running ? "is-running" : ""
+    }" data-session="${escapeHtml(
       id,
     )}" role="button" tabindex="0" aria-current="${active ? "page" : "false"}">
       <span class="session-avatar">${escapeHtml(initialsFor(id))}</span>
       <span class="session-copy">
         <span class="session-name">${escapeHtml(titleFor(id))}</span>
-        <span class="session-meta">${count} 条消息 · ${relativeTime(session.updated_at)}</span>
+        <span class="session-meta">${count} 条消息 · ${relativeTime(session.updated_at)}${badge}</span>
       </span>
       <button class="session-delete" type="button" data-delete="${escapeHtml(
         id,
@@ -907,6 +963,10 @@
     try {
       const payload = await api("/api/sessions");
       state.sessions = payload.sessions || [];
+      state.activities = {};
+      for (const item of state.sessions) {
+        if (item.running) state.activities[item.session_id] = item;
+      }
       renderSessions();
     } catch (error) {
       if (showError) toast(`会话列表：${error.message}`, "error");
@@ -914,14 +974,22 @@
   }
 
   async function loadSession(sessionId, options = {}) {
-    if (state.busy) {
+    if (state.busy && !state.watching) {
       toast("请等待当前回复完成", "info");
       return;
+    }
+    if (state.watching && state.watching !== sessionId) {
+      stopWatching();
+      setBusy(false);
     }
     try {
       const snapshot = await api(`/api/sessions/${encodeURIComponent(sessionId)}`);
       applySnapshot(snapshot, { force: true });
       closeSidebar();
+      // 打开一个正在运行的会话：直接接上它的实时流
+      if (!state.busy && state.activities[sessionId]?.running) {
+        void startWatching(sessionId);
+      }
     } catch (error) {
       if (options.silent) {
         localStorage.removeItem("blue.session");
@@ -1088,6 +1156,8 @@
     showWelcome(false);
     renderMessages({ scroll: true, force: true });
     renderSessions();
+    stopWatching();
+    state.cancelled = false;
     setBusy(true, "Agent 正在思考…");
     els.prompt.value = "";
     resizePrompt();
@@ -1164,6 +1234,7 @@
         window.clearTimeout(timer);
         state.socket = null;
         state.socketPromise = null;
+        state.watching = null;
         setSocketOnline(false, "离线");
         if (state.liveMessage) state.liveMessage.live = false;
         state.liveMessage = null;
@@ -1226,7 +1297,7 @@
   }
 
   function handleStreamEvent(event) {
-    if (!state.busy) return;
+    if (!state.busy && !state.watching) return;
     const kind = event.kind;
     if (kind === "step_start") {
       beginStreamStep();
@@ -1300,6 +1371,43 @@
     }
   }
 
+  /*
+   * 运行状态刷新：谁在跑、跑到哪一步。
+   * 当前会话由别处（另一台设备 / 刷新前的本页）发起时，自动接续它的实时流。
+   */
+  function handleActivityFrame(frame) {
+    const incoming = Array.isArray(frame.sessions) ? frame.sessions : [];
+    for (const activity of incoming) {
+      const id = activity?.session_id;
+      if (!id) continue;
+      if (activity.running) state.activities[id] = activity;
+      else delete state.activities[id];
+      const summary = state.sessions.find((item) => item.session_id === id);
+      if (summary) {
+        summary.running = Boolean(activity.running);
+        summary.phase = activity.phase || "";
+        summary.step = activity.step || 0;
+      }
+    }
+    renderSessions();
+    const current = state.sessionId;
+    if (!current) return;
+    const activity = state.activities[current];
+    if (activity?.running) {
+      if (state.watching === current) {
+        els.typingLabel.textContent = `Agent ${activityLabel(activity)}…（已接续）`;
+      } else if (!state.busy) {
+        void startWatching(current);
+      }
+    } else if (state.watching === current) {
+      stopWatching();
+      setBusy(false);
+      toast("本轮生成已结束", "info");
+      void loadSession(current, { silent: true });
+      void refreshSessions();
+    }
+  }
+
   function handleSocketMessage(event) {
     let frame;
     try {
@@ -1309,6 +1417,12 @@
     }
     if (frame.type === "ready") {
       setSocketOnline(true, "实时连接");
+      const activity = state.sessionId ? state.activities[state.sessionId] : null;
+      if (activity?.running) void startWatching(state.sessionId);
+      return;
+    }
+    if (frame.type === "activity") {
+      handleActivityFrame(frame);
       return;
     }
     if (frame.type === "status") {
@@ -1330,14 +1444,21 @@
     if (frame.type === "cancelled") {
       if (state.liveMessage?.live) state.liveMessage.live = false;
       state.liveMessage = null;
+      state.cancelled = true;
+      stopWatching();
       setBusy(false);
       toast("已中断生成", "info");
       renderMessages({ scroll: true, force: state.stickToBottom });
       return;
     }
     if (frame.type === "reply") {
+      stopWatching();
       setBusy(false);
-      if (frame.success === false) {
+      const wasCancelled = state.cancelled;
+      state.cancelled = false;
+      if (wasCancelled) {
+        // 中断提示已由 cancelled 帧给出，这里不再重复报错
+      } else if (frame.success === false) {
         toast(frame.text || "Agent 处理失败", "error");
       } else {
         if (!state.liveMessage?.content) appendAssistantText(frame.text);
@@ -1347,6 +1468,7 @@
     }
     if (frame.type === "session") {
       applySnapshot(frame.session, { force: state.stickToBottom });
+      stopWatching();
       setBusy(false);
       void refreshSessions();
       return;
