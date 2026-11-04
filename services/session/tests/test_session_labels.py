@@ -151,8 +151,13 @@ async def _state_reports_queued(tmp_path: Path) -> None:
             ("你好", "你好", 2)
         ]
 
-        claimed = await database.claim_message("s1", now=104.0)
+        # 认领不删行：队列里仍是 2 条（一条 sending、一条 pending），
+        # 侧栏角标表示「发件箱里还有几条」，所以仍是 2
+        claimed = await database.claim_message("s1", now=104.0, stale_after=300.0)
         assert claimed is not None
+        infos = await database.state()
+        assert infos[0].queued == 2
+        await database.complete_message(claimed.id)
         infos = await database.state()
         assert infos[0].queued == 1
     finally:

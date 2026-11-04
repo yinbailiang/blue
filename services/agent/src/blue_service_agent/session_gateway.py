@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Iterable
 from dataclasses import dataclass
 from typing import Protocol
 
 from blue_contracts_session import (
+    QueuedMessage,
     SessionAppendEvent,
     SessionAppendReplyEvent,
     SessionAppendResponse,
@@ -17,7 +19,19 @@ from blue_contracts_session import (
     SessionGetEvent,
     SessionGetReplyEvent,
     SessionGetResponse,
+    SessionOutboxClaimEvent,
+    SessionOutboxClaimReplyEvent,
+    SessionOutboxClaimResponse,
+    SessionOutboxCompleteEvent,
+    SessionOutboxCompleteReplyEvent,
+    SessionOutboxFailEvent,
+    SessionOutboxFailReplyEvent,
+    SessionOutboxRetryEvent,
+    SessionOutboxRetryReplyEvent,
     SessionSnapshot,
+    SessionStateEvent,
+    SessionStateReplyEvent,
+    SessionStateResponse,
     SessionUpdateEvent,
     SessionUpdateReplyEvent,
     SessionUpdateResponse,
@@ -28,6 +42,8 @@ from infinity_bus.templates.request import request
 
 from blue.errors import BlueError
 from blue.messages import encode_messages
+
+logger = logging.getLogger(__name__)
 
 __all__ = ["AttachmentPayload", "BusSessionGateway", "SessionGateway"]
 
@@ -49,6 +65,32 @@ class AttachmentPayload:
 
 class SessionGateway(Protocol):
     """Agent 依赖的会话能力。"""
+
+    async def claim(
+        self, bus_proxy: EventBus.Proxy, session_id: str
+    ) -> QueuedMessage | None:
+        """认领队首一条待发送消息（pending → sending）。"""
+        ...
+
+    async def complete(self, bus_proxy: EventBus.Proxy, message_id: str) -> None:
+        """认领的消息跑完了。"""
+        ...
+
+    async def fail(
+        self, bus_proxy: EventBus.Proxy, message_id: str, error: str
+    ) -> None:
+        """认领的消息失败了。"""
+        ...
+
+    async def retry(
+        self, bus_proxy: EventBus.Proxy, session_id: str, message_id: str
+    ) -> None:
+        """把失败项放回待发。"""
+        ...
+
+    async def queued_sessions(self, bus_proxy: EventBus.Proxy) -> list[str]:
+        """哪些会话还有待发消息（agent 启动时恢复队列泵）。"""
+        ...
 
     async def ensure(
         self,
@@ -94,6 +136,95 @@ class BusSessionGateway:
 
     def __init__(self, *, timeout: float = 10.0) -> None:
         self._timeout = timeout
+
+    async def claim(
+        self, bus_proxy: EventBus.Proxy, session_id: str
+    ) -> QueuedMessage | None:
+        """认领队首一条待发送消息（pending → sending）。"""
+        response = await self._outbox_call(
+            bus_proxy,
+            SessionOutboxClaimEvent.name,
+            {},
+            SessionOutboxClaimReplyEvent.name,
+            session_id,
+        )
+        if isinstance(response, SessionOutboxClaimResponse):
+            return response.message
+        return None
+
+    async def complete(self, bus_proxy: EventBus.Proxy, message_id: str) -> None:
+        """认领的消息跑完了：从队列删除。"""
+        await self._outbox_call(
+            bus_proxy,
+            SessionOutboxCompleteEvent.name,
+            {"message_id": message_id},
+            SessionOutboxCompleteReplyEvent.name,
+            None,
+        )
+
+    async def fail(
+        self, bus_proxy: EventBus.Proxy, message_id: str, error: str
+    ) -> None:
+        """认领的消息失败了：留错误原因，等自动/人工重试。"""
+        await self._outbox_call(
+            bus_proxy,
+            SessionOutboxFailEvent.name,
+            {"message_id": message_id, "error": error[:500]},
+            SessionOutboxFailReplyEvent.name,
+            None,
+        )
+
+    async def retry(
+        self, bus_proxy: EventBus.Proxy, session_id: str, message_id: str
+    ) -> None:
+        """把失败项放回待发。"""
+        await self._outbox_call(
+            bus_proxy,
+            SessionOutboxRetryEvent.name,
+            {"message_id": message_id},
+            SessionOutboxRetryReplyEvent.name,
+            session_id,
+        )
+
+    async def queued_sessions(self, bus_proxy: EventBus.Proxy) -> list[str]:
+        """哪些会话还有待发消息（启动时恢复队列泵）。"""
+        try:
+            reply = await request(
+                bus_proxy,
+                SessionStateEvent.name,
+                {},
+                SessionStateReplyEvent.name,
+                session_id="agent.outbox",
+                timeout=5.0,
+            )
+        except Exception:
+            logger.warning("读取会话状态失败（恢复队列泵）", exc_info=True)
+            return []
+        if isinstance(reply, SessionStateResponse):
+            return [info.session_id for info in reply.sessions if info.queued > 0]
+        return []
+
+    async def _outbox_call(
+        self,
+        bus_proxy: EventBus.Proxy,
+        request_event: str,
+        payload: dict[str, object],
+        reply_event: str,
+        session_id: str | None,
+    ) -> object:
+        """发一个队列操作请求；失败只记日志，不打断调用方。"""
+        try:
+            return await request(
+                bus_proxy,
+                request_event,
+                payload,
+                reply_event,
+                session_id=session_id or "agent.outbox",
+                timeout=10.0,
+            )
+        except Exception:
+            logger.warning("队列操作 %s 失败", request_event, exc_info=True)
+            return None
 
     async def ensure(
         self,

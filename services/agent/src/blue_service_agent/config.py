@@ -27,6 +27,13 @@ class AgentConfig(BaseModel):
     base_url: str | None = None
     system_prompt: str = "你是 blue，一个通过工具完成任务的智能体。"
     max_steps: int = Field(default=8, ge=1)
+    outbox_max_attempts: int = Field(
+        default=3,
+        ge=1,
+        description=(
+            "排队消息失败后最多尝试几次（含首次）；用完就留在发件箱里等人工处理"
+        ),
+    )
     tool_timeout: float = Field(default=30.0, gt=0)
     llm_timeout: float = Field(
         default=300.0,

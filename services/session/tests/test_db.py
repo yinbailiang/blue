@@ -237,16 +237,79 @@ async def _outbox_flow(tmp_path: Path) -> None:
         assert [item.text for item in pending] == ["第一条", "第二条"]
         assert [item.position for item in pending] == [1, 2]
         assert all(item.session_id == "s1" for item in pending)
+        assert all(item.state == "pending" for item in pending)
 
-        claimed = await db.claim_message("s1", now=3.0)
+        # 认领 = 改状态而不是删行：消息还在队列里，只是标成 sending
+        claimed = await db.claim_message("s1", now=3.0, stale_after=300.0)
         assert claimed is not None
         assert claimed.id == first.id
-        assert [item.text for item in await db.list_outbox("s1")] == ["第二条"]
+        assert claimed.state == "sending"
+        assert claimed.attempts == 1
+        listed = await db.list_outbox("s1")
+        assert [(item.text, item.state) for item in listed] == [
+            ("第一条", "sending"),
+            ("第二条", "pending"),
+        ]
 
-        assert await db.remove_message("s1", second.id) is True
-        assert await db.list_outbox("s1") == []
-        assert await db.claim_message("s1", now=4.0) is None
+        # 跑完 → 真的删掉
+        assert await db.complete_message(claimed.id) is True
+        listed = await db.list_outbox("s1")
+        assert [item.text for item in listed] == ["第二条"]
+
+        # 失败 → 留原因；重试 → 回到待发
+        stuck = await db.claim_message("s1", now=4.0, stale_after=300.0)
+        assert stuck is not None
+        assert await db.fail_message(stuck.id, "模型超时") is True
+        failed = (await db.list_outbox("s1"))[0]
+        assert (failed.state, failed.error, failed.attempts) == (
+            "failed",
+            "模型超时",
+            1,
+        )
+        assert failed.id == second.id
+        assert await db.retry_message("s1", failed.id) is True
+        recovered = (await db.list_outbox("s1"))[0]
+        assert (recovered.state, recovered.error) == ("pending", None)
+
+        # 认领后超时：自动回到待发（进程崩溃兜底）
+        stalled = await db.claim_message("s1", now=10.0, stale_after=0.0)
+        assert stalled is not None
+        assert (await db.list_outbox("s1"))[0].state == "sending"
+        reclaimed = await db.claim_message("s1", now=20.0, stale_after=5.0)
+        assert reclaimed is not None
+        assert reclaimed.attempts == 3
+        # 上面这次认领顺带回收了「超时」的那条，再认领一次就是空队列
+
+        # 编辑：发送中的不可改，待发的可改
+        await db.complete_message(reclaimed.id)
+        editable = await db.enqueue_message("s1", "待改", [], now=30.0)
+        assert await db.update_message("s1", editable.id, "改过了", []) is True
+        assert (await db.list_outbox("s1"))[0].text == "改过了"
+
+        # 排序：置顶 / 上移 / 下移
+        tail = await db.enqueue_message("s1", "尾巴", [], now=31.0)
+        assert await db.move_message("s1", tail.id, "top") is True
+        assert [item.text for item in await db.list_outbox("s1")] == [
+            "尾巴",
+            "改过了",
+        ]
+        assert await db.move_message("s1", tail.id, "down") is True
+        assert [item.text for item in await db.list_outbox("s1")] == [
+            "改过了",
+            "尾巴",
+        ]
+
+        # 清空：发送中的那条保留
+        running = await db.claim_message("s1", now=40.0, stale_after=300.0)
+        assert running is not None
+        assert await db.clear_outbox("s1") == 1
+        remaining = await db.list_outbox("s1")
+        assert [(item.text, item.state) for item in remaining] == [
+            (running.text, "sending")
+        ]
+
         # 取消不存在的项返回 False
         assert await db.remove_message("s1", second.id) is False
+        assert await db.outbox_depth("s1") == 1
     finally:
         await db.close()

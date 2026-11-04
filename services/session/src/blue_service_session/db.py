@@ -13,9 +13,11 @@ import uuid
 from collections.abc import Iterable
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import cast
 
 import aiosqlite
 from blue_contracts_session import (
+    OutboxState,
     QueuedMessage,
     SessionAttachment,
     SessionInfo,
@@ -99,15 +101,24 @@ CREATE TABLE IF NOT EXISTS session_outbox (
     id TEXT PRIMARY KEY,
     session_id TEXT NOT NULL REFERENCES sessions(session_id) ON DELETE CASCADE,
     payload TEXT NOT NULL,
-    created_at REAL NOT NULL
+    created_at REAL NOT NULL,
+    state TEXT NOT NULL DEFAULT 'pending',
+    attempts INTEGER NOT NULL DEFAULT 0,
+    error TEXT,
+    claimed_at REAL,
+    position REAL NOT NULL DEFAULT 0
 );
 
 CREATE INDEX IF NOT EXISTS idx_session_outbox_session
-    ON session_outbox(session_id, created_at);
+    ON session_outbox(session_id, position);
 """
 
-_SCHEMA_VERSION = 5
+_SCHEMA_VERSION = 6
 """schema 版本；所有建表语句都是 ``IF NOT EXISTS``，老库按需补列/补表即可。
+
+版本 6 把待发送队列升级成**有状态**的：``state``（pending/sending/failed）、
+``attempts``、``error``、``claimed_at``（认领时刻，超时回收用）、``position``
+（显式排序键，支持重排）。老库按 ``created_at`` 回填 position，顺序不变。
 
 版本 5 给 ``sessions`` 加了 ``title`` / ``preview``：会话标题不再是浏览器里的
 本地状态，而是服务端按首条用户消息自动生成、也可显式改名；``preview`` 是最后
@@ -721,10 +732,38 @@ class SessionDatabase:
         if await self._add_label_columns(connection):
             # 老库没有标题/摘要：按历史消息补一份，侧栏立刻就有名字
             await self._backfill_labels(connection)
+        if await self._add_outbox_columns(connection):
+            # 老队列只有 created_at：按它回填 position，顺序不变
+            await connection.execute(
+                "UPDATE session_outbox SET position = created_at WHERE position = 0"
+            )
         if await self._add_tree_columns(connection):
             # 老库只有线性顺序：按「前一条是父、后一条是选中分支」补成一条单链
             await self._backfill_linear_tree(connection)
         await connection.execute(f"PRAGMA user_version = {_SCHEMA_VERSION}")
+
+    async def _add_outbox_columns(self, connection: aiosqlite.Connection) -> bool:
+        """给老库的待发送队列补状态列；返回是否真的补了。"""
+        columns = await _table_columns(connection, "session_outbox")
+        added = False
+        for name, ddl in (
+            ("state", "TEXT NOT NULL DEFAULT 'pending'"),
+            ("attempts", "INTEGER NOT NULL DEFAULT 0"),
+            ("error", "TEXT"),
+            ("claimed_at", "REAL"),
+            ("position", "REAL NOT NULL DEFAULT 0"),
+        ):
+            if name in columns:
+                continue
+            await connection.execute(
+                f"ALTER TABLE session_outbox ADD COLUMN {name} {ddl}"
+            )
+            added = True
+        await connection.execute(
+            "CREATE INDEX IF NOT EXISTS idx_session_outbox_position"
+            " ON session_outbox(session_id, position)"
+        )
+        return added
 
     async def _add_label_columns(self, connection: aiosqlite.Connection) -> bool:
         """给老库补 title / preview 列；返回是否真的补了（补了才需要回填）。"""
@@ -1076,10 +1115,13 @@ class SessionDatabase:
             try:
                 await connection.execute(
                     """
-                    INSERT INTO session_outbox (id, session_id, payload, created_at)
-                    VALUES (?, ?, ?, ?)
+                    INSERT INTO session_outbox
+                        (id, session_id, payload, created_at, state, position)
+                    VALUES (?, ?, ?, ?, 'pending',
+                            (SELECT COALESCE(MAX(position), 0) + 1
+                               FROM session_outbox WHERE session_id = ?))
                     """,
-                    (message.id, session_id, payload, now),
+                    (message.id, session_id, payload, now, session_id),
                 )
                 await connection.commit()
             except Exception:
@@ -1093,9 +1135,10 @@ class SessionDatabase:
             connection = self._connection_or_raise()
             cursor = await connection.execute(
                 """
-                SELECT id, payload, created_at FROM session_outbox
+                SELECT id, payload, created_at, state, attempts, error
+                  FROM session_outbox
                  WHERE session_id = ?
-                 ORDER BY created_at, rowid
+                 ORDER BY position, rowid
                 """,
                 (session_id,),
             )
@@ -1120,36 +1163,197 @@ class SessionDatabase:
         return removed
 
     async def claim_message(
-        self, session_id: str, *, now: float
+        self, session_id: str, *, now: float, stale_after: float
     ) -> QueuedMessage | None:
-        """取出队首并从队列移除（agent 消费用）。"""
-        del now
+        """认领队首一条（pending → sending），并回收超时未完成的认领。
+
+        认领是**改状态**而不是删行：agent 崩了也不会丢消息，超过
+        ``stale_after`` 秒仍停在 sending 的会自动回到 pending 重新排队。
+        """
+        async with self._lock:
+            connection = self._connection_or_raise()
+            await connection.execute("BEGIN IMMEDIATE")
+            try:
+                await connection.execute(
+                    """
+                    UPDATE session_outbox
+                       SET state = 'pending', claimed_at = NULL
+                     WHERE session_id = ? AND state = 'sending'
+                       AND COALESCE(claimed_at, 0) <= ?
+                    """,
+                    (session_id, now - stale_after),
+                )
+                cursor = await connection.execute(
+                    """
+                    UPDATE session_outbox
+                       SET state = 'sending', claimed_at = ?, attempts = attempts + 1
+                     WHERE id = (
+                        SELECT id FROM session_outbox
+                         WHERE session_id = ? AND state = 'pending'
+                         ORDER BY position, rowid
+                         LIMIT 1
+                     )
+                    RETURNING id, payload, created_at, state, attempts, error
+                    """,
+                    (now, session_id),
+                )
+                row = await cursor.fetchone()
+                await cursor.close()
+                await connection.commit()
+            except Exception:
+                await connection.rollback()
+                raise
+        if row is None:
+            return None
+        return _queued_from_row(row, 1, session_id)
+
+    async def complete_message(self, message_id: str) -> bool:
+        """认领的消息跑完了：从队列里删掉。"""
+        async with self._lock:
+            connection = self._connection_or_raise()
+            cursor = await connection.execute(
+                "DELETE FROM session_outbox WHERE id = ?", (message_id,)
+            )
+            await connection.commit()
+            done = cursor.rowcount > 0
+            await cursor.close()
+        return done
+
+    async def fail_message(self, message_id: str, error: str) -> bool:
+        """认领的消息失败了：留错误原因，等重试或人工处理。"""
+        async with self._lock:
+            connection = self._connection_or_raise()
+            cursor = await connection.execute(
+                """
+                UPDATE session_outbox
+                   SET state = 'failed', error = ?, claimed_at = NULL
+                 WHERE id = ?
+                """,
+                (error[:500], message_id),
+            )
+            await connection.commit()
+            failed = cursor.rowcount > 0
+            await cursor.close()
+        return failed
+
+    async def retry_message(self, session_id: str, message_id: str) -> bool:
+        """把失败项放回待发（重新排队）。"""
+        async with self._lock:
+            connection = self._connection_or_raise()
+            cursor = await connection.execute(
+                """
+                UPDATE session_outbox
+                   SET state = 'pending', error = NULL, claimed_at = NULL
+                 WHERE session_id = ? AND id = ? AND state = 'failed'
+                """,
+                (session_id, message_id),
+            )
+            await connection.commit()
+            queued = cursor.rowcount > 0
+            await cursor.close()
+        return queued
+
+    async def update_message(
+        self,
+        session_id: str,
+        message_id: str,
+        text: str,
+        attachments: list[SessionAttachment],
+    ) -> bool:
+        """改排队消息的正文/附件；正在发送的那条不允许改。"""
+        payload = json.dumps(
+            {
+                "text": text,
+                "attachments": [item.model_dump(mode="json") for item in attachments],
+            },
+            ensure_ascii=False,
+        )
+        async with self._lock:
+            connection = self._connection_or_raise()
+            cursor = await connection.execute(
+                """
+                UPDATE session_outbox
+                   SET payload = ?, error = NULL
+                 WHERE session_id = ? AND id = ? AND state != 'sending'
+                """,
+                (payload, session_id, message_id),
+            )
+            await connection.commit()
+            changed = cursor.rowcount > 0
+            await cursor.close()
+        return changed
+
+    async def move_message(self, session_id: str, message_id: str, to: str) -> bool:
+        """调整排队顺序：top 置顶 / up 上移一位 / down 下移一位。
+
+        实现方式是「重排后按 1..n 重写 position」——顺序只由 position 决定，
+        不用关心浮点间隔，也不会因为并发插入撞号。
+        """
         async with self._lock:
             connection = self._connection_or_raise()
             await connection.execute("BEGIN IMMEDIATE")
             try:
                 cursor = await connection.execute(
                     """
-                    SELECT id, payload, created_at FROM session_outbox
+                    SELECT id FROM session_outbox
                      WHERE session_id = ?
-                     ORDER BY created_at, rowid
-                     LIMIT 1
+                     ORDER BY position, rowid
                     """,
                     (session_id,),
                 )
-                row = await cursor.fetchone()
+                ids = [str(row["id"]) for row in await cursor.fetchall()]
                 await cursor.close()
-                if row is None:
+                if message_id not in ids:
                     await connection.commit()
-                    return None
-                await connection.execute(
-                    "DELETE FROM session_outbox WHERE id = ?", (str(row[0]),)
+                    return False
+                index = ids.index(message_id)
+                ids.pop(index)
+                if to == "top":
+                    ids.insert(0, message_id)
+                elif to == "up":
+                    ids.insert(max(0, index - 1), message_id)
+                elif to == "down":
+                    ids.insert(min(len(ids), index + 1), message_id)
+                else:
+                    raise ValueError(f"未知的移动目标：{to}")
+                await connection.executemany(
+                    "UPDATE session_outbox SET position = ? WHERE id = ?",
+                    [(position, item) for position, item in enumerate(ids, 1)],
                 )
                 await connection.commit()
             except Exception:
                 await connection.rollback()
                 raise
-        return _queued_from_row(row, 1, session_id)
+        return True
+
+    async def clear_outbox(self, session_id: str) -> int:
+        """清空队列；发送中的那条保留（它正在跑，抽走会让状态更难解释）。"""
+        async with self._lock:
+            connection = self._connection_or_raise()
+            cursor = await connection.execute(
+                "DELETE FROM session_outbox"
+                " WHERE session_id = ? AND state != 'sending'",
+                (session_id,),
+            )
+            await connection.commit()
+            removed = cursor.rowcount
+            await cursor.close()
+        return int(removed)
+
+    async def outbox_depth(self, session_id: str) -> int:
+        """该会话还有几条待发（pending + sending），用于启动时恢复队列泵。"""
+        async with self._lock:
+            connection = self._connection_or_raise()
+            cursor = await connection.execute(
+                """
+                SELECT COUNT(*) AS depth FROM session_outbox
+                 WHERE session_id = ? AND state IN ('pending', 'sending')
+                """,
+                (session_id,),
+            )
+            row = await cursor.fetchone()
+            await cursor.close()
+        return int(row["depth"]) if row is not None else 0
 
     def _connection_or_raise(self) -> aiosqlite.Connection:
         if self._connection is None:
@@ -1182,13 +1386,19 @@ async def _table_columns(connection: aiosqlite.Connection, table: str) -> set[st
 def _queued_from_row(
     row: Iterable[object], position: int, session_id: str
 ) -> QueuedMessage:
-    """把一行 outbox 记录还原成 :class:`QueuedMessage`。"""
+    """把一行 outbox 记录还原成 :class:`QueuedMessage`。
+
+    列顺序固定为 ``id, payload, created_at, state, attempts, error``。
+    """
     fields = list(row)
     payload = json.loads(str(fields[1]))
     attachments = [
         SessionAttachment.model_validate(item)
         for item in payload.get("attachments", [])
     ]
+    state = str(fields[3]) if len(fields) > 3 else "pending"
+    attempts = int(str(fields[4])) if len(fields) > 4 else 0
+    error = None if len(fields) < 6 or fields[5] is None else str(fields[5])
     return QueuedMessage(
         id=str(fields[0]),
         session_id=session_id,
@@ -1196,4 +1406,7 @@ def _queued_from_row(
         attachments=attachments,
         created_at=float(str(fields[2])),
         position=position,
+        state=cast(OutboxState, state),
+        attempts=attempts,
+        error=error,
     )

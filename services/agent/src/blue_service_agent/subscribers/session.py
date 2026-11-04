@@ -20,6 +20,8 @@ from blue_contracts_session import (
     SessionCancelReplyEvent,
     SessionCancelRequest,
     SessionCancelResponse,
+    SessionOutboxEvent,
+    SessionOutboxPayload,
     SessionPromptEvent,
     SessionPromptRequest,
     SessionReplyEvent,
@@ -28,7 +30,7 @@ from blue_contracts_session import (
 from infinity_bus import Event, EventBus, EventHandler
 from pydantic import BaseModel
 
-__all__ = ["SessionBackend", "SessionHandler"]
+__all__ = ["OutboxBackend", "OutboxHandler", "SessionBackend", "SessionHandler"]
 
 
 class SessionBackend(Protocol):
@@ -96,3 +98,36 @@ class SessionHandler(EventHandler):
                     running=self._backend.activity(),
                 ),
             )
+
+
+class OutboxBackend(Protocol):
+    """队列广播的处理能力。"""
+
+    def nudge_outbox(self, session_id: str, bus_proxy: EventBus.Proxy) -> None:
+        """拉起该会话的队列泵（幂等）。"""
+        ...
+
+
+class OutboxHandler(EventHandler):
+    """``session.outbox`` 广播入口：会话空闲且有排队消息时拉起队列泵。
+
+    这样「立刻发送」「另一台设备排队」「进程重启后遗留的队列」都能自动接上，
+    不需要谁再发一条消息来触发。
+    """
+
+    def __init__(self, backend: OutboxBackend) -> None:
+        super().__init__(
+            subscriptions=[SessionOutboxEvent.name],
+            handle_timeout=5.0,
+        )
+        self._backend = backend
+
+    async def handle(
+        self,
+        payload: BaseModel | None,
+        bus_proxy: EventBus.Proxy,
+        raw_event: Event,
+    ) -> None:
+        del raw_event
+        if isinstance(payload, SessionOutboxPayload) and payload.messages:
+            self._backend.nudge_outbox(payload.session_id, bus_proxy)

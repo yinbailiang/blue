@@ -38,6 +38,11 @@ class SessionConfig(BaseModel):
     max_attachment_bytes: int = Field(default=2_097_152, ge=1024)
     max_attachments_per_message: int = Field(default=4, ge=1)
     attachment_grace: float = Field(default=3600.0, gt=0)
+    outbox_claim_timeout: float = Field(
+        default=300.0,
+        gt=0,
+        description=("队列项被认领后多久未完成就自动回到待发（agent 崩溃兜底）"),
+    )
 
     def resolve_database_path(self) -> Path:
         """相对路径解析到 supervisor 状态目录（缺省 cwd/.blue）。"""

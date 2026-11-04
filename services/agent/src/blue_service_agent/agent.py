@@ -20,13 +20,11 @@ from contextlib import asynccontextmanager
 from typing import Any
 
 from blue_contracts_session import (
+    QueuedMessage,
     SessionActivity,
     SessionActivityEvent,
     SessionActivityPayload,
     SessionAttachmentBlob,
-    SessionOutboxClaimEvent,
-    SessionOutboxClaimReplyEvent,
-    SessionOutboxClaimResponse,
     SessionOutboxEnqueueEvent,
     SessionOutboxEnqueueReplyEvent,
     SessionOutboxEnqueueResponse,
@@ -82,7 +80,7 @@ from blue_service_agent.history import (
     sanitize_history,
 )
 from blue_service_agent.session_gateway import BusSessionGateway, SessionGateway
-from blue_service_agent.subscribers.session import SessionHandler
+from blue_service_agent.subscribers.session import OutboxHandler, SessionHandler
 
 logger = logging.getLogger(__name__)
 
@@ -190,10 +188,12 @@ class AgentCore:
             await self._client.__aenter__()
             self._client_entered = True
             await self._runtime.register(SessionHandler(self))
+            await self._runtime.register(OutboxHandler(self))
         except Exception:
             await self.stop()
             raise
         settings = self._settings
+        await self._recover_outbox()
         logger.info(
             "Agent 核心已启动（%s）：provider=%s model=%s 读超时=%ss 连接超时=%ss "
             "流重试=%s HTTP重试=%s",
@@ -265,12 +265,7 @@ class AgentCore:
                 running=False,
                 request_id=payload.request_id,
             )
-            drain = asyncio.create_task(
-                self._drain_outbox(session_id, bus_proxy),
-                name=f"agent.outbox.{session_id}",
-            )
-            self._drain_tasks.add(drain)
-            drain.add_done_callback(self._drain_tasks.discard)
+            self.nudge_outbox(session_id, bus_proxy)
 
     async def _enqueue_outbox(
         self, payload: SessionPromptRequest, bus_proxy: EventBus.Proxy
@@ -297,36 +292,55 @@ class AgentCore:
             return max(response.position, 1) if response.success else 0
         return 0
 
+    async def _recover_outbox(self) -> None:
+        """进程重启后，把还躺在队列里的消息接着跑。
+
+        队列是持久化的，但「谁来跑」是内存状态；不主动扫一遍的话，重启前
+        排队的消息会一直静默地躺着，直到下一次有人发言。
+        """
+        proxy = self._runtime.proxy(self._runtime.member_id)
+        try:
+            session_ids = await self._sessions.queued_sessions(proxy)
+        except Exception:
+            logger.warning("恢复待发送队列失败", exc_info=True)
+            return
+        for session_id in session_ids:
+            logger.info("会话 %s 仍有排队消息，恢复队列泵", session_id)
+            self.nudge_outbox(session_id, proxy)
+
+    def nudge_outbox(self, session_id: str, bus_proxy: EventBus.Proxy) -> None:
+        """拉起该会话的队列泵（幂等：正在跑或正在 drain 就跳过）。"""
+        if session_id in self._active_turns or session_id in self._draining:
+            return
+        task = asyncio.create_task(
+            self._drain_outbox(session_id, bus_proxy),
+            name=f"agent.outbox.{session_id}",
+        )
+        self._drain_tasks.add(task)
+        task.add_done_callback(self._drain_tasks.discard)
+
     async def _drain_outbox(self, session_id: str, bus_proxy: EventBus.Proxy) -> None:
-        """本轮结束后，按顺序把队列里的消息继续跑掉。"""
+        """按顺序把队列里的消息跑掉。
+
+        认领是「改状态」而不是「删行」，所以进程崩在任意一步都不会丢消息：
+        超时未完成的认领会自动回到待发，失败的会留下原因并按配置自动重试
+        （``outbox_max_attempts``，默认 3 次，含首次）。
+        """
         if session_id in self._draining:
             return
         self._draining.add(session_id)
         try:
             while session_id not in self._active_turns:
-                try:
-                    response = await request(
-                        bus_proxy,
-                        SessionOutboxClaimEvent.name,
-                        {},
-                        SessionOutboxClaimReplyEvent.name,
-                        session_id=session_id,
-                        timeout=10.0,
-                    )
-                except Exception:
-                    logger.warning("会话 %s 取队列失败", session_id, exc_info=True)
-                    return
-                if not isinstance(response, SessionOutboxClaimResponse):
-                    return
-                message = response.message
+                message = await self._sessions.claim(bus_proxy, session_id)
                 if message is None:
                     return
                 logger.info(
-                    "会话 %s 继续处理排队消息：%s",
+                    "会话 %s 继续处理排队消息（第 %s 次尝试）：%s",
                     session_id,
+                    message.attempts,
                     (message.text or "")[:40],
                 )
-                await self.handle_prompt(
+                response = await self.handle_prompt(
                     SessionPromptRequest(
                         session_id=session_id,
                         request_id=f"queued-{message.id}",
@@ -335,8 +349,50 @@ class AgentCore:
                     ),
                     bus_proxy,
                 )
+                if response.queued:
+                    # 这一轮没抢到执行权（又有别的请求在跑）：消息已被重新排队
+                    await self._sessions.complete(bus_proxy, message.id)
+                    return
+                if response.success:
+                    await self._sessions.complete(bus_proxy, message.id)
+                    continue
+                if not await self._retry_or_give_up(
+                    session_id, message, response.error_msg, bus_proxy
+                ):
+                    return
         finally:
             self._draining.discard(session_id)
+
+    async def _retry_or_give_up(
+        self,
+        session_id: str,
+        message: QueuedMessage,
+        error: str | None,
+        bus_proxy: EventBus.Proxy,
+    ) -> bool:
+        """记下失败原因；还没到上限就重排一次。返回是否已经重排。"""
+        error_text = (error or "未知错误").strip() or "未知错误"
+        await self._sessions.fail(bus_proxy, message.id, error_text)
+        if message.attempts >= self._settings.outbox_max_attempts:
+            logger.error(
+                "会话 %s 排队消息失败已达上限（%s/%s 次），留在发件箱等人工处理：%s",
+                session_id,
+                message.attempts,
+                self._settings.outbox_max_attempts,
+                error_text,
+            )
+            return False
+        await self._sessions.retry(bus_proxy, session_id, message.id)
+        logger.warning(
+            "会话 %s 排队消息失败（第 %s/%s 次），稍后自动重试：%s",
+            session_id,
+            message.attempts,
+            self._settings.outbox_max_attempts,
+            error_text,
+        )
+        # 简单退避，避免「失败→立刻重排→立刻失败」打满 CPU 和 token
+        await asyncio.sleep(min(2 ** (message.attempts - 1), 30))
+        return True
 
     @asynccontextmanager
     async def _turn_slot(

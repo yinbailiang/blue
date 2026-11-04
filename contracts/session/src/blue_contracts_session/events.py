@@ -588,8 +588,16 @@ class SessionAttachmentReplyEvent(EventDeclaration):
     payload_type = SessionAttachmentResponse
 
 
+OutboxState = Literal["pending", "sending", "failed"]
+"""队列项状态：待发 / 正在发送 / 失败（可重试）。"""
+
+
 class QueuedMessage(BaseModel):
-    """会话待发送队列里的一条消息（后端持久化，刷新/多端都看得到）。"""
+    """会话待发送队列里的一条消息（后端持久化，刷新/多端都看得到）。
+
+    队列项是**有状态**的：``sending`` 表示已被某个 agent 认领，崩溃后超时会自动
+    回到 ``pending``；``failed`` 保留错误原因与尝试次数，等用户点重试或自动重试。
+    """
 
     id: str = Field(description="队列项 ID")
     session_id: str = Field(description="所属会话")
@@ -599,6 +607,9 @@ class QueuedMessage(BaseModel):
     )
     created_at: float = Field(default=0.0, description="入队时间")
     position: int = Field(default=0, description="1 起的排队位置")
+    state: OutboxState = Field(default="pending", description="pending/sending/failed")
+    attempts: int = Field(default=0, description="已尝试发送次数")
+    error: str | None = Field(default=None, description="失败原因")
 
 
 class SessionOutboxPayload(BaseModel):
@@ -627,6 +638,180 @@ class SessionOutboxEnqueueRequest(RequestProtocol):
 class SessionOutboxEnqueueResponse(ResponseProtocol):
     queued: QueuedMessage | None = Field(default=None)
     position: int = Field(default=0, description="1 起的排队位置")
+
+
+class SessionOutboxUpdateRequest(RequestProtocol):
+    """改一条排队消息的正文/附件（发送中的不可改）。"""
+
+    message_id: str = Field(description="队列项 ID")
+    text: str = Field(default="", max_length=100_000, description="新正文")
+    attachments: list[SessionAttachment] = Field(
+        default_factory=list[SessionAttachment], description="新附件列表"
+    )
+
+
+class SessionOutboxUpdateResponse(ResponseProtocol):
+    """队列项更新结果。"""
+
+
+class SessionOutboxUpdateEvent(EventDeclaration):
+    """队列项更新请求事件。"""
+
+    name = "session.outbox.update"
+    payload_type = SessionOutboxUpdateRequest
+
+
+class SessionOutboxUpdateReplyEvent(EventDeclaration):
+    """队列项更新响应事件。"""
+
+    name = "session.outbox.update.reply"
+    payload_type = SessionOutboxUpdateResponse
+
+
+class SessionOutboxMoveRequest(RequestProtocol):
+    """调整排队顺序：置顶 / 上移 / 下移。"""
+
+    message_id: str = Field(description="队列项 ID")
+    to: Literal["top", "up", "down"] = Field(description="目标位置")
+
+
+class SessionOutboxMoveResponse(ResponseProtocol):
+    """队列重排结果。"""
+
+
+class SessionOutboxMoveEvent(EventDeclaration):
+    """队列重排请求事件。"""
+
+    name = "session.outbox.move"
+    payload_type = SessionOutboxMoveRequest
+
+
+class SessionOutboxMoveReplyEvent(EventDeclaration):
+    """队列重排响应事件。"""
+
+    name = "session.outbox.move.reply"
+    payload_type = SessionOutboxMoveResponse
+
+
+class SessionOutboxSendNowRequest(RequestProtocol):
+    """立刻发送：把该条置顶并叫醒 agent 的队列泵。"""
+
+    message_id: str = Field(description="队列项 ID")
+
+
+class SessionOutboxSendNowResponse(ResponseProtocol):
+    """立刻发送结果。"""
+
+
+class SessionOutboxSendNowEvent(EventDeclaration):
+    """立刻发送请求事件。"""
+
+    name = "session.outbox.send_now"
+    payload_type = SessionOutboxSendNowRequest
+
+
+class SessionOutboxSendNowReplyEvent(EventDeclaration):
+    """立刻发送响应事件。"""
+
+    name = "session.outbox.send_now.reply"
+    payload_type = SessionOutboxSendNowResponse
+
+
+class SessionOutboxRetryRequest(RequestProtocol):
+    """把失败项重新排回待发。"""
+
+    message_id: str = Field(description="队列项 ID")
+
+
+class SessionOutboxRetryResponse(ResponseProtocol):
+    """重试结果。"""
+
+
+class SessionOutboxRetryEvent(EventDeclaration):
+    """重试请求事件。"""
+
+    name = "session.outbox.retry"
+    payload_type = SessionOutboxRetryRequest
+
+
+class SessionOutboxRetryReplyEvent(EventDeclaration):
+    """重试响应事件。"""
+
+    name = "session.outbox.retry.reply"
+    payload_type = SessionOutboxRetryResponse
+
+
+class SessionOutboxClearRequest(RequestProtocol):
+    """清空队列（发送中的那条保留，避免把正在跑的消息抽走）。"""
+
+
+class SessionOutboxClearResponse(ResponseProtocol):
+    """清空结果。"""
+
+    removed: int = Field(default=0, description="取消条数")
+
+
+class SessionOutboxClearEvent(EventDeclaration):
+    """清空队列请求事件。"""
+
+    name = "session.outbox.clear"
+    payload_type = SessionOutboxClearRequest
+
+
+class SessionOutboxClearReplyEvent(EventDeclaration):
+    """清空队列响应事件。"""
+
+    name = "session.outbox.clear.reply"
+    payload_type = SessionOutboxClearResponse
+
+
+class SessionOutboxCompleteRequest(RequestProtocol):
+    """认领的队列项已处理完（agent 用）：把它从队列删除。"""
+
+    message_id: str = Field(description="队列项 ID")
+
+
+class SessionOutboxCompleteResponse(ResponseProtocol):
+    """完成确认。"""
+
+
+class SessionOutboxCompleteEvent(EventDeclaration):
+    """队列项完成事件。"""
+
+    name = "session.outbox.complete"
+    payload_type = SessionOutboxCompleteRequest
+
+
+class SessionOutboxCompleteReplyEvent(EventDeclaration):
+    """队列项完成响应事件。"""
+
+    name = "session.outbox.complete.reply"
+    payload_type = SessionOutboxCompleteResponse
+
+
+class SessionOutboxFailRequest(RequestProtocol):
+    """认领的队列项失败了（agent 用）：留错误原因，等自动/人工重试。"""
+
+    message_id: str = Field(description="队列项 ID")
+    error: str = Field(default="", max_length=500, description="失败原因")
+
+
+class SessionOutboxFailResponse(ResponseProtocol):
+    """失败确认。"""
+
+
+class SessionOutboxFailEvent(EventDeclaration):
+    """队列项失败事件。"""
+
+    name = "session.outbox.fail"
+    payload_type = SessionOutboxFailRequest
+
+
+class SessionOutboxFailReplyEvent(EventDeclaration):
+    """队列项失败响应事件。"""
+
+    name = "session.outbox.fail.reply"
+    payload_type = SessionOutboxFailResponse
 
 
 class SessionOutboxListRequest(RequestProtocol):
@@ -706,6 +891,8 @@ EVENTS: tuple[type[EventDeclaration], ...] = (
     SessionStateReplyEvent,
     SessionGetEvent,
     SessionGetReplyEvent,
+    SessionRenameEvent,
+    SessionRenameReplyEvent,
     SessionAppendEvent,
     SessionAppendReplyEvent,
     SessionBranchActivateEvent,
@@ -729,5 +916,19 @@ EVENTS: tuple[type[EventDeclaration], ...] = (
     SessionOutboxRemoveReplyEvent,
     SessionOutboxClaimEvent,
     SessionOutboxClaimReplyEvent,
+    SessionOutboxUpdateEvent,
+    SessionOutboxUpdateReplyEvent,
+    SessionOutboxCompleteEvent,
+    SessionOutboxCompleteReplyEvent,
+    SessionOutboxFailEvent,
+    SessionOutboxFailReplyEvent,
+    SessionOutboxMoveEvent,
+    SessionOutboxMoveReplyEvent,
+    SessionOutboxSendNowEvent,
+    SessionOutboxSendNowReplyEvent,
+    SessionOutboxRetryEvent,
+    SessionOutboxRetryReplyEvent,
+    SessionOutboxClearEvent,
+    SessionOutboxClearReplyEvent,
 )
 """会话领域全部跨进程事件声明。"""

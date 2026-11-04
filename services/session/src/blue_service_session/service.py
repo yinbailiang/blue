@@ -41,20 +41,49 @@ from blue_contracts_session import (
     SessionOutboxClaimReplyEvent,
     SessionOutboxClaimRequest,
     SessionOutboxClaimResponse,
+    SessionOutboxClearEvent,
+    SessionOutboxClearReplyEvent,
+    SessionOutboxClearRequest,
+    SessionOutboxClearResponse,
+    SessionOutboxCompleteEvent,
+    SessionOutboxCompleteReplyEvent,
+    SessionOutboxCompleteRequest,
+    SessionOutboxCompleteResponse,
     SessionOutboxEnqueueEvent,
     SessionOutboxEnqueueReplyEvent,
     SessionOutboxEnqueueRequest,
     SessionOutboxEnqueueResponse,
     SessionOutboxEvent,
+    SessionOutboxFailEvent,
+    SessionOutboxFailReplyEvent,
+    SessionOutboxFailRequest,
+    SessionOutboxFailResponse,
     SessionOutboxListEvent,
     SessionOutboxListReplyEvent,
     SessionOutboxListRequest,
     SessionOutboxListResponse,
+    SessionOutboxMoveEvent,
+    SessionOutboxMoveReplyEvent,
+    SessionOutboxMoveRequest,
+    SessionOutboxMoveResponse,
     SessionOutboxPayload,
     SessionOutboxRemoveEvent,
     SessionOutboxRemoveReplyEvent,
     SessionOutboxRemoveRequest,
     SessionOutboxRemoveResponse,
+    SessionOutboxRetryEvent,
+    SessionOutboxRetryReplyEvent,
+    SessionOutboxRetryRequest,
+    SessionOutboxRetryResponse,
+    SessionOutboxSendNowEvent,
+    SessionOutboxSendNowReplyEvent,
+    SessionOutboxSendNowRequest,
+    SessionOutboxSendNowResponse,
+    SessionOutboxUpdateEvent,
+    SessionOutboxUpdateReplyEvent,
+    SessionOutboxUpdateRequest,
+    SessionOutboxUpdateResponse,
+    SessionRenameEvent,
     SessionRenameReplyEvent,
     SessionRenameRequest,
     SessionRenameResponse,
@@ -137,6 +166,40 @@ class SessionBackend(Protocol):
 
     async def remove_message(self, session_id: str, message_id: str) -> bool:
         """取消一条排队消息。"""
+        ...
+
+    async def complete_outbox(self, message_id: str) -> bool:
+        """认领的队列项已跑完：从队列删除。"""
+        ...
+
+    async def fail_outbox(self, message_id: str, error: str) -> bool:
+        """认领的队列项失败了：留错误原因。"""
+        ...
+
+    async def retry_outbox(self, session_id: str, message_id: str) -> bool:
+        """把失败项放回待发。"""
+        ...
+
+    async def update_outbox(
+        self,
+        session_id: str,
+        message_id: str,
+        text: str,
+        attachments: list[SessionAttachment],
+    ) -> bool:
+        """改队列项的正文/附件。"""
+        ...
+
+    async def move_outbox(self, session_id: str, message_id: str, to: str) -> bool:
+        """调整排队顺序。"""
+        ...
+
+    async def clear_outbox(self, session_id: str) -> int:
+        """清空队列（保留发送中的那条）。"""
+        ...
+
+    async def outbox_depth(self, session_id: str) -> int:
+        """还有几条待发（pending + sending）。"""
         ...
 
     async def claim_message(
@@ -328,11 +391,47 @@ class SessionService:
         """取消一条排队消息。"""
         return await self._db.remove_message(session_id, message_id)
 
+    async def complete_outbox(self, message_id: str) -> bool:
+        """认领的队列项已跑完：从队列删除。"""
+        return await self._db.complete_message(message_id)
+
+    async def fail_outbox(self, message_id: str, error: str) -> bool:
+        """认领的队列项失败了：留错误原因。"""
+        return await self._db.fail_message(message_id, error)
+
+    async def retry_outbox(self, session_id: str, message_id: str) -> bool:
+        """把失败项放回待发。"""
+        return await self._db.retry_message(session_id, message_id)
+
+    async def update_outbox(
+        self,
+        session_id: str,
+        message_id: str,
+        text: str,
+        attachments: list[SessionAttachment],
+    ) -> bool:
+        """改队列项的正文/附件。"""
+        return await self._db.update_message(session_id, message_id, text, attachments)
+
+    async def move_outbox(self, session_id: str, message_id: str, to: str) -> bool:
+        """调整排队顺序。"""
+        return await self._db.move_message(session_id, message_id, to)
+
+    async def clear_outbox(self, session_id: str) -> int:
+        """清空队列（保留发送中的那条）。"""
+        return await self._db.clear_outbox(session_id)
+
+    async def outbox_depth(self, session_id: str) -> int:
+        """还有几条待发（pending + sending）。"""
+        return await self._db.outbox_depth(session_id)
+
     async def claim_message(
         self, session_id: str, *, now: float
     ) -> QueuedMessage | None:
-        """取出队首并从队列移除。"""
-        return await self._db.claim_message(session_id, now=now)
+        """认领队首（pending → sending），超时未完成的自动回收。"""
+        return await self._db.claim_message(
+            session_id, now=now, stale_after=self._config.outbox_claim_timeout
+        )
 
     async def _prune_loop(self) -> None:
         """定期回收旧会话与无引用附件；启动时先做一轮，重启后立刻见效。"""
@@ -389,10 +488,18 @@ class SessionRpcHandler(EventHandler):
                 SessionResetEvent.name,
                 SessionStateEvent.name,
                 SessionAttachmentGetEvent.name,
+                SessionRenameEvent.name,
                 SessionOutboxEnqueueEvent.name,
                 SessionOutboxListEvent.name,
                 SessionOutboxRemoveEvent.name,
+                SessionOutboxUpdateEvent.name,
+                SessionOutboxMoveEvent.name,
+                SessionOutboxSendNowEvent.name,
+                SessionOutboxRetryEvent.name,
+                SessionOutboxClearEvent.name,
                 SessionOutboxClaimEvent.name,
+                SessionOutboxCompleteEvent.name,
+                SessionOutboxFailEvent.name,
             ],
             handle_timeout=15.0,
         )
@@ -429,6 +536,20 @@ class SessionRpcHandler(EventHandler):
             await self._handle_outbox_list(payload, bus_proxy)
         elif isinstance(payload, SessionOutboxRemoveRequest):
             await self._handle_outbox_remove(payload, bus_proxy)
+        elif isinstance(payload, SessionOutboxUpdateRequest):
+            await self._handle_outbox_update(payload, bus_proxy)
+        elif isinstance(payload, SessionOutboxMoveRequest):
+            await self._handle_outbox_move(payload, bus_proxy)
+        elif isinstance(payload, SessionOutboxSendNowRequest):
+            await self._handle_outbox_send_now(payload, bus_proxy)
+        elif isinstance(payload, SessionOutboxRetryRequest):
+            await self._handle_outbox_retry(payload, bus_proxy)
+        elif isinstance(payload, SessionOutboxClearRequest):
+            await self._handle_outbox_clear(payload, bus_proxy)
+        elif isinstance(payload, SessionOutboxCompleteRequest):
+            await self._handle_outbox_complete(payload, bus_proxy)
+        elif isinstance(payload, SessionOutboxFailRequest):
+            await self._handle_outbox_fail(payload, bus_proxy)
         elif isinstance(payload, SessionOutboxClaimRequest):
             await self._handle_outbox_claim(payload, bus_proxy)
 
@@ -494,6 +615,175 @@ class SessionRpcHandler(EventHandler):
                 removed=removed,
             ),
         )
+        await self._publish_outbox(payload.session_id, bus_proxy)
+
+    async def _handle_outbox_update(
+        self, payload: SessionOutboxUpdateRequest, bus_proxy: EventBus.Proxy
+    ) -> None:
+        """改排队消息的正文/附件（发送中的那条拒绝）。"""
+        try:
+            changed = await self._backend.update_outbox(
+                payload.session_id,
+                payload.message_id,
+                payload.text,
+                payload.attachments,
+            )
+            reply: SessionOutboxUpdateResponse = SessionOutboxUpdateResponse(
+                session_id=payload.session_id,
+                request_id=payload.request_id,
+                success=changed,
+                error_msg=None if changed else "这条消息正在发送，不能修改",
+            )
+        except Exception as error:
+            logger.warning("会话 %s 更新队列项失败：%s", payload.session_id, error)
+            reply = SessionOutboxUpdateResponse(
+                session_id=payload.session_id,
+                request_id=payload.request_id,
+                success=False,
+                error_msg=str(error),
+            )
+        await bus_proxy.publish(SessionOutboxUpdateReplyEvent.name, reply)
+        await self._publish_outbox(payload.session_id, bus_proxy)
+
+    async def _handle_outbox_move(
+        self, payload: SessionOutboxMoveRequest, bus_proxy: EventBus.Proxy
+    ) -> None:
+        """调整排队顺序：置顶 / 上移 / 下移。"""
+        try:
+            changed = await self._backend.move_outbox(
+                payload.session_id, payload.message_id, payload.to
+            )
+            reply: SessionOutboxMoveResponse = SessionOutboxMoveResponse(
+                session_id=payload.session_id,
+                request_id=payload.request_id,
+                success=changed,
+                error_msg=None if changed else "队列项不存在",
+            )
+        except Exception as error:
+            logger.warning("会话 %s 重排队列失败：%s", payload.session_id, error)
+            reply = SessionOutboxMoveResponse(
+                session_id=payload.session_id,
+                request_id=payload.request_id,
+                success=False,
+                error_msg=str(error),
+            )
+        await bus_proxy.publish(SessionOutboxMoveReplyEvent.name, reply)
+        await self._publish_outbox(payload.session_id, bus_proxy)
+
+    async def _handle_outbox_send_now(
+        self, payload: SessionOutboxSendNowRequest, bus_proxy: EventBus.Proxy
+    ) -> None:
+        """立刻发送 = 置顶 + 广播；agent 订阅广播后会立刻拉起队列泵。"""
+        try:
+            changed = await self._backend.move_outbox(
+                payload.session_id, payload.message_id, "top"
+            )
+            reply: SessionOutboxSendNowResponse = SessionOutboxSendNowResponse(
+                session_id=payload.session_id,
+                request_id=payload.request_id,
+                success=changed,
+                error_msg=None if changed else "队列项不存在",
+            )
+        except Exception as error:
+            logger.warning("会话 %s 立刻发送失败：%s", payload.session_id, error)
+            reply = SessionOutboxSendNowResponse(
+                session_id=payload.session_id,
+                request_id=payload.request_id,
+                success=False,
+                error_msg=str(error),
+            )
+        await bus_proxy.publish(SessionOutboxSendNowReplyEvent.name, reply)
+        await self._publish_outbox(payload.session_id, bus_proxy)
+
+    async def _handle_outbox_retry(
+        self, payload: SessionOutboxRetryRequest, bus_proxy: EventBus.Proxy
+    ) -> None:
+        """把失败项放回待发。"""
+        try:
+            changed = await self._backend.retry_outbox(
+                payload.session_id, payload.message_id
+            )
+            reply: SessionOutboxRetryResponse = SessionOutboxRetryResponse(
+                session_id=payload.session_id,
+                request_id=payload.request_id,
+                success=changed,
+                error_msg=None if changed else "这条消息不在失败状态",
+            )
+        except Exception as error:
+            logger.warning("会话 %s 重试队列项失败：%s", payload.session_id, error)
+            reply = SessionOutboxRetryResponse(
+                session_id=payload.session_id,
+                request_id=payload.request_id,
+                success=False,
+                error_msg=str(error),
+            )
+        await bus_proxy.publish(SessionOutboxRetryReplyEvent.name, reply)
+        await self._publish_outbox(payload.session_id, bus_proxy)
+
+    async def _handle_outbox_clear(
+        self, payload: SessionOutboxClearRequest, bus_proxy: EventBus.Proxy
+    ) -> None:
+        """清空队列（正在发送的那条保留）。"""
+        try:
+            removed = await self._backend.clear_outbox(payload.session_id)
+            reply: SessionOutboxClearResponse = SessionOutboxClearResponse(
+                session_id=payload.session_id,
+                request_id=payload.request_id,
+                removed=removed,
+            )
+        except Exception as error:
+            logger.warning("会话 %s 清空队列失败：%s", payload.session_id, error)
+            reply = SessionOutboxClearResponse(
+                session_id=payload.session_id,
+                request_id=payload.request_id,
+                success=False,
+                error_msg=str(error),
+            )
+        await bus_proxy.publish(SessionOutboxClearReplyEvent.name, reply)
+        await self._publish_outbox(payload.session_id, bus_proxy)
+
+    async def _handle_outbox_complete(
+        self, payload: SessionOutboxCompleteRequest, bus_proxy: EventBus.Proxy
+    ) -> None:
+        """认领的队列项跑完了：删掉这一行。"""
+        try:
+            await self._backend.complete_outbox(payload.message_id)
+            reply: SessionOutboxCompleteResponse = SessionOutboxCompleteResponse(
+                session_id=payload.session_id,
+                request_id=payload.request_id,
+            )
+        except Exception as error:
+            logger.warning("会话 %s 完成队列项失败：%s", payload.session_id, error)
+            reply = SessionOutboxCompleteResponse(
+                session_id=payload.session_id,
+                request_id=payload.request_id,
+                success=False,
+                error_msg=str(error),
+            )
+        await bus_proxy.publish(SessionOutboxCompleteReplyEvent.name, reply)
+        await self._publish_outbox(payload.session_id, bus_proxy)
+
+    async def _handle_outbox_fail(
+        self, payload: SessionOutboxFailRequest, bus_proxy: EventBus.Proxy
+    ) -> None:
+        """认领的队列项失败了：留错误原因，等自动/人工重试。"""
+        try:
+            await self._backend.fail_outbox(payload.message_id, payload.error)
+            reply: SessionOutboxFailResponse = SessionOutboxFailResponse(
+                session_id=payload.session_id,
+                request_id=payload.request_id,
+            )
+        except Exception as error:
+            logger.warning(
+                "会话 %s 标记队列项失败时出错：%s", payload.session_id, error
+            )
+            reply = SessionOutboxFailResponse(
+                session_id=payload.session_id,
+                request_id=payload.request_id,
+                success=False,
+                error_msg=str(error),
+            )
+        await bus_proxy.publish(SessionOutboxFailReplyEvent.name, reply)
         await self._publish_outbox(payload.session_id, bus_proxy)
 
     async def _handle_outbox_claim(

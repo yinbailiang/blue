@@ -8,6 +8,7 @@ from collections.abc import AsyncGenerator, Callable, Iterable
 
 from blue_contracts_session import EVENTS as SESSION_EVENTS
 from blue_contracts_session import (
+    QueuedMessage,
     SessionAttachmentBlob,
     SessionNode,
     SessionSnapshot,
@@ -103,6 +104,78 @@ class MemorySessionGateway:
         self._next_id = 1
         self.steps: dict[str, int] = {}
         self.blobs: dict[str, AttachmentPayload] = {}
+        self.queue: dict[str, list[QueuedMessage]] = {}
+        self._queue_seq = 0
+
+    # ---------- 待发送队列（与 session 服务同一套状态机语义） ----------
+
+    def enqueue(self, session_id: str, text: str) -> QueuedMessage:
+        """往某个会话的队列里塞一条（测试用）。"""
+        self._queue_seq += 1
+        message = QueuedMessage(
+            id=f"q{self._queue_seq}",
+            session_id=session_id,
+            text=text,
+            position=self._queue_seq,
+        )
+        self.queue.setdefault(session_id, []).append(message)
+        return message
+
+    def queued(self, session_id: str) -> list[QueuedMessage]:
+        """该会话当前的队列内容。"""
+        return list(self.queue.get(session_id, []))
+
+    async def claim(
+        self, bus_proxy: EventBus.Proxy, session_id: str
+    ) -> QueuedMessage | None:
+        """认领队首待发（pending → sending），与线上语义一致。"""
+        del bus_proxy
+        for message in self.queue.get(session_id, []):
+            if message.state != "pending":
+                continue
+            message.state = "sending"
+            message.attempts += 1
+            return message
+        return None
+
+    async def complete(self, bus_proxy: EventBus.Proxy, message_id: str) -> None:
+        """认领的消息跑完了。"""
+        del bus_proxy
+        for session_id, items in self.queue.items():
+            remaining = [item for item in items if item.id != message_id]
+            if len(remaining) != len(items):
+                self.queue[session_id] = remaining
+                return
+
+    async def fail(
+        self, bus_proxy: EventBus.Proxy, message_id: str, error: str
+    ) -> None:
+        """认领的消息失败了。"""
+        del bus_proxy
+        for items in self.queue.values():
+            for item in items:
+                if item.id == message_id:
+                    item.state = "failed"
+                    item.error = error
+
+    async def retry(
+        self, bus_proxy: EventBus.Proxy, session_id: str, message_id: str
+    ) -> None:
+        """把失败项放回待发。"""
+        del bus_proxy
+        for item in self.queue.get(session_id, []):
+            if item.id == message_id:
+                item.state = "pending"
+                item.error = None
+
+    async def queued_sessions(self, bus_proxy: EventBus.Proxy) -> list[str]:
+        """哪些会话还有待发消息。"""
+        del bus_proxy
+        return [
+            session_id
+            for session_id, items in self.queue.items()
+            if any(item.state == "pending" for item in items)
+        ]
 
     @property
     def messages(self) -> dict[str, list[Message]]:
