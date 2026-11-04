@@ -146,3 +146,55 @@ def _free_port() -> int:
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
         sock.bind(("127.0.0.1", 0))
         return int(sock.getsockname()[1])
+
+
+def test_queue_expiry_policy_is_applied_on_configure() -> None:
+    """启动时必须下发 fanout 队列的空闲过期策略。
+
+    成员队列是 durable + 非 auto-delete（restart 策略要留积压），进程被 kill 后
+    没人解绑 —— 没有 expires 兜底，孤儿队列会一直挂在 fanout 上收广播，把磁盘吃满
+    （2026-11-05 实测：172 个孤儿队列攒了 5639 万条消息 / 49 GB）。
+    """
+    config = BusConfig(queue_expires_ms=600_000, configure=True)
+    manager = RabbitMQManager(config=config)
+    recorded: list[list[str]] = []
+
+    async def fake_run_ctl(
+        ctl: str,
+        arguments: list[str],
+        env: dict[str, str],
+        *,
+        ignore_failure: bool,
+    ) -> None:  # pragma: no cover - 只记录参数
+        del ctl, env, ignore_failure
+        recorded.append(arguments)
+
+    manager._run_ctl = fake_run_ctl  # type: ignore[method-assign]
+    asyncio.run(manager.ensure_queue_policy("rabbitmqctl", {}))
+    policies = [item for item in recorded if item and item[0] == "set_policy"]
+    assert len(policies) == 1
+    command = policies[0]
+    assert "blue-fanout-expiry" in command
+    assert '{"expires":600000}' in command
+    assert "--apply-to" in command and "queues" in command
+
+
+def test_queue_expiry_policy_can_be_disabled() -> None:
+    """``queue_expires_ms=0`` 表示不下发策略（例如自建 broker 已有自己的策略）。"""
+    config = BusConfig(queue_expires_ms=0)
+    manager = RabbitMQManager(config=config)
+    recorded: list[list[str]] = []
+
+    async def fake_run_ctl(
+        ctl: str,
+        arguments: list[str],
+        env: dict[str, str],
+        *,
+        ignore_failure: bool,
+    ) -> None:  # pragma: no cover
+        del ctl, env, ignore_failure
+        recorded.append(arguments)
+
+    manager._run_ctl = fake_run_ctl  # type: ignore[method-assign]
+    asyncio.run(manager.ensure_queue_policy("rabbitmqctl", {}))
+    assert recorded == []

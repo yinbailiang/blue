@@ -465,6 +465,28 @@ BLUE_BUS_URL=amqp://guest:guest@127.0.0.1:5672/blue \
 > **网络提示**：`weather` 会向 `wttr.in` 发起 HTTPS 请求；如需换源或镜像，
 > 在 `blue.infd` 里传 `WeatherService(base_url = ..., timeout = ...)`。
 
+## 队列过期（bus 自带兜底）
+
+fanout 成员队列是 **durable + 非 auto-delete**（`restart` 策略要能补投积压），
+所以进程被 kill 时没人解绑，队列会留在 broker 上**继续接收广播**——孤儿队列会
+一直涨。bus 服务启动时会下发一条策略兜底：
+
+```
+blue-fanout-expiry: ^infinity_bus\.fanout\.   {"expires": 1800000}   (apply-to queues)
+```
+
+即「最后一个消费者断开后 30 分钟没有新消费者 → 队列自动删除」。可配
+`queue_expires_ms`（默认 1800000，`0` 表示不下发）。
+
+排查磁盘暴涨：
+
+```bash
+rabbitmqctl -n blue@<host> -p blue list_queues name consumers messages
+```
+
+**0 消费者 + 大量消息**的 durable 队列就是血栓，`delete_queue` 即可回收。实测一次
+清掉 172 个孤儿队列、释放 51.8 GB（增长从 55 MB/20s 降到 1 MB/20s）。
+
 ## 新增服务
 
 1. 创建 `services/<name>/`，加入 `pyproject.toml`（workspace 成员，依赖 `blue`）；

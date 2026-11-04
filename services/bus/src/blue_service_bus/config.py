@@ -25,6 +25,13 @@ class BusConfig(BaseModel):
     user: str = "guest"
     password: str | None = None
     configure: bool = True
+    queue_expires_ms: int = Field(default=1_800_000, ge=0)
+    """fanout 队列的空闲过期时间（毫秒），0 = 不过期。
+
+    成员队列是 durable 且非 auto-delete（要能承载 restart 策略的补投积压），
+    进程被 kill 时不会有人解绑 —— 没有这层兜底，孤儿队列会一直绑在 fanout 上
+    接收每一份广播，磁盘无限增长（实测 172 个孤儿队列攒了 5600 万条、49 GB）。
+    """
     proxy: bool = False
     proxy_listen: str = "amqp://127.0.0.1:5673/blue"
     startup_timeout: float = Field(default=60.0, gt=0)

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import ctypes
+import json
 import logging
 import os
 import shutil
@@ -215,6 +216,34 @@ class RabbitMQManager:
         ]
         for arguments in commands:
             await self._run_ctl(ctl, arguments, env, ignore_failure=True)
+        await self.ensure_queue_policy(ctl, env)
+
+    async def ensure_queue_policy(self, ctl: str, env: dict[str, str]) -> None:
+        """给 fanout 队列下发「空闲即过期」策略。
+
+        成员队列是 durable + 非 auto-delete（``restart`` 策略要留积压），所以杀掉
+        进程后队列会留在 broker 上继续接收广播。加 ``expires`` 之后，最后一个消费
+        者断开 30 分钟（可配）内没有新消费者，队列自动删除——孤儿不会累积。
+        """
+        expires = self._config.queue_expires_ms
+        if expires <= 0:
+            return
+        definition = json.dumps({"expires": expires}, separators=(",", ":"))
+        await self._run_ctl(
+            ctl,
+            [
+                "set_policy",
+                "-p",
+                self._config.vhost,
+                "blue-fanout-expiry",
+                "^infinity_bus\\.fanout\\.",
+                definition,
+                "--apply-to",
+                "queues",
+            ],
+            env,
+            ignore_failure=True,
+        )
 
     async def _run_ctl(
         self,

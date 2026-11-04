@@ -9,6 +9,7 @@
   data_dir: str = "rabbitmq"
   vhost: str = "blue"
   user: str = "guest"
+  queue_expires_ms: <int, range(0, 604800000)> = 1800000
   password: <str?> = null
   configure: bool = true
   proxy: bool = false
