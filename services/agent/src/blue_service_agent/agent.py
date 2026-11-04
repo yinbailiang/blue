@@ -36,9 +36,7 @@ from blue_contracts_session import (
 )
 from blue_contracts_tool import (
     ToolAttachment,
-    ToolCallEvent,
-    ToolCallResult,
-    ToolResultEvent,
+    ToolProxy,
 )
 from infinity_agent import (
     Message,
@@ -1075,29 +1073,12 @@ class AgentCore:
                 [],
             )
         try:
-            response = await request(
-                bus_proxy,
-                ToolCallEvent.name,
-                {"tool": name, "arguments": tool_call.function.arguments},
-                ToolResultEvent.name,
-                session_id=session_id,
-                timeout=self._settings.tool_timeout,
-            )
-        except TimeoutError:
-            return (
-                _error(f"工具 {name} 调用超时（{self._settings.tool_timeout}s）"),
-                [],
-            )
+            result = await ToolProxy(
+                bus_proxy, timeout=self._settings.tool_timeout
+            ).call(name, tool_call.function.arguments, session_id=session_id)
         except Exception as error:
             return _error(f"工具 {name} 调用失败：{error}"), []
-        if isinstance(response, ToolCallResult):
-            if response.success:
-                return response.content, list(response.attachments)
-            return (
-                _error(response.error_msg or response.content or "工具执行失败"),
-                [],
-            )
-        return _error(f"工具 {name} 返回了非预期的响应类型"), []
+        return result.content, list(result.attachments)
 
     def _require_client(self) -> LLMClient:
         """取已进入上下文的模型客户端。"""

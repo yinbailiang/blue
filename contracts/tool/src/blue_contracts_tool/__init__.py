@@ -21,6 +21,7 @@ from blue_contracts_tool.events import (
     ToolUnregisterEvent,
     ToolUnregisterPayload,
 )
+from blue_contracts_tool.proxy import ToolCallError, ToolProxy
 
 __all__ = [
     "EVENTS",
@@ -31,12 +32,14 @@ __all__ = [
     "CatalogQueryResponse",
     "CatalogReplyEvent",
     "ToolAttachment",
+    "ToolCallError",
     "ToolCallEvent",
     "ToolCallRequest",
     "ToolCallResult",
     "ToolDefinition",
     "ToolHeartbeatEvent",
     "ToolHeartbeatPayload",
+    "ToolProxy",
     "ToolRegisterEvent",
     "ToolRegisterPayload",
     "ToolResultEvent",

@@ -34,13 +34,8 @@ from blue_contracts_tool import (
     ToolAttachment,
     ToolCallRequest,
     ToolCallResult,
-    ToolHeartbeatEvent,
-    ToolHeartbeatPayload,
-    ToolRegisterEvent,
-    ToolRegisterPayload,
+    ToolProxy,
     ToolResultEvent,
-    ToolUnregisterEvent,
-    ToolUnregisterPayload,
 )
 from infinity_agent import (
     FunctionCall,
@@ -139,26 +134,16 @@ class ToolRegistrar:
                 await heartbeat
         if not self._runtime.is_running:
             return
-        proxy = self._runtime.proxy()
+        tools = ToolProxy(self._runtime.proxy())
         for lease in self._leases:
             with suppress(Exception):
-                await proxy.publish(
-                    ToolUnregisterEvent.name,
-                    ToolUnregisterPayload(worker_id=lease.worker_id),
-                )
+                await tools.unregister(lease.worker_id)
 
     async def _publish_register(self) -> None:
         """逐条登记租约。"""
-        proxy = self._runtime.proxy()
+        tools = ToolProxy(self._runtime.proxy())
         for lease in self._leases:
-            await proxy.publish(
-                ToolRegisterEvent.name,
-                ToolRegisterPayload(
-                    worker_id=lease.worker_id,
-                    tool=lease.definition,
-                    ttl=self._ttl,
-                ),
-            )
+            await tools.register(lease.worker_id, lease.definition, ttl=self._ttl)
 
     async def _heartbeat_loop(self) -> None:
         """周期性补发注册并续约；单次失败不影响后续。"""
@@ -166,20 +151,12 @@ class ToolRegistrar:
         while True:
             await asyncio.sleep(interval)
             try:
-                proxy = self._runtime.proxy()
+                tools = ToolProxy(self._runtime.proxy())
                 for lease in self._leases:
-                    await proxy.publish(
-                        ToolRegisterEvent.name,
-                        ToolRegisterPayload(
-                            worker_id=lease.worker_id,
-                            tool=lease.definition,
-                            ttl=self._ttl,
-                        ),
+                    await tools.register(
+                        lease.worker_id, lease.definition, ttl=self._ttl
                     )
-                    await proxy.publish(
-                        ToolHeartbeatEvent.name,
-                        ToolHeartbeatPayload(worker_id=lease.worker_id),
-                    )
+                    await tools.heartbeat(lease.worker_id)
             except Exception:
                 logger.debug(
                     "心跳发送失败：%s",

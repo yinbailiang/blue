@@ -10,9 +10,8 @@ from contextlib import suppress
 from dataclasses import dataclass
 
 from blue_contracts_tool import (
-    CatalogChangedEvent,
-    CatalogChangedPayload,
     ToolDefinition,
+    ToolProxy,
     ToolRegisterPayload,
 )
 from infinity_bus import EventBus
@@ -197,16 +196,12 @@ class ToolRegistryService:
 
     async def broadcast_catalog(self, proxy: EventBus.Proxy | None = None) -> None:
         """广播当前工具目录（失败只记日志，不影响登记）。"""
-        payload = CatalogChangedPayload(
-            version=self._state.version, tools=self._state.tools()
-        )
+        version = self._state.version
         try:
             active = proxy or self._runtime.proxy()
-            await active.publish(CatalogChangedEvent.name, payload)
+            await ToolProxy(active).publish_catalog(version, self._state.tools())
         except Exception:
-            logger.warning(
-                "广播工具目录失败（version=%s）", payload.version, exc_info=True
-            )
+            logger.warning("广播工具目录失败（version=%s）", version, exc_info=True)
 
     async def _sweep_loop(self) -> None:
         """周期性回收过期租约。"""
