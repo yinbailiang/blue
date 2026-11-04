@@ -14,6 +14,7 @@ from blue_contracts_session import (
     SessionAttachment,
     SessionInfo,
     SessionNode,
+    SessionOutboxPayload,
     SessionReplyResponse,
     SessionSnapshot,
     SessionStreamPayload,
@@ -59,6 +60,11 @@ class FakeBackend:
         self.activation_calls: list[tuple[str, int]] = []
         self.delete_calls: list[tuple[str, int]] = []
         self.last_prompt: dict[str, Any] = {}
+        self.title = "自动标题"
+        self.preview = "最后一条用户消息"
+        self.rename_calls: list[tuple[str, str]] = []
+        self.outbox_items: list[QueuedMessage] = []
+        self.outbox_queue: asyncio.Queue[SessionOutboxPayload] | None = None
         # 默认选中的分支：system(1) → user(2) → assistant(3)
         self.nodes[0].current = 2
         self.nodes[1].current = 3
@@ -79,8 +85,37 @@ class FakeBackend:
                 session_id="s1",
                 message_count=2,
                 updated_at=1_700_000_000.0,
+                title=self.title,
+                preview=self.preview,
+                queued=len(self.outbox_items),
             )
         ]
+
+    async def rename(self, session_id: str, title: str) -> str:
+        """改名：空字符串表示恢复自动标题。"""
+        self.rename_calls.append((session_id, title))
+        self.title = title.strip() or "自动标题"
+        return self.title
+
+    @asynccontextmanager
+    async def subscribe_outbox(
+        self,
+    ) -> AsyncGenerator[asyncio.Queue[SessionOutboxPayload]]:
+        """订阅队列变化（测试里手动 push）。"""
+        queue: asyncio.Queue[SessionOutboxPayload] = asyncio.Queue()
+        self.outbox_queue = queue
+        try:
+            yield queue
+        finally:
+            self.outbox_queue = None
+
+    def push_outbox(self) -> None:
+        """把当前队列状态推给订阅者（模拟 session.outbox 广播）。"""
+        if self.outbox_queue is None:
+            return
+        self.outbox_queue.put_nowait(
+            SessionOutboxPayload(session_id="s1", messages=list(self.outbox_items))
+        )
 
     async def outbox(self, session_id: str) -> list[QueuedMessage]:
         del session_id

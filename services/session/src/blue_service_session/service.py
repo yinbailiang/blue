@@ -55,6 +55,9 @@ from blue_contracts_session import (
     SessionOutboxRemoveReplyEvent,
     SessionOutboxRemoveRequest,
     SessionOutboxRemoveResponse,
+    SessionRenameReplyEvent,
+    SessionRenameRequest,
+    SessionRenameResponse,
     SessionResetEvent,
     SessionResetReplyEvent,
     SessionResetRequest,
@@ -154,6 +157,10 @@ class SessionBackend(Protocol):
 
     async def set_current(self, session_id: str, node_id: int) -> SessionMeta:
         """切换当前分支。"""
+        ...
+
+    async def set_title(self, session_id: str, title: str) -> str:
+        """设置会话标题；空字符串表示恢复自动标题。"""
         ...
 
     async def delete_node(self, session_id: str, node_id: int) -> int:
@@ -286,6 +293,10 @@ class SessionService:
         """删除会话。"""
         return await self._db.reset(session_id)
 
+    async def set_title(self, session_id: str, title: str) -> str:
+        """设置会话标题；空字符串表示恢复自动标题。"""
+        return await self._db.set_title(session_id, title)
+
     async def set_current(self, session_id: str, node_id: int) -> SessionMeta:
         """切换当前分支。"""
         return await self._db.set_current(session_id, node_id)
@@ -398,6 +409,8 @@ class SessionRpcHandler(EventHandler):
             await self._handle_get(payload, bus_proxy)
         elif isinstance(payload, SessionAppendRequest):
             await self._handle_append(payload, bus_proxy)
+        elif isinstance(payload, SessionRenameRequest):
+            await self._handle_rename(payload, bus_proxy)
         elif isinstance(payload, SessionBranchActivateRequest):
             await self._handle_branch_activate(payload, bus_proxy)
         elif isinstance(payload, SessionNodeDeleteRequest):
@@ -544,6 +557,26 @@ class SessionRpcHandler(EventHandler):
             )
         await bus_proxy.publish(SessionAppendReplyEvent.name, reply)
 
+    async def _handle_rename(
+        self, payload: SessionRenameRequest, bus_proxy: EventBus.Proxy
+    ) -> None:
+        try:
+            title = await self._backend.set_title(payload.session_id, payload.title)
+            reply: SessionRenameResponse = SessionRenameResponse(
+                session_id=payload.session_id,
+                request_id=payload.request_id,
+                title=title,
+            )
+        except Exception as error:
+            logger.warning("会话 %s 改名失败：%s", payload.session_id, error)
+            reply = SessionRenameResponse(
+                session_id=payload.session_id,
+                request_id=payload.request_id,
+                success=False,
+                error_msg=str(error),
+            )
+        await bus_proxy.publish(SessionRenameReplyEvent.name, reply)
+
     async def _handle_branch_activate(
         self, payload: SessionBranchActivateRequest, bus_proxy: EventBus.Proxy
     ) -> None:
@@ -675,6 +708,7 @@ def _snapshot(record: SessionRecord) -> SessionSnapshot:
     tree: Tree[SessionNodeRecord] = Tree(record.nodes, root_current=meta.root_current)
     return SessionSnapshot(
         session_id=meta.session_id,
+        title=meta.title,
         nodes=[
             SessionNode(
                 id=node.id,

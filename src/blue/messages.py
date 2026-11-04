@@ -12,14 +12,24 @@ import json
 from collections.abc import Iterable
 from typing import Any, cast
 
-from infinity_agent import Message
+from infinity_agent import Message, MessageRole, MultiModalContent
 
 __all__ = [
+    "PREVIEW_LIMIT",
+    "TITLE_LIMIT",
+    "condense",
     "decode_message",
     "decode_messages",
     "encode_message",
     "encode_messages",
+    "message_text",
 ]
+
+TITLE_LIMIT = 28
+"""会话标题长度上限（超出截断加省略号）。"""
+
+PREVIEW_LIMIT = 120
+"""会话摘要长度上限。"""
 
 
 def encode_message(message: Message) -> str:
@@ -83,3 +93,63 @@ def _normalize_tool_calls(data: dict[str, Any], *, encode: bool) -> None:
                 raise ValueError(
                     "tool_calls.function.arguments 不是合法 JSON"
                 ) from None
+
+
+def message_text(message: Message) -> str:
+    """取出消息里可读的纯文本：多模态只取文本片段，图片记为 ``[图片]``。
+
+    非用户消息（assistant 的 tool_calls、tool 结果）也可能带文本，
+    这里只看 content，不做角色判断。
+    """
+    content = message.content
+    if content is None:
+        return ""
+    if isinstance(content, str):
+        return content
+    pieces: list[str] = []
+    for part in content:
+        text = _part_text(part)
+        if text:
+            pieces.append(text)
+    return " ".join(pieces)
+
+
+def _part_text(part: MultiModalContent) -> str:
+    if part.text:
+        return part.text
+    if part.image_url is not None:
+        return "[图片]"
+    if part.file is not None:
+        return "[文件]"
+    return ""
+
+
+def condense(text: str, *, limit: int = TITLE_LIMIT) -> str:
+    """把一段文本压成单行摘要：折叠空白、超长截断并加省略号。"""
+    flat = " ".join(text.split())
+    if len(flat) <= limit:
+        return flat
+    return flat[:limit] + "…"
+
+
+def derive_title(messages: Iterable[Message], *, limit: int = TITLE_LIMIT) -> str:
+    """按顺序找第一条有文本的用户消息，作为会话标题。"""
+    for message in messages:
+        if message.role is not MessageRole.USER:
+            continue
+        text = condense(message_text(message), limit=limit)
+        if text:
+            return text
+    return ""
+
+
+def derive_preview(messages: Iterable[Message], *, limit: int = PREVIEW_LIMIT) -> str:
+    """取最后一条有文本的用户消息作为摘要。"""
+    preview = ""
+    for message in messages:
+        if message.role is not MessageRole.USER:
+            continue
+        text = condense(message_text(message), limit=limit)
+        if text:
+            preview = text
+    return preview

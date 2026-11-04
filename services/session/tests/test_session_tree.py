@@ -394,7 +394,7 @@ async def _migrate_linear(tmp_path: Path) -> None:
         cursor = await connection.execute("PRAGMA user_version")
         row = await cursor.fetchone()
         await cursor.close()
-        assert row is not None and row[0] == 4
+        assert row is not None and row[0] == 5
         cursor = await connection.execute("PRAGMA table_info(messages)")
         columns = {str(item[1]) for item in await cursor.fetchall()}
         await cursor.close()

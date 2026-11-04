@@ -13,6 +13,7 @@ from blue_contracts_session import (
     SessionActivity,
     SessionAttachment,
     SessionInfo,
+    SessionStreamPayload,
 )
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, Response
@@ -76,6 +77,12 @@ class SessionSummary(SessionInfo):
     running: bool = Field(default=False, description="是否有正在进行的 turn")
     phase: str = Field(default="", description="当前阶段：thinking/streaming/tool")
     step: int = Field(default=0, description="当前模型步骤序号")
+
+
+class RenameRequest(BaseModel):
+    """会话改名请求（空标题表示恢复自动标题）。"""
+
+    title: str = Field(default="", max_length=80, description="新标题；空 = 自动")
 
 
 class SessionsResponse(BaseModel):
@@ -143,6 +150,9 @@ def create_app(*, backend: WebBackend, config: WebUIConfig) -> FastAPI:
                     session_id=info.session_id,
                     message_count=info.message_count,
                     updated_at=info.updated_at,
+                    title=info.title,
+                    preview=info.preview,
+                    queued=info.queued,
                     running=bool(activity and activity.running),
                     phase=activity.phase if activity else "",
                     step=activity.step if activity else 0,
@@ -185,6 +195,15 @@ def create_app(*, backend: WebBackend, config: WebUIConfig) -> FastAPI:
         if snapshot is None:
             raise HTTPException(status_code=404, detail="会话不存在")
         return serialize_snapshot(snapshot)
+
+    @app.patch("/api/sessions/{session_id}/title")
+    async def rename_session(session_id: str, request: RenameRequest) -> dict[str, str]:
+        """给会话改名；传空字符串表示恢复自动标题。"""
+        try:
+            title = await backend.rename(session_id, request.title)
+        except BlueError as error:
+            raise HTTPException(status_code=503, detail=str(error)) from error
+        return {"session_id": session_id, "title": title}
 
     @app.post("/api/sessions/{session_id}/branches/{node}/activate")
     async def activate_branch(session_id: str, node: int) -> SessionView:
@@ -295,6 +314,9 @@ def create_app(*, backend: WebBackend, config: WebUIConfig) -> FastAPI:
         pump = asyncio.create_task(
             _activity_pump(sender, backend), name="webui.activity"
         )
+        outbox_pump = asyncio.create_task(
+            _outbox_pump(sender, backend), name="webui.outbox"
+        )
         reader = asyncio.create_task(
             _read_frames(websocket, frames), name="webui.reader"
         )
@@ -333,7 +355,9 @@ def create_app(*, backend: WebBackend, config: WebUIConfig) -> FastAPI:
                     session_id = str(frame.get("session_id") or "")
                     with contextlib.suppress(BlueError):
                         if await backend.cancel(session_id):
-                            await sender.send({"type": "cancelled"})
+                            await sender.send(
+                                {"type": "cancelled", "session_id": session_id}
+                            )
                 elif kind == "watch":
                     session_id = str(frame.get("session_id") or "")
                     if session_id and session_id not in watchers:
@@ -349,7 +373,7 @@ def create_app(*, backend: WebBackend, config: WebUIConfig) -> FastAPI:
         except WebSocketDisconnect, RuntimeError, OSError:
             return
         finally:
-            pending = [pump, reader, *watchers.values()]
+            pending = [pump, outbox_pump, reader, *watchers.values()]
             pending.extend(prompt_tasks)
             for task in pending:
                 task.cancel()
@@ -406,6 +430,15 @@ async def _activity_pump(sender: _Sender, backend: WebBackend) -> None:
             )
 
 
+def _stream_frame(session_id: str, payload: SessionStreamPayload) -> dict[str, Any]:
+    """流式帧：顶层也带 ``session_id``，前端才能把事件路由到对应会话。"""
+    return {
+        "type": "stream",
+        "session_id": payload.session_id or session_id,
+        "event": payload.model_dump(mode="json"),
+    }
+
+
 async def _watch_stream(sender: _Sender, backend: WebBackend, session_id: str) -> None:
     """订阅某个会话的实时流（不发起新一轮 prompt）。
 
@@ -414,8 +447,22 @@ async def _watch_stream(sender: _Sender, backend: WebBackend, session_id: str) -
     async with backend.subscribe(session_id) as queue:
         while True:
             payload = await queue.get()
+            await sender.send(_stream_frame(session_id, payload))
+
+
+async def _outbox_pump(sender: _Sender, backend: WebBackend) -> None:
+    """把待发送队列的变化实时推给这个连接（替代前端轮询）。"""
+    async with backend.subscribe_outbox() as queue:
+        while True:
+            payload = await queue.get()
             await sender.send(
-                {"type": "stream", "event": payload.model_dump(mode="json")}
+                {
+                    "type": "outbox",
+                    "session_id": payload.session_id,
+                    "messages": [
+                        item.model_dump(mode="json") for item in payload.messages
+                    ],
+                }
             )
 
 
@@ -435,7 +482,12 @@ async def _stream_prompt(
     取消由连接主循环处理（``type=cancel`` 帧），这里只管把这一轮跑完。
     """
     await sender.send(
-        {"type": "status", "phase": "thinking", "label": "Agent 正在思考…"}
+        {
+            "type": "status",
+            "session_id": session_id,
+            "phase": "thinking",
+            "label": "Agent 正在思考…",
+        }
     )
     async with backend.subscribe(session_id) as stream:
         prompt_task = asyncio.create_task(
@@ -453,9 +505,7 @@ async def _stream_prompt(
                 )
                 if stream_task in done:
                     payload = stream_task.result()
-                    await sender.send(
-                        {"type": "stream", "event": payload.model_dump(mode="json")}
-                    )
+                    await sender.send(_stream_frame(session_id, payload))
                     stream_task = asyncio.create_task(stream.get())
                 if prompt_task in done:
                     if stream_task.done() and not stream_task.cancelled():
@@ -466,27 +516,21 @@ async def _stream_prompt(
                         except TimeoutError:
                             payload = None
                     if payload is not None:
-                        await sender.send(
-                            {"type": "stream", "event": payload.model_dump(mode="json")}
-                        )
+                        await sender.send(_stream_frame(session_id, payload))
                     while not stream.empty():
                         pending = stream.get_nowait()
-                        await sender.send(
-                            {
-                                "type": "stream",
-                                "event": pending.model_dump(mode="json"),
-                            }
-                        )
+                        await sender.send(_stream_frame(session_id, pending))
                     break
 
             reply = await prompt_task
             if reply.queued:
                 # 会话忙：消息已进后端队列，本轮没有真正开始
-                await sender.send({"type": "queued_ack"})
+                await sender.send({"type": "queued_ack", "session_id": session_id})
                 return
             await sender.send(
                 {
                     "type": "reply",
+                    "session_id": session_id,
                     "success": reply.success,
                     "text": reply.text,
                     "steps": reply.steps,

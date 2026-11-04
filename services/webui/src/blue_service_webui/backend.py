@@ -34,12 +34,17 @@ from blue_contracts_session import (
     SessionNodeDeleteEvent,
     SessionNodeDeleteReplyEvent,
     SessionNodeDeleteResponse,
+    SessionOutboxEvent,
     SessionOutboxListEvent,
     SessionOutboxListReplyEvent,
     SessionOutboxListResponse,
+    SessionOutboxPayload,
     SessionOutboxRemoveEvent,
     SessionOutboxRemoveReplyEvent,
     SessionPromptEvent,
+    SessionRenameEvent,
+    SessionRenameReplyEvent,
+    SessionRenameResponse,
     SessionReplyEvent,
     SessionReplyResponse,
     SessionResetEvent,
@@ -74,6 +79,7 @@ __all__ = [
     "BusBackend",
     "MessagePartView",
     "MessageView",
+    "OutboxHandler",
     "ServiceView",
     "SessionNodeView",
     "SessionStreamHandler",
@@ -121,6 +127,35 @@ class SessionStreamHandler(EventHandler):
         del bus_proxy, raw_event
         if isinstance(payload, SessionStreamPayload):
             self._sink.dispatch_stream(payload)
+
+
+class OutboxSink(Protocol):
+    """待发送队列变化的汇聚目标。"""
+
+    def dispatch_outbox(self, payload: SessionOutboxPayload) -> None:
+        """把队列变化分发给所有订阅者。"""
+        ...
+
+
+class OutboxHandler(EventHandler):
+    """把总线上的 ``session.outbox`` 广播投递到 WebUI 订阅队列。"""
+
+    def __init__(self, sink: OutboxSink) -> None:
+        super().__init__(
+            subscriptions=[SessionOutboxEvent.name],
+            handle_timeout=1.0,
+        )
+        self._sink = sink
+
+    async def handle(
+        self,
+        payload: BaseModel | None,
+        bus_proxy: EventBus.Proxy,
+        raw_event: Event,
+    ) -> None:
+        del bus_proxy, raw_event
+        if isinstance(payload, SessionOutboxPayload):
+            self._sink.dispatch_outbox(payload)
 
 
 class ActivitySink(Protocol):
@@ -272,6 +307,16 @@ class WebBackend(Protocol):
         """取消一条排队消息。"""
         ...
 
+    async def rename(self, session_id: str, title: str) -> str:
+        """给会话改名；空标题表示恢复自动标题。"""
+        ...
+
+    def subscribe_outbox(
+        self,
+    ) -> AbstractAsyncContextManager[asyncio.Queue[SessionOutboxPayload]]:
+        """订阅所有会话的待发送队列变化。"""
+        ...
+
     async def prompt(
         self,
         session_id: str,
@@ -340,6 +385,7 @@ class BusBackend:
         self._stream_queues: dict[str, set[asyncio.Queue[SessionStreamPayload]]] = {}
         self._activity: dict[str, SessionActivity] = {}
         self._activity_queues: set[asyncio.Queue[SessionActivityPayload]] = set()
+        self._outbox_queues: set[asyncio.Queue[SessionOutboxPayload]] = set()
 
     async def start(self) -> None:
         """启动总线成员并注册流式事件订阅。"""
@@ -348,6 +394,7 @@ class BusBackend:
         try:
             await self._runtime.register(SessionStreamHandler(self))
             await self._runtime.register(ActivityHandler(self))
+            await self._runtime.register(OutboxHandler(self))
         except Exception:
             await self._runtime.stop()
             raise
@@ -359,7 +406,44 @@ class BusBackend:
         self._stream_queues.clear()
         self._activity.clear()
         self._activity_queues.clear()
+        self._outbox_queues.clear()
         await self._runtime.stop()
+
+    def dispatch_outbox(self, payload: SessionOutboxPayload) -> None:
+        """把某个会话的待发送队列变化推给所有打开的 WebSocket。
+
+        队列是「多端共享」的状态：一个端排队，别的端也要立刻看见，
+        所以这里不做会话过滤，由前端按 ``session_id`` 分流。
+        """
+        for queue in tuple(self._outbox_queues):
+            queue.put_nowait(payload)
+
+    @asynccontextmanager
+    async def subscribe_outbox(
+        self,
+    ) -> AsyncGenerator[asyncio.Queue[SessionOutboxPayload]]:
+        """订阅所有会话的队列变化（WebSocket 生命周期内有效）。"""
+        queue: asyncio.Queue[SessionOutboxPayload] = asyncio.Queue()
+        self._outbox_queues.add(queue)
+        try:
+            yield queue
+        finally:
+            self._outbox_queues.discard(queue)
+
+    async def rename(self, session_id: str, title: str) -> str:
+        """给会话改名；空标题表示恢复自动标题。"""
+        response = await self._request(
+            SessionRenameEvent.name,
+            {"title": title},
+            SessionRenameReplyEvent.name,
+            session_id=session_id,
+            timeout=10.0,
+        )
+        if not isinstance(response, SessionRenameResponse):
+            raise WebUIError("收到非预期的改名响应")
+        if not response.success:
+            raise WebUIError(response.error_msg or "改名失败")
+        return response.title
 
     def dispatch_stream(self, payload: SessionStreamPayload) -> None:
         """把流式事件推给该会话当前打开的 WebSocket。"""

@@ -153,11 +153,20 @@ class SessionResetResponse(ResponseProtocol):
 
 
 class SessionInfo(BaseModel):
-    """会话元信息（不含消息正文）。"""
+    """会话元信息（不含消息正文）。
+
+    ``title`` 由 session 服务维护：首次出现用户消息时按内容自动生成，
+    也可以被显式改名覆盖；``preview`` 是最后一条用户消息的摘要，
+    ``queued`` 是待发送队列里的条数——前端侧栏直接用这三个字段，
+    不再把标题存在浏览器里。
+    """
 
     session_id: str = Field(description="会话 ID")
     message_count: int = Field(description="消息条数")
     updated_at: float = Field(description="最后更新时间（epoch 秒）")
+    title: str = Field(default="", description="会话标题（自动生成或手改）")
+    preview: str = Field(default="", description="最后一条用户消息的摘要")
+    queued: int = Field(default=0, description="待发送队列条数")
 
 
 class SessionNode(BaseModel):
@@ -185,6 +194,7 @@ class SessionSnapshot(BaseModel):
     """
 
     session_id: str = Field(description="会话 ID")
+    title: str = Field(default="", description="会话标题（自动生成或手改）")
     nodes: list[SessionNode] = Field(
         default_factory=list[SessionNode], description="全部节点，按 id 升序"
     )
@@ -319,6 +329,32 @@ class SessionGetResponse(ResponseProtocol):
     """会话快照。"""
 
     session: SessionSnapshot | None = Field(default=None, description="会话快照")
+
+
+class SessionRenameRequest(RequestProtocol):
+    """给会话改名；``title`` 留空表示恢复自动标题。"""
+
+    title: str = Field(default="", max_length=80, description="新标题；空 = 恢复自动")
+
+
+class SessionRenameResponse(ResponseProtocol):
+    """改名结果。"""
+
+    title: str = Field(default="", description="落库后的标题（可能被重新自动推导）")
+
+
+class SessionRenameEvent(EventDeclaration):
+    """会话改名请求事件。"""
+
+    name = "session.rename"
+    payload_type = SessionRenameRequest
+
+
+class SessionRenameReplyEvent(EventDeclaration):
+    """会话改名响应事件。"""
+
+    name = "session.rename.reply"
+    payload_type = SessionRenameResponse
 
 
 class SessionAppendRequest(RequestProtocol):

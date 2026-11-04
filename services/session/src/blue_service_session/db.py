@@ -21,10 +21,19 @@ from blue_contracts_session import (
     SessionInfo,
     collect_attachment_hashes,
 )
-from infinity_agent import Message
+from infinity_agent import Message, MessageRole
 
 from blue.errors import BlueError
-from blue.messages import encode_message
+from blue.messages import (
+    PREVIEW_LIMIT,
+    TITLE_LIMIT,
+    condense,
+    decode_message,
+    decode_messages,
+    derive_title,
+    encode_message,
+    message_text,
+)
 from blue.tree import ROOT_ID, Tree, pick_current
 
 logger = logging.getLogger(__name__)
@@ -47,7 +56,9 @@ CREATE TABLE IF NOT EXISTS sessions (
     updated_at REAL NOT NULL,
     steps INTEGER NOT NULL DEFAULT 0,
     message_count INTEGER NOT NULL DEFAULT 0,
-    root_current_id INTEGER
+    root_current_id INTEGER,
+    title TEXT NOT NULL DEFAULT '',
+    preview TEXT NOT NULL DEFAULT ''
 );
 
 CREATE TABLE IF NOT EXISTS messages (
@@ -95,8 +106,12 @@ CREATE INDEX IF NOT EXISTS idx_session_outbox_session
     ON session_outbox(session_id, created_at);
 """
 
-_SCHEMA_VERSION = 4
+_SCHEMA_VERSION = 5
 """schema 版本；所有建表语句都是 ``IF NOT EXISTS``，老库按需补列/补表即可。
+
+版本 5 给 ``sessions`` 加了 ``title`` / ``preview``：会话标题不再是浏览器里的
+本地状态，而是服务端按首条用户消息自动生成、也可显式改名；``preview`` 是最后
+一条用户消息的摘要，侧栏直接拿来显示。
 
 版本 4 引入对话树：``messages`` 多了 ``parent_id`` / ``current_id``，
 ``sessions`` 多了 ``root_current_id``。老库升级时按「一条单链」回填：
@@ -118,6 +133,8 @@ class SessionMeta:
     steps: int
     message_count: int
     root_current: int | None = None
+    title: str = ""
+    preview: str = ""
     """根当前选中的顶层分支（第一条消息那一层）。"""
 
 
@@ -388,7 +405,10 @@ class SessionDatabase:
                 mount = await self._resolve_mount_locked(connection, meta, parent)
                 new_ids: list[int] = []
                 previous = mount
+                title = meta.title
+                preview = meta.preview
                 for payload in payloads:
+                    title, preview = _refresh_labels(payload, title, preview)
                     inserted = await connection.execute(
                         """
                         INSERT INTO messages
@@ -414,10 +434,12 @@ class SessionDatabase:
                         """
                         UPDATE sessions
                            SET updated_at = ?,
-                               message_count = message_count + ?
+                               message_count = message_count + ?,
+                               title = ?,
+                               preview = ?
                          WHERE session_id = ?
                         """,
-                        (now, len(payloads), session_id),
+                        (now, len(payloads), title, preview, session_id),
                     )
                 await connection.commit()
             except Exception:
@@ -427,6 +449,47 @@ class SessionDatabase:
         if updated is None:
             raise SessionNotFoundError(f"会话不存在：{session_id}")
         return AppendResult(meta=updated, nodes=new_ids)
+
+    async def set_title(self, session_id: str, title: str) -> str:
+        """设置会话标题；空字符串表示恢复自动标题（按首条用户消息重算）。
+
+        :raises SessionNotFoundError: 会话不存在
+        """
+        async with self._lock:
+            connection = self._connection_or_raise()
+            await connection.execute("BEGIN IMMEDIATE")
+            try:
+                meta = await self._meta_locked(session_id)
+                if meta is None:
+                    raise SessionNotFoundError(f"会话不存在：{session_id}")
+                cleaned = condense(title, limit=TITLE_LIMIT) if title.strip() else ""
+                if not cleaned:
+                    cleaned = await self._derive_title_locked(connection, session_id)
+                await connection.execute(
+                    "UPDATE sessions SET title = ? WHERE session_id = ?",
+                    (cleaned, session_id),
+                )
+                await connection.commit()
+            except Exception:
+                await connection.rollback()
+                raise
+        return cleaned
+
+    async def _derive_title_locked(
+        self, connection: aiosqlite.Connection, session_id: str
+    ) -> str:
+        """按「当前链」上第一条用户消息重算标题。"""
+        del connection
+        record = await self._record_locked(session_id)
+        if record is None:
+            return ""
+        tree: Tree[SessionNodeRecord] = Tree(
+            record.nodes, root_current=record.meta.root_current
+        )
+        messages = decode_messages(
+            (node.message for node in tree.collect(tree.chain())),
+        )
+        return derive_title(messages)
 
     async def set_current(self, session_id: str, node_id: int) -> SessionMeta:
         """切换当前分支：把该节点的父节点指针指到它。
@@ -583,9 +646,12 @@ class SessionDatabase:
             connection = self._connection_or_raise()
             cursor = await connection.execute(
                 """
-                SELECT session_id, message_count, updated_at
-                  FROM sessions
-                 ORDER BY updated_at DESC
+                SELECT s.session_id, s.message_count, s.updated_at,
+                       s.title, s.preview,
+                       (SELECT COUNT(*) FROM session_outbox o
+                         WHERE o.session_id = s.session_id) AS queued
+                  FROM sessions s
+                 ORDER BY s.updated_at DESC
                 """
             )
             rows = await cursor.fetchall()
@@ -594,6 +660,9 @@ class SessionDatabase:
                 session_id=str(row["session_id"]),
                 message_count=int(row["message_count"]),
                 updated_at=float(row["updated_at"]),
+                title=str(row["title"]),
+                preview=str(row["preview"]),
+                queued=int(row["queued"]),
             )
             for row in rows
         ]
@@ -649,10 +718,61 @@ class SessionDatabase:
             return
         # 建表语句全是 IF NOT EXISTS：老库只需补缺失的表与列，不需要重写数据
         await connection.executescript(_SCHEMA)
+        if await self._add_label_columns(connection):
+            # 老库没有标题/摘要：按历史消息补一份，侧栏立刻就有名字
+            await self._backfill_labels(connection)
         if await self._add_tree_columns(connection):
             # 老库只有线性顺序：按「前一条是父、后一条是选中分支」补成一条单链
             await self._backfill_linear_tree(connection)
         await connection.execute(f"PRAGMA user_version = {_SCHEMA_VERSION}")
+
+    async def _add_label_columns(self, connection: aiosqlite.Connection) -> bool:
+        """给老库补 title / preview 列；返回是否真的补了（补了才需要回填）。"""
+        session_columns = await _table_columns(connection, "sessions")
+        added = False
+        if "title" not in session_columns:
+            await connection.execute(
+                "ALTER TABLE sessions ADD COLUMN title TEXT NOT NULL DEFAULT ''"
+            )
+            added = True
+        if "preview" not in session_columns:
+            await connection.execute(
+                "ALTER TABLE sessions ADD COLUMN preview TEXT NOT NULL DEFAULT ''"
+            )
+            added = True
+        return added
+
+    async def _backfill_labels(self, connection: aiosqlite.Connection) -> None:
+        """按历史消息回填标题与摘要。
+
+        升级前的会话都是单链（v3 的线性历史在 v4 迁移里已折成一条链），
+        所以按 ``id`` 升序取首条 / 末条用户消息，与当前链顺序一致。
+        """
+        cursor = await connection.execute(
+            "SELECT session_id, payload FROM messages ORDER BY session_id, id"
+        )
+        rows = await cursor.fetchall()
+        await cursor.close()
+        labels: dict[str, tuple[str, str]] = {}
+        for row in rows:
+            session_id = str(row["session_id"])
+            title, preview = labels.get(session_id, ("", ""))
+            labels[session_id] = _refresh_labels(str(row["payload"]), title, preview)
+        if not labels:
+            return
+        await connection.execute("BEGIN IMMEDIATE")
+        try:
+            await connection.executemany(
+                "UPDATE sessions SET title = ?, preview = ? WHERE session_id = ?",
+                [
+                    (title, preview, session_id)
+                    for session_id, (title, preview) in labels.items()
+                ],
+            )
+            await connection.commit()
+        except Exception:
+            await connection.rollback()
+            raise
 
     async def _add_tree_columns(self, connection: aiosqlite.Connection) -> bool:
         """给 v4 之前的老库补上树形列。
@@ -810,7 +930,7 @@ class SessionDatabase:
         cursor = await connection.execute(
             """
             SELECT session_id, created_at, updated_at, steps, message_count,
-                   root_current_id
+                   root_current_id, title, preview
               FROM sessions
              WHERE session_id = ?
             """,
@@ -829,6 +949,8 @@ class SessionDatabase:
             root_current=(
                 None if row["root_current_id"] is None else int(row["root_current_id"])
             ),
+            title=str(row["title"]),
+            preview=str(row["preview"]),
         )
 
     async def _enforce_capacity_locked(
@@ -1033,6 +1155,20 @@ class SessionDatabase:
         if self._connection is None:
             raise RuntimeError("会话数据库尚未连接")
         return self._connection
+
+
+def _refresh_labels(payload: str, title: str, preview: str) -> tuple[str, str]:
+    """按一条消息刷新会话的标题与摘要（只认用户消息，解析失败就原样返回）。"""
+    try:
+        message = decode_message(payload)
+    except ValueError:
+        return title, preview
+    if message.role is not MessageRole.USER:
+        return title, preview
+    raw = message_text(message)
+    if not raw.strip():
+        return title, preview
+    return (title or condense(raw), condense(raw, limit=PREVIEW_LIMIT))
 
 
 async def _table_columns(connection: aiosqlite.Connection, table: str) -> set[str]:
