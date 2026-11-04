@@ -1125,7 +1125,11 @@
   async function sendPrompt(rawText) {
     const text = String(rawText || "").trim();
     const attachments = state.pendingAttachments.slice();
-    if ((!text && !attachments.length) || state.busy) return;
+    if (!text && !attachments.length) return;
+    if (state.busy) {
+      toast("上一条还在处理，等它结束或点停止", "warn");
+      return;
+    }
     const sessionId = state.sessionId || uuid();
     if (!state.sessionId) {
       state.sessionId = sessionId;
@@ -1297,8 +1301,16 @@
   }
 
   function handleStreamEvent(event) {
-    if (!state.busy && !state.watching) return;
     const kind = event.kind;
+    if (kind === "queued") {
+      // 同一会话已有请求在跑（可能是别的端）：进入等待态并提示
+      if (!state.busy) {
+        state.watching = state.watching || state.sessionId;
+      }
+      setBusy(true, event.text || "正在等待上一个回复结束…");
+      return;
+    }
+    if (!state.busy && !state.watching) return;
     if (kind === "step_start") {
       beginStreamStep();
       return;

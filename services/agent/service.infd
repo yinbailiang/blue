@@ -10,6 +10,7 @@
   llm_connect_timeout: <float, positive> = 10.0
   llm_retries: <int, range(0, 5)> = 1
   llm_http_retries: <int, range(0, 10)> = 3
+  queue_timeout: <float, positive> = 60.0
   compact_history: bool = true
   compact_keep_messages: <int, range(0, 1000)> = 60
   compact_text_chars: <int, range(20, 20000)> = 200

@@ -53,6 +53,11 @@ class AgentConfig(BaseModel):
         ),
     )
     session_timeout: float = Field(default=10.0, gt=0)
+    queue_timeout: float = Field(
+        default=60.0,
+        gt=0,
+        description="同一会话并发请求的排队上限（秒），超时返回「会话繁忙」",
+    )
     compact_history: bool = Field(
         default=True, description="发送前压缩历史里的工具往返（不改持久化数据）"
     )

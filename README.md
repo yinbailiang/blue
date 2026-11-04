@@ -278,6 +278,7 @@ services/<name>/service_runtime_config.json
   "llm_connect_timeout": 10.0,
   "llm_retries": 1,
   "llm_http_retries": 3,
+  "queue_timeout": 60.0,
   "compact_history": true,
   "compact_keep_messages": 60,
   "compact_text_chars": 200,

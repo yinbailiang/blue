@@ -725,3 +725,103 @@ def test_agent_config_defaults_are_generous_for_long_replies() -> None:
     assert config.llm_retries == 1
     assert config.llm_connect_timeout == 10.0
     assert config.llm_http_retries == 3
+
+
+def test_queue_timeout_rejects_when_session_busy() -> None:
+    """同一会话排队超时：后来的请求返回「会话繁忙」，先来的照常完成。"""
+    asyncio.run(_queue_timeout())
+
+
+async def _queue_timeout() -> None:
+    hub = MemoryFanout()
+    client = GatedClient([Message.assistant(content="好了")])
+    core = AgentCore(
+        runtime=make_runtime(hub, "agent"),
+        settings=AgentConfig(api_key="sk-test", queue_timeout=0.2),
+        client=client,
+        session_gateway=MemorySessionGateway(),
+        catalog=cast(Any, StubCatalog()),
+    )
+    chat = make_runtime(hub, "chat")
+    await core.start()
+    await chat.start()
+    try:
+        proxy = chat.proxy()
+        first = asyncio.create_task(
+            core.handle_prompt(
+                SessionPromptRequest(session_id="q", request_id="a", text="hi"), proxy
+            )
+        )
+        await asyncio.wait_for(client.started.wait(), timeout=5.0)
+
+        second = await core.handle_prompt(
+            SessionPromptRequest(session_id="q", request_id="b", text="again"), proxy
+        )
+        assert second.success is False
+        assert "繁忙" in (second.error_msg or "")
+
+        client.release.set()
+        assert (await first).success is True
+    finally:
+        await chat.stop()
+        await core.stop()
+
+
+def test_queue_event_announces_waiting() -> None:
+    """排队期间会推送 kind=queued 事件，前端据此显示「等待中」。"""
+    asyncio.run(_queue_event())
+
+
+async def _queue_event() -> None:
+    hub = MemoryFanout()
+    client = GatedClient([Message.assistant(content="好了")])
+    core = AgentCore(
+        runtime=make_runtime(hub, "agent"),
+        settings=AgentConfig(api_key="sk-test", queue_timeout=2.0),
+        client=client,
+        session_gateway=MemorySessionGateway(),
+        catalog=cast(Any, StubCatalog()),
+    )
+    chat = make_runtime(hub, "chat")
+    await core.start()
+    await chat.start()
+    try:
+        proxy = chat.proxy()
+
+        class StreamCollector(EventHandler):
+            def __init__(self) -> None:
+                super().__init__(subscriptions=["session.stream"], handle_timeout=1.0)
+                self.kinds: list[str] = []
+
+            async def handle(
+                self, payload: Any, bus_proxy: EventBus.Proxy, raw_event: Any
+            ) -> None:
+                del bus_proxy, raw_event
+                if isinstance(payload, SessionStreamPayload):
+                    self.kinds.append(payload.kind)
+
+        collector = StreamCollector()
+        collector_runtime = make_runtime(hub, "stream.collector")
+        await collector_runtime.start()
+        await collector_runtime.register(collector)
+
+        first = asyncio.create_task(
+            core.handle_prompt(
+                SessionPromptRequest(session_id="q2", request_id="a", text="hi"), proxy
+            )
+        )
+        await asyncio.wait_for(client.started.wait(), timeout=5.0)
+        second = asyncio.create_task(
+            core.handle_prompt(
+                SessionPromptRequest(session_id="q2", request_id="b", text="again"),
+                proxy,
+            )
+        )
+        await wait_until(lambda: "queued" in collector.kinds)
+        client.release.set()
+        assert (await first).success is True
+        assert (await second).success is True
+        await collector_runtime.stop()
+    finally:
+        await chat.stop()
+        await core.stop()

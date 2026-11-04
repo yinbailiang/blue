@@ -15,6 +15,8 @@ import asyncio
 import json
 import logging
 import time
+from collections.abc import AsyncGenerator
+from contextlib import asynccontextmanager
 from typing import Any
 
 from blue_contracts_session import (
@@ -210,7 +212,11 @@ class AgentCore:
     async def handle_prompt(
         self, payload: SessionPromptRequest, bus_proxy: EventBus.Proxy
     ) -> SessionReplyResponse:
-        """处理一条用户消息，并把这次 turn 登记为可被 :meth:`cancel` 中断。"""
+        """处理一条用户消息，并把这次 turn 登记为可被 :meth:`cancel` 中断。
+
+        同一会话的并发请求会排队（``queue_timeout`` 秒），超时返回「会话繁忙」；
+        不同会话互不影响。
+        """
         task = asyncio.current_task()
         if task is not None:
             self._active_turns[payload.session_id] = task
@@ -223,6 +229,13 @@ class AgentCore:
         )
         try:
             return await self._run_prompt(payload, bus_proxy)
+        except SessionBusyError:
+            return SessionReplyResponse(
+                session_id=payload.session_id,
+                request_id=payload.request_id,
+                success=False,
+                error_msg="会话繁忙：上一个请求仍在处理，排队超时",
+            )
         finally:
             if self._active_turns.get(payload.session_id) is task:
                 self._active_turns.pop(payload.session_id, None)
@@ -232,6 +245,56 @@ class AgentCore:
                 running=False,
                 request_id=payload.request_id,
             )
+
+    @asynccontextmanager
+    async def _turn_slot(
+        self,
+        payload: SessionPromptRequest,
+        bus_proxy: EventBus.Proxy,
+        lock: asyncio.Lock,
+    ) -> AsyncGenerator[None]:
+        """会话执行槽：空闲直接进入；忙则排队并把「排队中」推给前端。
+
+        超时抛 :class:`SessionBusyError`——调用方转成「会话繁忙」响应。
+        """
+        timeout = self._settings.queue_timeout
+        if lock.locked():
+            await self._stream_event(
+                bus_proxy,
+                SessionStreamPayload(
+                    session_id=payload.session_id,
+                    request_id=payload.request_id,
+                    kind="queued",
+                    text=f"正在等待上一个回复结束（最多 {timeout:.0f} 秒）",
+                ),
+            )
+            logger.info(
+                "会话 %s 已有请求在跑，新请求排队（上限 %.0fs）",
+                payload.session_id,
+                timeout,
+            )
+        try:
+            await asyncio.wait_for(lock.acquire(), timeout=timeout)
+        except TimeoutError as error:
+            logger.warning(
+                "会话 %s 排队超时（%.0fs），拒绝本次请求",
+                payload.session_id,
+                timeout,
+            )
+            await self._stream_event(
+                bus_proxy,
+                SessionStreamPayload(
+                    session_id=payload.session_id,
+                    request_id=payload.request_id,
+                    kind="error",
+                    text="会话繁忙：上一个请求仍在处理，请稍后再试",
+                ),
+            )
+            raise SessionBusyError(payload.session_id) from error
+        try:
+            yield
+        finally:
+            lock.release()
 
     def activity(self) -> list[SessionActivity]:
         """当前正在运行的会话（前端刷新后靠它恢复追踪）。"""
@@ -308,7 +371,7 @@ class AgentCore:
         """串行执行该会话的完整推理-调用循环。"""
         lock = self._session_locks.setdefault(payload.session_id, asyncio.Lock())
         steps = 0
-        async with lock:
+        async with self._turn_slot(payload, bus_proxy, lock):
             try:
                 snapshot = await self._sessions.ensure(
                     bus_proxy, payload.session_id, self._settings.system_prompt
@@ -796,6 +859,10 @@ class AgentCore:
         if client is None:
             raise ConfigError("LLM 客户端尚未初始化")
         return client
+
+
+class SessionBusyError(RuntimeError):
+    """同一会话排队超时（``queue_timeout`` 内没拿到执行槽）。"""
 
 
 def _error(message: str) -> str:

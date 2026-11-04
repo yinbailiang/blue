@@ -224,6 +224,7 @@ class SessionStreamPayload(BaseModel):
     session_id: str = Field(description="会话 ID")
     request_id: str = Field(default="", description="本轮请求 ID")
     kind: Literal[
+        "queued",
         "step_start",
         "thinking",
         "text",
