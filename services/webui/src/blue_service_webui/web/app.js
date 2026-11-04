@@ -1510,7 +1510,7 @@
       return;
     }
     if (frame.type === "queued_ack") {
-      setBusy(false);
+      // 这一轮没有真正开始：不动 busy（当前正在生成的那轮状态由它自己维护）
       toast("会话忙，已加入待发送队列", "info");
       void refreshOutbox();
       return;
@@ -1629,6 +1629,7 @@
 
     els.composer.addEventListener("submit", (event) => {
       event.preventDefault();
+      // 提交只由按钮触发（回车已被 keydown 拦下）：忙时按钮是「停止」
       if (state.busy) {
         cancelPrompt();
         return;
@@ -1668,10 +1669,8 @@
     els.prompt.addEventListener("keydown", (event) => {
       if (event.key === "Enter" && !event.shiftKey) {
         event.preventDefault();
-        if (state.busy) {
-          cancelPrompt();
-          return;
-        }
+        // 回车永远是「发送」：会话忙时后端会把消息排进待发送队列，
+        // 不再把回车复用成「中断」——那会让连续输入像被掐断。
         void sendPrompt(els.prompt.value);
       }
     });

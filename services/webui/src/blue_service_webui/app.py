@@ -248,7 +248,7 @@ def create_app(*, backend: WebBackend, config: WebUIConfig) -> FastAPI:
         sender = _Sender(websocket)
         frames: asyncio.Queue[dict[str, Any] | None] = asyncio.Queue()
         watchers: dict[str, asyncio.Task[None]] = {}
-        prompt_task: asyncio.Task[None] | None = None
+        prompt_tasks: set[asyncio.Task[None]] = set()
         await sender.send({"type": "ready", "service": "webui"})
         with contextlib.suppress(BlueError):
             await sender.send(
@@ -280,12 +280,9 @@ def create_app(*, backend: WebBackend, config: WebUIConfig) -> FastAPI:
                             {"type": "error", "message": f"消息格式错误：{error}"}
                         )
                         continue
-                    if prompt_task is not None and not prompt_task.done():
-                        await sender.send(
-                            {"type": "error", "message": "上一轮还在进行中，请稍候"}
-                        )
-                        continue
-                    prompt_task = asyncio.create_task(
+                    # 不再拦截「上一轮还在进行中」：会话忙时 agent 会把消息放进
+                    # outbox 并立刻回 queued，前端据此显示待发送队列。
+                    task = asyncio.create_task(
                         _stream_prompt(
                             sender,
                             backend,
@@ -296,6 +293,8 @@ def create_app(*, backend: WebBackend, config: WebUIConfig) -> FastAPI:
                         ),
                         name=f"webui.prompt.{request.session_id}",
                     )
+                    prompt_tasks.add(task)
+                    task.add_done_callback(prompt_tasks.discard)
                 elif kind == "cancel":
                     session_id = str(frame.get("session_id") or "")
                     with contextlib.suppress(BlueError):
@@ -317,8 +316,7 @@ def create_app(*, backend: WebBackend, config: WebUIConfig) -> FastAPI:
             return
         finally:
             pending = [pump, reader, *watchers.values()]
-            if prompt_task is not None:
-                pending.append(prompt_task)
+            pending.extend(prompt_tasks)
             for task in pending:
                 task.cancel()
             await asyncio.gather(*pending, return_exceptions=True)
