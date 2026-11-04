@@ -3,180 +3,18 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import AsyncGenerator
-from contextlib import asynccontextmanager
 from typing import Any
 
 from blue_contracts_session import (
-    QueuedMessage,
     SessionActivity,
-    SessionActivityPayload,
     SessionAttachment,
-    SessionInfo,
     SessionReplyResponse,
-    SessionSnapshot,
     SessionStreamPayload,
 )
-from blue_contracts_tool import CatalogQueryResponse
 from blue_service_webui.app import create_app
-from blue_service_webui.backend import ServiceView, SystemView
 from blue_service_webui.config import WebUIConfig
-from infinity_agent import Message, ToolDefinition
 from starlette.testclient import TestClient
-
-from blue.messages import encode_message
-
-
-class FakeBackend:
-    """不连接总线的测试替身。"""
-
-    def __init__(self) -> None:
-        self.reset_calls: list[str] = []
-        self.last_attachments: list[SessionAttachment] = []
-        self.blobs: dict[str, tuple[str, bytes]] = {}
-        self.cancel_calls: list[str] = []
-        self.stream_queue: asyncio.Queue[SessionStreamPayload] | None = None
-        self.activities: list[SessionActivity] = []
-        self.activity_queue: asyncio.Queue[SessionActivityPayload] | None = None
-        self.pending_stream: SessionStreamPayload | None = None
-
-    async def start(self) -> None:
-        return
-
-    async def stop(self) -> None:
-        return
-
-    async def cancel(self, session_id: str) -> bool:
-        self.cancel_calls.append(session_id)
-        return False
-
-    async def sessions(self) -> list[SessionInfo]:
-        return [
-            SessionInfo(
-                session_id="s1",
-                message_count=2,
-                updated_at=1_700_000_000.0,
-            )
-        ]
-
-    async def outbox(self, session_id: str) -> list[QueuedMessage]:
-        del session_id
-        return []
-
-    async def remove_queued(self, session_id: str, message_id: str) -> bool:
-        del session_id, message_id
-        return True
-
-    async def activity(self) -> list[SessionActivity]:
-        return list(self.activities)
-
-    async def snapshot(self, session_id: str) -> SessionSnapshot | None:
-        if session_id != "s1":
-            return None
-        return SessionSnapshot(
-            session_id="s1",
-            messages=[
-                encode_message(Message.system("系统提示")),
-                encode_message(Message.user("你好")),
-                encode_message(Message.assistant(content="你好，我是 Blue。")),
-            ],
-            created_at=1_700_000_000.0,
-            updated_at=1_700_000_001.0,
-            steps=1,
-            message_count=3,
-        )
-
-    async def prompt(
-        self,
-        session_id: str,
-        text: str,
-        attachments: list[SessionAttachment] | None = None,
-    ) -> SessionReplyResponse:
-        self.last_attachments = list(attachments or [])
-        if self.stream_queue is not None:
-            for payload in (
-                SessionStreamPayload(
-                    session_id=session_id,
-                    kind="step_start",
-                    step=1,
-                ),
-                SessionStreamPayload(
-                    session_id=session_id,
-                    kind="text",
-                    step=1,
-                    text="收到：",
-                ),
-                SessionStreamPayload(
-                    session_id=session_id,
-                    kind="text",
-                    step=1,
-                    text=text,
-                ),
-            ):
-                self.stream_queue.put_nowait(payload)
-        return SessionReplyResponse(
-            session_id=session_id,
-            request_id="req-1",
-            text=f"收到：{text}",
-            steps=1,
-        )
-
-    async def get_attachment(self, digest: str) -> tuple[str, bytes] | None:
-        return self.blobs.get(digest)
-
-    async def reset(self, session_id: str) -> bool:
-        self.reset_calls.append(session_id)
-        return True
-
-    async def tools(self) -> CatalogQueryResponse:
-        return CatalogQueryResponse(
-            session_id="s1",
-            request_id="req-catalog",
-            version=3,
-            tools=[ToolDefinition.create("echo", "回显输入")],
-        )
-
-    async def system(self) -> SystemView:
-        return SystemView(
-            available=True,
-            supervisor_pid=123,
-            generation="gen",
-            updated_at=1_700_000_000.0,
-            services=[
-                ServiceView(
-                    name="agent",
-                    kind="agent",
-                    status="Ready",
-                    pid=42,
-                )
-            ],
-        )
-
-    @asynccontextmanager
-    async def subscribe_activity(
-        self,
-    ) -> AsyncGenerator[asyncio.Queue[SessionActivityPayload]]:
-        queue: asyncio.Queue[SessionActivityPayload] = asyncio.Queue()
-        self.activity_queue = queue
-        try:
-            yield queue
-        finally:
-            self.activity_queue = None
-
-    @asynccontextmanager
-    async def subscribe(
-        self, session_id: str
-    ) -> AsyncGenerator[asyncio.Queue[SessionStreamPayload]]:
-        del session_id
-        queue: asyncio.Queue[SessionStreamPayload] = asyncio.Queue()
-        if self.pending_stream is not None:
-            queue.put_nowait(self.pending_stream)
-            self.pending_stream = None
-        self.stream_queue = queue
-        try:
-            yield queue
-        finally:
-            self.stream_queue = None
+from webui_fake_backend import FakeBackend
 
 
 def _client() -> Any:
@@ -300,8 +138,11 @@ def test_websocket_cancel_interrupts_running_prompt() -> None:
             session_id: str,
             text: str,
             attachments: list[SessionAttachment] | None = None,
+            *,
+            parent: int | None = None,
+            regenerate: bool = False,
         ) -> SessionReplyResponse:
-            del text, attachments
+            del text, attachments, parent, regenerate
             await self.released.wait()
             return SessionReplyResponse(
                 session_id=session_id,

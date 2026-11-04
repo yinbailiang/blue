@@ -41,6 +41,8 @@
     sessions: [],
     tools: [],
     messages: [],
+    nodes: [],
+    current: [],
     titles: readJson("blue.titles", {}),
     busy: false,
     socket: null,
@@ -54,6 +56,56 @@
     watching: null,
     cancelled: false,
   };
+
+  /*
+   * 对话树：state.nodes 是整棵树（含未选中的分支），state.messages 是当前链。
+   * 每条消息气泡底部的「分支切换条 + 编辑/重试/删除」都由节点 id 驱动。
+   */
+  function nodeFor(message) {
+    if (!message || !message.id) return null;
+    return state.nodes.find((node) => node.id === message.id) || null;
+  }
+
+  function siblingsOf(node) {
+    if (!node) return [];
+    return state.nodes.filter((item) => item.parent === node.parent).map((item) => item.id);
+  }
+
+  /** 消息脚注：父节点下有多个分支时给切换条，否则只给操作按钮。 */
+  function createFoot(message) {
+    const node = nodeFor(message);
+    if (!node) return null;
+    const foot = document.createElement("div");
+    foot.className = "message-foot";
+    const siblings = siblingsOf(node);
+    if (siblings.length > 1) {
+      const index = siblings.indexOf(node.id);
+      const bar = document.createElement("div");
+      bar.className = "branch-bar";
+      bar.innerHTML =
+        '<button type="button" data-act="branch-prev" title="上一个分支">‹</button>' +
+        `<span class="branch-count">${index + 1} / ${siblings.length}</span>` +
+        '<button type="button" data-act="branch-next" title="下一个分支">›</button>';
+      foot.appendChild(bar);
+    }
+    const acts = document.createElement("div");
+    acts.className = "message-acts";
+    const addAction = (act, label, title) => {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.dataset.act = act;
+      button.title = title;
+      button.textContent = label;
+      acts.appendChild(button);
+    };
+    if (message.role === "user") {
+      addAction("edit", "编辑", "改这条消息，生成一条新分支");
+    }
+    addAction("retry", "重试", "在这条消息下重新生成一条回复分支");
+    addAction("delete", "删除分支", "删除这条消息及其后续");
+    foot.appendChild(acts);
+    return foot;
+  }
 
   const MAX_ATTACHMENTS = 4;
   const MAX_ATTACHMENT_EDGE = 1568;
@@ -697,6 +749,7 @@
           <div class="tool-call-list" hidden></div>
         </div>
       </div>`;
+    wrapper.dataset.node = message.id ? String(message.id) : "";
     const parts = {
       label: wrapper.querySelector(".message-label"),
       reasoning: wrapper.querySelector(".reasoning"),
@@ -708,6 +761,8 @@
     };
     view.parts.set(wrapper, parts);
     updateAssistantNode(parts, message);
+    const foot = createFoot(message);
+    if (foot) wrapper.querySelector(".message-main").appendChild(foot);
     return wrapper;
   }
 
@@ -804,6 +859,7 @@
   function createUserNode(message) {
     const wrapper = document.createElement("div");
     wrapper.className = "message message-user";
+    wrapper.dataset.node = message.id ? String(message.id) : "";
     wrapper.innerHTML = `
       <div class="avatar avatar-user"><svg><use href="#i-user"></use></svg></div>
       <div class="message-main">
@@ -816,6 +872,8 @@
     };
     view.parts.set(wrapper, parts);
     updateUserNode(parts, message);
+    const foot = createFoot(message);
+    if (foot) wrapper.querySelector(".message-main").appendChild(foot);
     return wrapper;
   }
 
@@ -911,6 +969,8 @@
     if (!snapshot) return;
     state.sessionId = snapshot.session_id;
     state.messages = Array.isArray(snapshot.messages) ? snapshot.messages : [];
+    state.nodes = Array.isArray(snapshot.nodes) ? snapshot.nodes : [];
+    state.current = Array.isArray(snapshot.current) ? snapshot.current : [];
     state.liveMessage = null;
     try {
       localStorage.setItem("blue.session", snapshot.session_id);
@@ -1106,13 +1166,20 @@
     });
   }
 
-  async function sendViaRest(sessionId, text, attachments = state.pendingAttachments) {
+  async function sendViaRest(
+    sessionId,
+    text,
+    attachments = state.pendingAttachments,
+    options = {},
+  ) {
     const reply = await api("/api/chat", {
       method: "POST",
       body: JSON.stringify({
         session_id: sessionId,
         text,
         attachments,
+        parent: options.parent ?? null,
+        regenerate: options.regenerate === true,
       }),
     });
     appendAssistantText(reply.text);
@@ -1125,10 +1192,17 @@
     }
   }
 
-  async function sendPrompt(rawText) {
+  /*
+   * 发一轮对话。options.parent 指定新消息挂在谁下面（开新分支），
+   * options.regenerate 表示只重新生成回复（重试某条消息）。
+   */
+  async function sendPrompt(rawText, options = {}) {
+    const regenerate = options.regenerate === true;
+    const parent = options.parent ?? null;
     const text = String(rawText || "").trim();
-    const attachments = state.pendingAttachments.slice();
-    if (!text && !attachments.length) return;
+    const attachments = regenerate ? [] : state.pendingAttachments.slice();
+    if (!regenerate && !text && !attachments.length) return;
+    if (regenerate && !state.sessionId) return;
     const sessionId = state.sessionId || uuid();
     if (!state.sessionId) {
       state.sessionId = sessionId;
@@ -1138,22 +1212,26 @@
         /* ignore */
       }
     }
-    rememberTitle(sessionId, text || (attachments.length ? "[图片]" : ""));
+    if (!regenerate) {
+      rememberTitle(sessionId, text || (attachments.length ? "[图片]" : ""));
+    }
     state.liveMessage = null;
-    const localParts = [];
-    if (text) localParts.push({ type: "text", text });
-    attachments.forEach((attachment) => {
-      localParts.push({
-        type: "image",
-        url: `data:${attachment.mime};base64,${attachment.data}`,
+    if (!regenerate) {
+      const localParts = [];
+      if (text) localParts.push({ type: "text", text });
+      attachments.forEach((attachment) => {
+        localParts.push({
+          type: "image",
+          url: `data:${attachment.mime};base64,${attachment.data}`,
+        });
       });
-    });
-    state.messages.push({
-      role: "user",
-      content: text,
-      parts: localParts,
-      tool_calls: [],
-    });
+      state.messages.push({
+        role: "user",
+        content: text,
+        parts: localParts,
+        tool_calls: [],
+      });
+    }
     state.pendingAttachments = [];
     renderPendingAttachments();
     showWelcome(false);
@@ -1161,7 +1239,7 @@
     renderSessions();
     stopWatching();
     state.cancelled = false;
-    setBusy(true, "Agent 正在思考…");
+    setBusy(true, regenerate ? "正在生成新分支…" : "Agent 正在思考…");
     els.prompt.value = "";
     resizePrompt();
 
@@ -1173,11 +1251,13 @@
           session_id: sessionId,
           text,
           attachments,
+          parent,
+          regenerate,
         }),
       );
     } catch {
       try {
-        await sendViaRest(sessionId, text, attachments);
+        await sendViaRest(sessionId, text, attachments, { parent, regenerate });
       } catch (error) {
         setBusy(false);
         state.messages.push({
@@ -1189,6 +1269,114 @@
         toast(error.message || "发送失败", "error");
       }
     }
+  }
+
+  /* ------------------------------------------------------------------ */
+  /* 对话树操作                                                          */
+  /* ------------------------------------------------------------------ */
+  /** 切换到同父的相邻分支；只改后端指针，历史一条不丢。 */
+  async function switchBranch(node, step) {
+    if (state.busy) {
+      toast("请等待当前回复完成", "info");
+      return;
+    }
+    const siblings = siblingsOf(node);
+    if (siblings.length < 2) return;
+    const index = siblings.indexOf(node.id);
+    const target = siblings[(index + step + siblings.length) % siblings.length];
+    if (target === node.id) return;
+    try {
+      const view_ = await api(
+        `/api/sessions/${encodeURIComponent(state.sessionId)}/branches/${target}/activate`,
+        { method: "POST" },
+      );
+      applySnapshot(view_, { force: false });
+      void refreshSessions();
+    } catch (error) {
+      toast(`切换分支失败：${error.message}`, "error");
+    }
+  }
+
+  /** 重试：再生成一条回复分支，旧回复原样保留。 */
+  function retryNode(node) {
+    if (state.busy) {
+      toast("请等待当前回复完成", "info");
+      return;
+    }
+    // 用户消息：新回复挂在它下面；助手消息：新回复与它同级（回到父节点）
+    const role = node.message?.role || "";
+    const parent = role === "user" ? node.id : node.parent;
+    void sendPrompt("", { parent, regenerate: true });
+  }
+
+  /** 删除一条分支：该消息与其后续一起消失，界面上立刻重渲染。 */
+  async function deleteBranch(node) {
+    if (state.busy) {
+      toast("请等待当前回复完成", "info");
+      return;
+    }
+    if (!window.confirm("删除这条消息及其后续内容？")) return;
+    try {
+      const view_ = await api(
+        `/api/sessions/${encodeURIComponent(state.sessionId)}/branches/${node.id}`,
+        { method: "DELETE" },
+      );
+      applySnapshot(view_, { force: false });
+      void refreshSessions();
+      toast("分支已删除", "success");
+    } catch (error) {
+      toast(`删除失败：${error.message}`, "error");
+    }
+  }
+
+  /** 内联编辑用户消息：保存时在同一个父节点下开新分支，再生成新回复。 */
+  function beginEdit(host, node) {
+    if (state.busy) {
+      toast("请等待当前回复完成", "info");
+      return;
+    }
+    if (host.querySelector(".editor")) return;
+    const message = state.messages.find((item) => item.id === node.id);
+    const bubble = host.querySelector(".bubble");
+    if (!message || !bubble) return;
+    const editor = document.createElement("div");
+    editor.className = "editor";
+    const area = document.createElement("textarea");
+    area.value = String(message.content || "");
+    area.rows = Math.min(12, Math.max(3, area.value.split("\n").length + 1));
+    const actions = document.createElement("div");
+    actions.className = "editor-actions";
+    const save = document.createElement("button");
+    save.type = "button";
+    save.dataset.act = "save-edit";
+    save.textContent = "保存并生成新分支";
+    const cancel = document.createElement("button");
+    cancel.type = "button";
+    cancel.dataset.act = "cancel-edit";
+    cancel.textContent = "取消";
+    actions.append(save, cancel);
+    editor.append(area, actions);
+    bubble.hidden = true;
+    bubble.after(editor);
+    area.focus();
+    area.setSelectionRange(area.value.length, area.value.length);
+    area.addEventListener("keydown", (event) => {
+      if (event.key === "Enter" && (event.ctrlKey || event.metaKey)) {
+        event.preventDefault();
+        save.click();
+      } else if (event.key === "Escape") {
+        event.preventDefault();
+        cancel.click();
+      }
+    });
+  }
+
+  function endEdit(host) {
+    const editor = host?.querySelector(".editor");
+    if (!editor) return;
+    editor.remove();
+    const bubble = host.querySelector(".bubble");
+    if (bubble) bubble.hidden = false;
   }
 
   function renderOutbox() {
@@ -1707,6 +1895,32 @@
     });
 
     els.messageList.addEventListener("click", async (event) => {
+      const action = event.target.closest("[data-act]");
+      if (action) {
+        const host = action.closest("[data-node]");
+        const nodeId = Number(host?.dataset.node || "");
+        const node = state.nodes.find((item) => item.id === nodeId) || null;
+        if (!node) return;
+        const act = action.dataset.act;
+        if (act === "branch-prev") await switchBranch(node, -1);
+        else if (act === "branch-next") await switchBranch(node, 1);
+        else if (act === "edit") beginEdit(host, node);
+        else if (act === "retry") retryNode(node);
+        else if (act === "delete") await deleteBranch(node);
+        else if (act === "cancel-edit") endEdit(host);
+        else if (act === "save-edit") {
+          const text = String(
+            host.querySelector(".editor textarea")?.value || "",
+          ).trim();
+          if (!text) {
+            toast("消息不能为空", "info");
+            return;
+          }
+          endEdit(host);
+          await sendPrompt(text, { parent: node.parent });
+        }
+        return;
+      }
       const button = event.target.closest("[data-copy]");
       if (!button) return;
       const code = button.closest(".code-block")?.querySelector("code")?.innerText || "";

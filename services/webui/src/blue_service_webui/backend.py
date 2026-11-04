@@ -21,6 +21,9 @@ from blue_contracts_session import (
     SessionAttachmentGetEvent,
     SessionAttachmentReplyEvent,
     SessionAttachmentResponse,
+    SessionBranchActivateEvent,
+    SessionBranchActivateReplyEvent,
+    SessionBranchActivateResponse,
     SessionCancelEvent,
     SessionCancelReplyEvent,
     SessionCancelResponse,
@@ -28,6 +31,9 @@ from blue_contracts_session import (
     SessionGetReplyEvent,
     SessionGetResponse,
     SessionInfo,
+    SessionNodeDeleteEvent,
+    SessionNodeDeleteReplyEvent,
+    SessionNodeDeleteResponse,
     SessionOutboxListEvent,
     SessionOutboxListReplyEvent,
     SessionOutboxListResponse,
@@ -59,6 +65,7 @@ from pydantic import BaseModel, Field, ValidationError
 
 from blue.control.model import ActualState
 from blue.errors import BlueError
+from blue.messages import decode_message
 from blue.transport import BusRuntime
 
 __all__ = [
@@ -68,6 +75,7 @@ __all__ = [
     "MessagePartView",
     "MessageView",
     "ServiceView",
+    "SessionNodeView",
     "SessionStreamHandler",
     "SessionView",
     "SystemView",
@@ -166,6 +174,7 @@ class MessagePartView(BaseModel):
 class MessageView(BaseModel):
     """前端展示用的一条消息。"""
 
+    id: int | None = Field(default=None, description="所属树节点 id")
     role: str
     name: str | None = None
     content: str = ""
@@ -175,8 +184,22 @@ class MessageView(BaseModel):
     tool_call_id: str | None = None
 
 
+class SessionNodeView(BaseModel):
+    """前端展示用的一个树节点：一条消息 + 它在树里的位置。"""
+
+    id: int
+    parent: int = Field(description="父节点 id；0 表示会话根")
+    current: int | None = Field(default=None, description="当前选中的子节点")
+    created_at: float = 0.0
+    message: MessageView
+
+
 class SessionView(BaseModel):
-    """会话快照的 JSON 视图。"""
+    """会话快照的 JSON 视图。
+
+    ``messages`` 是当前链（界面直接按顺序渲染），``nodes`` 是整棵树：前端用它
+    算出某个节点的兄弟分支，从而画出 ``‹ 2/3 ›`` 切换条。
+    """
 
     session_id: str
     created_at: float
@@ -184,6 +207,11 @@ class SessionView(BaseModel):
     steps: int
     message_count: int
     messages: list[MessageView] = Field(default_factory=list[MessageView])
+    nodes: list[SessionNodeView] = Field(default_factory=list[SessionNodeView])
+    current: list[int] = Field(
+        default_factory=list[int], description="当前链的节点 id（早 → 新）"
+    )
+    root_current: int | None = Field(default=None, description="根选中的顶层分支")
 
 
 class ServiceView(BaseModel):
@@ -249,8 +277,23 @@ class WebBackend(Protocol):
         session_id: str,
         text: str,
         attachments: list[SessionAttachment] | None = None,
+        *,
+        parent: int | None = None,
+        regenerate: bool = False,
     ) -> SessionReplyResponse:
-        """发送用户消息（可带附件）并等待最终回复。"""
+        """发送用户消息（可带附件）并等待最终回复。
+
+        ``parent`` 指定新消息挂在哪条消息下（``None`` = 当前链末端）；
+        ``regenerate=True`` 表示只重新生成回复、不追加用户消息。
+        """
+        ...
+
+    async def activate(self, session_id: str, node: int) -> None:
+        """切换当前查看的分支。"""
+        ...
+
+    async def delete_node(self, session_id: str, node: int) -> int:
+        """删除一条分支（节点 + 后代）；返回删除条数。"""
         ...
 
     async def get_attachment(self, digest: str) -> tuple[str, bytes] | None:
@@ -446,6 +489,9 @@ class BusBackend:
         session_id: str,
         text: str,
         attachments: list[SessionAttachment] | None = None,
+        *,
+        parent: int | None = None,
+        regenerate: bool = False,
     ) -> SessionReplyResponse:
         """把用户消息（可带附件）交给 agent，并等待最终回复。"""
         response = await self._request(
@@ -456,6 +502,8 @@ class BusBackend:
                     attachment.model_dump(mode="json")
                     for attachment in (attachments or [])
                 ],
+                "parent": parent,
+                "regenerate": regenerate,
             },
             SessionReplyEvent.name,
             session_id=session_id,
@@ -465,6 +513,33 @@ class BusBackend:
         if not response.success:
             raise WebUIError(response.error_msg or "Agent 处理失败")
         return response
+
+    async def activate(self, session_id: str, node: int) -> None:
+        """切换当前查看的分支：只动指针，历史一条都不丢。"""
+        response = await self._request(
+            SessionBranchActivateEvent.name,
+            {"node": node},
+            SessionBranchActivateReplyEvent.name,
+            session_id=session_id,
+        )
+        if not isinstance(response, SessionBranchActivateResponse):
+            raise WebUIError("收到非预期的分支切换响应")
+        if not response.success:
+            raise WebUIError(response.error_msg or "分支切换失败")
+
+    async def delete_node(self, session_id: str, node: int) -> int:
+        """删除一条分支（节点与其后代）。"""
+        response = await self._request(
+            SessionNodeDeleteEvent.name,
+            {"node": node},
+            SessionNodeDeleteReplyEvent.name,
+            session_id=session_id,
+        )
+        if not isinstance(response, SessionNodeDeleteResponse):
+            raise WebUIError("收到非预期的分支删除响应")
+        if not response.success:
+            raise WebUIError(response.error_msg or "分支删除失败")
+        return response.removed
 
     async def get_attachment(self, digest: str) -> tuple[str, bytes] | None:
         """按内容哈希取附件；不存在返回 None。"""
@@ -580,8 +655,11 @@ class BusBackend:
             raise WebUIError("等待后端响应超时") from error
 
 
-def serialize_message(message: Message) -> MessageView:
+def serialize_message(message: Message, *, node_id: int | None = None) -> MessageView:
     """把 ``Message`` 转为不依赖 Pydantic 特例的展示模型。
+
+    :param node_id: 该消息在会话树里的节点 id；前端靠它发分支操作
+
 
     多模态消息额外给出 ``parts``：文本块照原样，附件块给出哈希与访问地址
     （``/api/attachments/<hash>``，内容寻址因而可长缓存）。
@@ -623,6 +701,7 @@ def serialize_message(message: Message) -> MessageView:
                     )
                 )
     return MessageView(
+        id=node_id,
         role=message.role.value,
         name=message.name,
         content="\n".join(texts),
@@ -641,16 +720,29 @@ def serialize_message(message: Message) -> MessageView:
 
 
 def serialize_snapshot(snapshot: SessionSnapshot) -> SessionView:
-    """把会话快照转为前端视图。"""
-    from blue.messages import decode_messages
-
+    """把会话快照转为前端视图：当前链 + 整棵树。"""
+    nodes = [
+        SessionNodeView(
+            id=node.id,
+            parent=node.parent,
+            current=node.current,
+            created_at=node.created_at,
+            message=serialize_message(decode_message(node.message), node_id=node.id),
+        )
+        for node in snapshot.nodes
+    ]
+    by_id = {node.id: node for node in nodes}
     return SessionView(
         session_id=snapshot.session_id,
         created_at=snapshot.created_at,
         updated_at=snapshot.updated_at,
         steps=snapshot.steps,
         message_count=snapshot.message_count,
+        # 当前链按 current 的顺序渲染，不能依赖节点 id 升序（换分支后不单调）
         messages=[
-            serialize_message(message) for message in decode_messages(snapshot.messages)
+            by_id[node_id].message for node_id in snapshot.current if node_id in by_id
         ],
+        nodes=nodes,
+        current=list(snapshot.current),
+        root_current=snapshot.root_current,
     )

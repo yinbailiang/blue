@@ -48,7 +48,11 @@ class _Backend:
         session_id: str,
         text: str,
         attachments: list[SessionAttachment] | None = None,
+        *,
+        parent: int | None = None,
+        regenerate: bool = False,
     ) -> SessionReplyResponse:
+        del parent, regenerate
         self.prompts.append((session_id, text, list(attachments or [])))
         return SessionReplyResponse(
             session_id=session_id, request_id="r", text="ok", steps=1

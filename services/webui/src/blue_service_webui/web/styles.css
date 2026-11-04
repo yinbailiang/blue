@@ -1049,6 +1049,138 @@ kbd {
     var(--panel);
 }
 
+/* 对话树：分支切换条 + 消息操作 + 内联编辑 */
+.message-foot {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  opacity: 0.55;
+  transition: opacity 160ms ease;
+}
+
+.message:hover .message-foot,
+.message-foot:focus-within {
+  opacity: 1;
+}
+
+.message-user .message-foot {
+  flex-direction: row-reverse;
+}
+
+.branch-bar,
+.message-acts {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+}
+
+.branch-bar {
+  padding: 2px 4px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--panel-solid);
+}
+
+.branch-count {
+  color: var(--muted);
+  font-size: 10.5px;
+  font-variant-numeric: tabular-nums;
+  padding: 0 2px;
+}
+
+.branch-bar button,
+.message-acts button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 22px;
+  height: 22px;
+  padding: 0 6px;
+  border: 0;
+  border-radius: 999px;
+  background: transparent;
+  color: var(--text-dim);
+  font-family: inherit;
+  font-size: 10.5px;
+  line-height: 1;
+  cursor: pointer;
+  transition: background 140ms ease, color 140ms ease;
+}
+
+.branch-bar button {
+  font-size: 13px;
+}
+
+.branch-bar button:hover,
+.message-acts button:hover {
+  background: var(--accent-soft);
+  color: var(--text);
+}
+
+.message-acts button[data-act="delete"]:hover {
+  background: var(--danger-soft);
+  color: var(--danger);
+}
+
+/* 内联编辑：编辑用户消息时替换气泡内容 */
+.editor {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: min(560px, 100%);
+  padding: 10px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  background: var(--panel-solid);
+}
+
+.editor textarea {
+  width: 100%;
+  resize: vertical;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg-soft);
+  color: var(--text);
+  font-family: inherit;
+  font-size: 13.5px;
+  line-height: 1.6;
+}
+
+.editor textarea:focus {
+  outline: 2px solid var(--accent-soft);
+  outline-offset: 1px;
+}
+
+.editor-actions {
+  display: flex;
+  gap: 8px;
+  justify-content: flex-end;
+}
+
+.editor-actions button {
+  padding: 6px 12px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: transparent;
+  color: var(--text-dim);
+  font-family: inherit;
+  font-size: 11.5px;
+  cursor: pointer;
+}
+
+.editor-actions button[data-act="save-edit"] {
+  border-color: transparent;
+  background: var(--accent-soft);
+  color: var(--accent-strong);
+}
+
+.editor-actions button:hover {
+  background: var(--panel-raised);
+  color: var(--text);
+}
+
 .message-error .bubble {
   border-color: rgba(255, 112, 136, 0.3);
   background: var(--danger-soft);

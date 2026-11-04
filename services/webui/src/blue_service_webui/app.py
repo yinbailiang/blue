@@ -38,22 +38,30 @@ _HEX_DIGEST = re.compile(r"[0-9a-f]{64}\Z")
 
 
 class ChatRequest(BaseModel):
-    """REST / WebSocket 用户消息（可携带内联附件）。"""
+    """REST / WebSocket 用户消息（可携带内联附件）。
+
+    对话树相关：``parent`` 指定新消息挂在哪条消息下（``None`` = 当前链末端），
+    ``regenerate`` 表示只重新生成回复（重试），两者都不传就是普通发言。
+    """
 
     session_id: str = Field(min_length=1, max_length=128)
     text: str = Field(default="", max_length=100_000)
     attachments: list[SessionAttachment] = Field(
         default_factory=list[SessionAttachment], description="内联附件"
     )
+    parent: int | None = Field(
+        default=None, description="新消息的父节点；None 表示当前链末端"
+    )
+    regenerate: bool = Field(default=False, description="只生成回复、不追加用户消息")
     type: str = Field(default="prompt", description="帧类型（WebSocket 兼容字段）")
 
     @model_validator(mode="after")
     def _require_content(self) -> ChatRequest:
-        """文本与附件至少要有一个。
+        """文本与附件至少要有一个（重试不需要新消息，故豁免）。
 
-        :raises ValueError: 两者都为空
+        :raises ValueError: 两者都为空且不是重试
         """
-        if not self.text.strip() and not self.attachments:
+        if not self.regenerate and not self.text.strip() and not self.attachments:
             raise ValueError("消息不能为空")
         return self
 
@@ -178,6 +186,24 @@ def create_app(*, backend: WebBackend, config: WebUIConfig) -> FastAPI:
             raise HTTPException(status_code=404, detail="会话不存在")
         return serialize_snapshot(snapshot)
 
+    @app.post("/api/sessions/{session_id}/branches/{node}/activate")
+    async def activate_branch(session_id: str, node: int) -> SessionView:
+        """切换当前查看的分支，返回切换后的快照。"""
+        try:
+            await backend.activate(session_id, node)
+        except BlueError as error:
+            raise HTTPException(status_code=503, detail=str(error)) from error
+        return await _view(backend, session_id)
+
+    @app.delete("/api/sessions/{session_id}/branches/{node}")
+    async def delete_branch(session_id: str, node: int) -> SessionView:
+        """删除一条分支（该节点与其所有后代），返回删除后的快照。"""
+        try:
+            await backend.delete_node(session_id, node)
+        except BlueError as error:
+            raise HTTPException(status_code=503, detail=str(error)) from error
+        return await _view(backend, session_id)
+
     @app.delete("/api/sessions/{session_id}")
     async def delete_session(session_id: str) -> dict[str, bool]:
         """重置会话。"""
@@ -224,7 +250,13 @@ def create_app(*, backend: WebBackend, config: WebUIConfig) -> FastAPI:
         """无 WebSocket 时的同步聊天接口。"""
         text = request.text.strip()
         try:
-            reply = await backend.prompt(request.session_id, text, request.attachments)
+            reply = await backend.prompt(
+                request.session_id,
+                text,
+                request.attachments,
+                parent=request.parent,
+                regenerate=request.regenerate,
+            )
         except BlueError as error:
             raise HTTPException(status_code=502, detail=str(error)) from error
         return {
@@ -289,6 +321,8 @@ def create_app(*, backend: WebBackend, config: WebUIConfig) -> FastAPI:
                             request.session_id,
                             request.text.strip(),
                             request.attachments,
+                            parent=request.parent,
+                            regenerate=request.regenerate,
                             poll_interval=config.poll_interval,
                         ),
                         name=f"webui.prompt.{request.session_id}",
@@ -320,6 +354,13 @@ def create_app(*, backend: WebBackend, config: WebUIConfig) -> FastAPI:
             for task in pending:
                 task.cancel()
             await asyncio.gather(*pending, return_exceptions=True)
+
+    async def _view(target: WebBackend, session_id: str) -> SessionView:
+        """取会话快照视图；不存在时 404。"""
+        snapshot = await target.snapshot(session_id)
+        if snapshot is None:
+            raise HTTPException(status_code=404, detail="会话不存在")
+        return serialize_snapshot(snapshot)
 
     return app
 
@@ -385,6 +426,8 @@ async def _stream_prompt(
     text: str,
     attachments: list[SessionAttachment],
     *,
+    parent: int | None = None,
+    regenerate: bool = False,
     poll_interval: float,
 ) -> None:
     """执行一轮 prompt，并把 Agent 实时流、最终回复与快照推给浏览器。
@@ -395,7 +438,11 @@ async def _stream_prompt(
         {"type": "status", "phase": "thinking", "label": "Agent 正在思考…"}
     )
     async with backend.subscribe(session_id) as stream:
-        prompt_task = asyncio.create_task(backend.prompt(session_id, text, attachments))
+        prompt_task = asyncio.create_task(
+            backend.prompt(
+                session_id, text, attachments, parent=parent, regenerate=regenerate
+            )
+        )
         stream_task = asyncio.create_task(stream.get())
         try:
             while True:
