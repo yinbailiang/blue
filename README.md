@@ -280,10 +280,10 @@ services/<name>/service_runtime_config.json
   "llm_http_retries": 3,
   "queue_timeout": 60.0,
   "compact_history": true,
-  "compact_keep_messages": 60,
+  "compact_keep_messages": 300,
   "compact_text_chars": 200,
   "compact_error_chars": 600,
-  "compact_target_chars": 200000,
+  "compact_target_chars": 2000000,
   "session_timeout": 10.0,
   "system_prompt": "你是 blue，一个通过工具完成任务的智能体。",
   "tool_timeout": 30.0
@@ -412,6 +412,22 @@ WebUI 通过 WebSocket 调用 Agent，并订阅 `session.stream` 实时展示模
 中和，外链统一带 `target="_blank" rel="noopener noreferrer"`。
 
 > 运行时配置可能包含密钥，务必保持 `0600` 且不要提交。
+
+### 内建历史工具（回取被压缩的原文）
+
+压缩会丢掉旧对话，所以 agent 自带两个**内建工具**（不走总线、不进注册中心，
+直接用本轮的完整历史在内存里查）：
+
+| 工具 | 作用 |
+|---|---|
+| `history_search(query, limit=5, roles="user,assistant,tool")` | 在本会话历史里按子串搜索，返回命中消息的 `id`、角色、在链上的序号与上下文片段 |
+| `history_read(ids, max_chars=4000)` | 按 id 读回完整原文；超长截断并标注真实长度；缺失的 id 单独列出 |
+
+配合方式：压缩产生的省略说明里直接点名这两个工具
+（`[早期历史已省略：N 步 / M 条消息；需要原文用 history_search / history_read 取回]`），
+于是「上下文预算」和「可回溯性」不再冲突——模型看到省略就知道该去查，而不是硬猜。
+
+检索视图基于**压缩前**的完整链，所以被丢弃、被截断、被投影的内容都能取回原文。
 
 ## 命令行
 
