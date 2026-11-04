@@ -477,7 +477,11 @@ class AgentCore:
                 tree = Tree(snapshot.nodes, root_current=snapshot.root_current)
                 target = payload.parent
                 if target is None:
+                    # 普通发言：挂在当前链末端
                     target = tree.leaf()
+                elif target == ROOT_ID:
+                    # 显式要求挂在会话根上（没有 system 提示时的顶层分支）
+                    target = None
                 elif tree.get(target) is None:
                     raise BlueError(f"消息不存在或已被删除：{target}")
                 mount = ROOT_ID if target is None else target
