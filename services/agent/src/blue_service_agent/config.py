@@ -78,12 +78,12 @@ class AgentConfig(BaseModel):
         default=600, ge=0, description="失败结果额外保留的结尾字符数"
     )
     compact_target_chars: int = Field(
-        default=2_000_000,
+        default=1_200_000,
         ge=0,
         description=(
             "提示目标体量（字符）；超预算时把最旧的消息降级成一行，0 = 不限。"
-            "按 1M 上下文折算：中英混排约 2.6 字符/token，"
-            "2_000_000 字符 ≈ 77 万 token，留出工具 schema 与回复的余量"
+            "实测比例 1.6 字符/token（工具结果里 JSON 多），"
+            "1_200_000 字符 ≈ 74 万 token，给 1M 窗口留出工具 schema 与回复的余量"
         ),
     )
     compact_rules: list[CompactRule] = Field(

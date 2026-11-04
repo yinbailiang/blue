@@ -283,7 +283,7 @@ services/<name>/service_runtime_config.json
   "compact_keep_messages": 300,
   "compact_text_chars": 200,
   "compact_error_chars": 600,
-  "compact_target_chars": 2000000,
+  "compact_target_chars": 1200000,
   "session_timeout": 10.0,
   "system_prompt": "你是 blue，一个通过工具完成任务的智能体。",
   "tool_timeout": 30.0
@@ -318,7 +318,7 @@ services/<name>/service_runtime_config.json
   失败时额外保留结尾（错误通常在尾部），列表只留前几条，`write_file` 的正文
   直接省略（文件已落盘）。**只压较早的消息**，尾部 `compact_keep_messages`
   （默认 300 条）原样发送——模型正在用的工具结果不能被截断。
-- `compact_target_chars`（默认 `2000000`，`0` = 不限）：提示体量的**预算**。
+- `compact_target_chars`（默认 `1200000`，`0` = 不限）：提示体量的**预算**。
   只按条数保留是不够的：1700 条历史里每条哪怕只剩 200 字，加起来也有 1 MB。
 
   超预算的处理是**整步丢弃最旧的对话**，并在原位留一句
@@ -330,11 +330,13 @@ services/<name>/service_runtime_config.json
   - 永远保留：系统提示、最后一步（当前这轮的输入）。预算小到最后一步都放不下时
     不丢它，如实承认超预算。
 
-  数值怎么定：中英混排 + 大量 JSON 约 **2.6 字符/token**（`agent` 日志每步打印实测
-  比例），1M 上下文 ≈ 260 万字符；默认 200 万字符 ≈ 77 万 token，给工具 schema 与
-  回复留余量。实测一条 1742 条消息的会话：原始 2967 KB，
-  预算 200 万 → 1009 KB（不丢任何消息）；预算 60 万 → 584 KB / 丢 1136 条；
-  预算 20 万 → 195 KB / 丢 1673 条。
+  数值怎么定：`agent` 每步会打印实测的「字符/token」比例。真实会话里工具结果是
+  JSON，实测 **1.6 字符/token**（不是纯文本的 2.6），所以 100 万 token 只相当于
+  160 万字符。默认 120 万字符 ≈ 74 万 token，给 1M 窗口留出工具 schema 与回复的
+  余量。换个模型/换个内容构成时，看日志里的比例重算一次即可。
+
+  实测一条 1742 条消息的会话：原始 2967 KB，预算 200 万 → 1009 KB（不丢任何消息）；
+  预算 60 万 → 584 KB / 丢 1136 条；预算 20 万 → 195 KB / 丢 1673 条。
 
   投影分界还按 50 条取整（`COMPACT_BOUNDARY_STEP`）：分界如果每来一条消息就挪一格，
   等于每次调用都把第 `len-keep` 条改写一遍，上游的 prompt 前缀缓存会从那里整段失效。
