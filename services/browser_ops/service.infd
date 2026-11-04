@@ -1,0 +1,21 @@
+~ServiceTemplate {
+  driver_bin: str = "geckodriver"
+  browser_bin: <str?> = null
+  timeout: <float, positive> = 90.0
+  default_width: <int, range(320, 3840)> = 1280
+  default_height: <int, range(240, 2160)> = 900
+  max_edge: <int, range(320, 4096)> = 1568
+}
+
+service {
+  name = "browser_ops"
+  kind = "tool"
+  package = "blue-service-browser-ops"
+  module = "blue_service_browser_ops"
+  depends_on = ["bus"]
+  depends_contracts = ["tool"]
+  restart = "always"
+  stop_timeout = 15.0
+  startup_timeout = 40.0
+  readiness = "process"
+}

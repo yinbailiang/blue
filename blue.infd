@@ -10,6 +10,7 @@
 !file p"secrets.toml" as toml import .agent.api_key as agent_api_key, .bus.password as bus_password
 
 !from p"services/browser/service.infd" import ServiceTemplate as BrowserService
+!from p"services/browser_ops/service.infd" import ServiceTemplate as BrowserOpsService
 !from p"services/bus/service.infd" import ServiceTemplate as BusService
 !from p"services/registry/service.infd" import ServiceTemplate as RegistryService
 !from p"services/session/service.infd" import ServiceTemplate as SessionService
@@ -78,6 +79,9 @@ weather = WeatherService()
 
 # 无头 Firefox 截图：截图以图片附件回到模型（agent 真的能「看见」页面）
 browser = BrowserService()
+
+# 可交互浏览器（WebDriver/geckodriver）：等待渲染、点击、输入、滚动后再截图
+browser_ops = BrowserOpsService()
 
 # 查看本地图片：把磁盘上的图（截图/图表/下载的图片）作为附件交给模型
 view_image = ViewImageService()

@@ -73,16 +73,9 @@ async def capture(
     width: Annotated[int, Field(ge=320, le=3840), "视口宽度"] = 0,
     height: Annotated[int, Field(ge=240, le=2160), "视口高度"] = 0,
 ) -> BrowserShot:
-    """用无头 Firefox 给网页拍一张截图，并以图片附件返回。
+    """给网页拍一张截图并以图片附件返回（无头 Firefox，仅支持 http/https）。
 
-    截图范围等于视口大小（Firefox 的 ``--screenshot`` 不支持整页）；
-    超过体积上限时会等比缩小并转成 JPEG，保证能被会话层的附件上限接受。
-
-    :param url: 目标地址，仅支持 http/https
-    :param width: 视口宽度；``0`` 表示用配置里的默认值
-    :param height: 视口高度；``0`` 表示用配置里的默认值
-    :return: 截图元信息与图片附件
-    :raises ValueError: 地址非法、Firefox 失败或超时
+    截图范围等于视口大小，不支持整页；超大图会等比缩小 / 转 JPEG。
     """
     target = url.strip()
     if not target:

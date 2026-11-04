@@ -79,14 +79,10 @@ def configure(config: ViewImageConfig) -> None:
 def view_image(
     path: Annotated[str, "图片路径；相对路径锚定项目根"],
 ) -> ViewImageResult:
-    """读取一张本地图片并以图片附件返回（模型可以直接「看见」它）。
+    """查看一张本地图片并以图片附件返回。
 
-    仅支持 JPEG / PNG / GIF / WebP（按文件内容嗅探，不看扩展名）；动图只取首帧。
-    长边超过上限会等比缩小，PNG 过大会转 JPEG，保证落在会话层的附件预算内。
-
-    :param path: 图片路径；相对路径按项目根（或配置的 ``workdir``）解析
-    :return: 元信息与图片附件
-    :raises ValueError: 路径为空、文件不存在、超过体积上限或不是支持的图片
+    支持 JPEG / PNG / GIF / WebP（按内容嗅探），动图取首帧；长边超限会等比缩小，
+    PNG 过大会转 JPEG。相对路径按项目根解析。
     """
     target = workspace().resolve(path)
     if not target.is_file():

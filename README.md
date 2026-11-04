@@ -461,6 +461,7 @@ Ready / Running → Stopping → Stopped
 | `shell` | 异步 shell 命令，超时进程组强杀、输出截断；默认工作目录为项目根 |
 | `weather` | 天气查询（wttr.in，免密钥）：实时实况 + 最多 3 天预报，天气码本地译中文 |
 | `browser` | 无头 Firefox 截图：把网页截成图片**作为附件**回到 agent（Pillow 归一化到会话体积上限内） |
+| `browser_ops` | 可交互浏览器（WebDriver/geckodriver）：等渲染、点击、输入、滚动、执行 JS，再截图回传附件 |
 | `view_image` | 查看本地图片：把磁盘上的图（截图/图表/下载图）**作为附件**交给模型；相对路径锚定项目根 |
 | `mcp_bridge` | MCP 客户端桥：把外部 MCP server（stdio）的工具接入工具目录；工具集声明式、schema 自动降级并留痕 |
 | `mcp_server` | MCP 服务端桥：把 blue 工具目录暴露给外部 MCP 客户端（stdio，手工运行，白名单 + 危险工具门禁） |

@@ -9,6 +9,7 @@ members = [
     "blue-contracts-tool",
     "blue-service-agent",
     "blue-service-browser",
+    "blue-service-browser-ops",
     "blue-service-bus",
     "blue-service-chat",
     "blue-service-clock",
@@ -348,6 +349,25 @@ dependencies = [
 [package.metadata]
 requires-dist = [
     { name = "blue", editable = "." },
+    { name = "pillow", specifier = ">=11" },
+    { name = "pydantic", specifier = ">=2" },
+]
+
+[[package]]
+name = "blue-service-browser-ops"
+version = "0.1.0"
+source = { editable = "services/browser_ops" }
+dependencies = [
+    { name = "blue" },
+    { name = "httpx" },
+    { name = "pillow" },
+    { name = "pydantic" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "blue", editable = "." },
+    { name = "httpx", specifier = ">=0.28" },
     { name = "pillow", specifier = ">=11" },
     { name = "pydantic", specifier = ">=2" },
 ]

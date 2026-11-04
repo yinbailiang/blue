@@ -16,6 +16,7 @@ ROOT = Path(__file__).resolve().parents[1]
 SERVICES = (
     "agent",
     "browser",
+    "browser_ops",
     "bus",
     "chat",
     "clock",
@@ -37,6 +38,7 @@ SERVICES = (
 MANAGED = {
     "agent",
     "browser",
+    "browser_ops",
     "bus",
     "clock",
     "edit_file",
@@ -54,6 +56,7 @@ CONTRACTS = ("session", "tool")
 EXPECTED_CONTRACTS: dict[str, set[str]] = {
     "agent": {"tool", "session"},
     "browser": {"tool"},
+    "browser_ops": {"tool"},
     "bus": set(),
     "chat": {"session"},
     "clock": {"tool"},
@@ -112,6 +115,7 @@ def test_blue_infd_compiles_and_matches_service_packages() -> None:
         if name in {
             "agent",
             "browser",
+            "browser_ops",
             "bus",
             "edit_file",
             "read_file",
