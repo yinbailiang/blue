@@ -382,10 +382,17 @@ uv run blue config-check        # 编译校验 + 打印期望状态摘要
 uv run blue config-check --write# 只生成运行时配置，不启动
 uv run blue render [--full]     # 打印期望状态（默认脱敏）
 uv run blue build               # uv sync --all-packages
-uv run blue doctor              # 检查 uv / RabbitMQ / 状态目录
+uv run blue doctor              # 检查 uv / RabbitMQ / 状态目录 / 每个 MCP server 的启动命令
+uv run blue mcp-tools           # 列出每个 MCP server 真实提供的工具名（写白名单用）
+uv run blue mcp-tools kwin --json  # 只看一个 server，JSON 输出
 ```
 
 全局参数：`--config <path>`、`--verbose`。
+
+接第三方 MCP server 的推荐顺序：先 `blue doctor` 确认启动命令可用 →
+`blue mcp-tools <server>` 拿到真实工具名（不同版本会改名，别照 README 抄）→
+把 `<server>__<tool>` 写进 `blue.infd` 的 `mcp_bridge.tools` → `blue apply`。
+声明的工具在 server 上不存在时桥会启动失败，不会静默少一个工具。
 
 服务进程的日志默认打到 stderr（supervisor 收集到 `.blue/logs/<name>.log`），级别
 默认 `INFO`（服务上下线、会话回收等都会留下痕迹），可用环境变量

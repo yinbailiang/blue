@@ -27,6 +27,7 @@ from blue.config import (
     render_state,
     write_runtime_configs,
 )
+from blue.control import mcp
 from blue.control.logs import LogManager
 from blue.control.model import ActualState, ServiceStatus
 from blue.control.reconciler import Supervisor
@@ -71,6 +72,13 @@ def main(argv: Sequence[str] | None = None) -> int:
                 return _build(config_path)
             case "doctor":
                 return _doctor(config_path)
+            case "mcp-tools":
+                return _mcp_tools(
+                    config_path,
+                    only=cast(str, args.server),
+                    as_json=bool(args.json),
+                    timeout=float(args.timeout),
+                )
             case _:
                 print(f"未知命令：{args.command}", file=sys.stderr)
                 return 2
@@ -433,6 +441,80 @@ def _build(config_path: str) -> int:
     return completed.returncode
 
 
+def _mcp_tools(config_path: str, *, only: str, as_json: bool, timeout: float) -> int:
+    """列出 MCP server 真正提供的工具名，并标出白名单覆盖情况。
+
+    用途：``mcp_bridge.tools`` 白名单必须写对工具名，而不同版本的 server 会改名
+    （kwin-mcp 0.12 是 ``list_windows``，1.0 改成 ``window_list``）。这里直接把
+    server 的 ``tools/list`` 打出来，照着抄即可。
+    """
+    desired = _try_load(config_path)
+    if desired is None:
+        return 1
+    bridge = desired.services.get("mcp_bridge")
+    if bridge is None:
+        print("配置里没有启用 mcp_bridge 服务")
+        return 1
+    root = Path(config_path).resolve().parent
+    declared = mcp.declared_tool_names(bridge.config)
+    servers = [
+        server
+        for server in mcp.declared_servers(bridge.config)
+        if server.enabled and (not only or server.name == only)
+    ]
+    if only and not servers:
+        print(f"没有名为 {only!r} 的已启用 server", file=sys.stderr)
+        return 1
+
+    report: dict[str, dict[str, object]] = {}
+    ok = True
+    for server in servers:
+        problem = mcp.command_problem(server.command, cwd=root)
+        tools: list[mcp.ToolSummary] = []
+        error = problem
+        if error is None:
+            try:
+                tools = asyncio.run(mcp.probe_tools(server, cwd=root, timeout=timeout))
+            except Exception as exc:
+                error = f"{type(exc).__name__}: {exc}"
+        covered = sum(1 for tool in tools if f"{server.name}__{tool.name}" in declared)
+        report[server.name] = {
+            "command": server.display,
+            "tools": [
+                {
+                    "name": tool.name,
+                    "declared": f"{server.name}__{tool.name}" in declared,
+                    "description": tool.description,
+                }
+                for tool in tools
+            ],
+            "declared": covered,
+            "error": error,
+        }
+        if error is not None:
+            ok = False
+
+    if as_json:
+        print(json.dumps(report, ensure_ascii=False, indent=2))
+        return 0 if ok else 1
+
+    for server in servers:
+        entry = report[server.name]
+        print(f"\n{server.name}  ({server.display})")
+        error = entry["error"]
+        if error is not None:
+            print(f"  ✗ {error}")
+            continue
+        entries = cast(list[dict[str, object]], entry["tools"])
+        print(f"  提供 {len(entries)} 个工具，白名单已启用 {entry['declared']} 个")
+        for item in entries:
+            mark = "✓" if item["declared"] else "·"
+            print(f"  {mark} {item['name']}")
+    if not ok:
+        print("\n有 server 探测失败，见上面的错误", file=sys.stderr)
+    return 0 if ok else 1
+
+
 def _doctor(config_path: str) -> int:
     """检查关键运行时依赖。"""
     desired = _try_load(config_path)
@@ -457,6 +539,27 @@ def _doctor(config_path: str) -> int:
     else:
         state_dir = Path(".blue")
     print(f"state_dir     : {state_dir}")
+    if desired is not None:
+        bridge = desired.services.get("mcp_bridge")
+        if bridge is not None:
+            root = Path(config_path).resolve().parent
+            servers = mcp.declared_servers(bridge.config)
+            for server in servers:
+                if not server.enabled:
+                    print(f"mcp server {server.name:<12}: 已禁用")
+                    continue
+                problem = mcp.command_problem(server.command, cwd=root)
+                if problem is None:
+                    print(f"mcp server {server.name:<12}: ok（{server.display}）")
+                else:
+                    print(f"mcp server {server.name:<12}: {problem}")
+                    ok = False
+            declared = mcp.declared_tool_names(bridge.config)
+            for entry in mcp.unknown_tool_servers(
+                declared, {server.name for server in servers}
+            ):
+                print(f"mcp 白名单     : {entry} 指向未声明的 server")
+                ok = False
     return 0 if ok else 1
 
 
@@ -516,4 +619,14 @@ def _parser() -> argparse.ArgumentParser:
 
     subparsers.add_parser("build", help="uv sync --all-packages")
     subparsers.add_parser("doctor", help="检查运行依赖")
+    mcp_parser = subparsers.add_parser(
+        "mcp-tools", help="列出 MCP server 真实提供的工具名（写白名单用）"
+    )
+    mcp_parser.add_argument(
+        "server", nargs="?", default="", help="只探测某个 server（缺省为全部）"
+    )
+    mcp_parser.add_argument("--json", action="store_true", help="输出 JSON")
+    mcp_parser.add_argument(
+        "--timeout", type=float, default=30.0, help="握手与 tools/list 超时（秒）"
+    )
     return parser
