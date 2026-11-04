@@ -39,6 +39,7 @@ from pydantic import BaseModel, Field
 from blue_service_agent.schema import FieldProfile
 
 __all__ = [
+    "COMPACT_BOUNDARY_STEP",
     "COMPACT_ERROR_CHARS",
     "COMPACT_KEEP_MESSAGES",
     "COMPACT_LIST_ITEMS",
@@ -64,6 +65,15 @@ COMPACT_LIST_ITEMS = 3
 
 SLIM_CHARS = 120
 """预算不够、把更早的消息降级成一行时保留的开头字符数。"""
+
+COMPACT_BOUNDARY_STEP = 50
+"""投影分界的量化步长。
+
+``keep_messages`` 的分界如果每来一条消息就往前挪一格，等于每次调用都把「第
+len-keep 条」那条消息改写一遍：prompt 前缀从那里开始就和上次不同，上游的前缀
+缓存会整段失效。把分界按 50 条取整，代价是最多少保护 49 条，换来的是缓存能连
+续命中 50 轮。
+"""
 
 MAX_DEPTH = 4
 """递归深度上限（再深的嵌套直接折叠）。"""

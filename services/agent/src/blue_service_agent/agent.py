@@ -15,7 +15,7 @@ import asyncio
 import json
 import logging
 import time
-from collections.abc import AsyncGenerator
+from collections.abc import AsyncGenerator, Sequence
 from contextlib import asynccontextmanager
 from typing import Any
 
@@ -46,6 +46,8 @@ from infinity_agent import (
     StreamChunk,
     ToolCall,
     ToolDefinition,
+    UsageChunk,
+    UsageStats,
 )
 from infinity_agent.clients import (
     DeepSeekConfig,
@@ -751,6 +753,36 @@ class AgentCore:
         )
         return reply, steps
 
+    @staticmethod
+    def _usage_of(chunks: Sequence[StreamChunk]) -> UsageStats | None:
+        """取这一步的 token 用量（有的模型不返回，返回 None）。"""
+        for chunk in reversed(chunks):
+            if isinstance(chunk, UsageChunk):
+                return chunk.usage
+        return None
+
+    def _log_usage(
+        self, chunks: Sequence[StreamChunk], messages: Sequence[Message]
+    ) -> None:
+        """记一行「提示字符 / token 用量」，用来看预算调得合不合适。
+
+        中英混排 + 大量 JSON 时，字符/token 大约落在 2.2–3.0；这个数字变小时说明
+        上下文里 JSON/英文变多了，预算想按 token 折算就得跟着变。
+        """
+        usage = self._usage_of(chunks)
+        if usage is None:
+            return
+        chars = estimate_chars(messages)
+        ratio = chars / usage.prompt_tokens if usage.prompt_tokens else 0.0
+        logger.info(
+            "本步用量：prompt %s tok（%.1f 字符/token）"
+            "· completion %s tok · 提示 %s 字符",
+            usage.prompt_tokens,
+            ratio,
+            usage.completion_tokens,
+            chars,
+        )
+
     async def _stream_step(
         self,
         bus_proxy: EventBus.Proxy,
@@ -783,6 +815,7 @@ class AgentCore:
                     await self._forward_chunk(
                         bus_proxy, session_id, request_id, step, chunk
                     )
+                self._log_usage(chunks, messages)
                 return chunks
             except asyncio.CancelledError:
                 await self._commit_interrupted_stream(

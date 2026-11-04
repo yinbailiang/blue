@@ -8,6 +8,11 @@ from blue_service_agent.compact import SLIM_CHARS, compact_history, estimate_cha
 from infinity_agent import FunctionCall, Message, MessageRole, ToolCall
 
 
+def _user(text: str) -> Message:
+    """一条用户消息。"""
+    return Message.user(text)
+
+
 def _pairs(rounds: int, *, size: int) -> list[Message]:
     """造历史：每轮「用户 → 助手调工具 → 工具结果 → 助手总结」。"""
     body = "x" * size
@@ -121,3 +126,15 @@ def test_history_under_budget_is_left_alone() -> None:
     history = _pairs(3, size=100)
     fitted = compact_history(history, keep_messages=4, target_chars=1_000_000)
     assert fitted == compact_history(history, keep_messages=4)
+
+
+def test_boundary_is_quantised_so_the_prefix_stays_stable() -> None:
+    """分界按 50 条取整：多来一条消息，压缩结果的前缀不会跟着改一格。"""
+    history = [_user(f"第 {i} 轮") for i in range(130)]
+    first = compact_history(history, keep_messages=50, text_chars=200)
+    second = compact_history(
+        [*history, _user("再来一条")], keep_messages=50, text_chars=200
+    )
+    # 130 条：分界 = (130-50)//50*50 = 50；131 条：同样 = 50 → 前 50 条一字不差
+    assert first[:50] == second[:50]
+    assert len(second) == len(history) + 1
