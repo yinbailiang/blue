@@ -1,6 +1,6 @@
 [project]
 name = "blue-service-session"
-version = "0.2.0"
+version = "0.3.0"
 description = "blue session persistence service (aiosqlite + WAL)"
 requires-python = ">=3.14"
 dependencies = [

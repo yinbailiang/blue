@@ -134,6 +134,35 @@ contract {
 指针语义是「父节点记住当前选中哪个孩子」，因此切换分支不产生写放大，删除分支
 只需要修一个指针；几何运算统一在 `blue.tree`，session 服务与 agent 不各算一套。
 
+## 发件箱状态机（2026-11-05）
+
+待发送队列从「取走即销毁」升级成有状态队列，事件名下不变、语义收紧：
+
+| 事件 | 用途 |
+| --- | --- |
+| `session.outbox.enqueue` / `.list` / `.remove` | 入队、查看、单条取消 |
+| `session.outbox.update` / `.move` | 改正文附件、重排（top/up/down） |
+| `session.outbox.send_now` | 置顶并广播，agent 立刻拉起队列泵 |
+| `session.outbox.retry` / `.clear` | 失败项重排、清空（发送中的保留） |
+| `session.outbox.claim` / `.complete` / `.fail` | agent 专用：认领、完成、失败 |
+
+- `QueuedMessage` 增加 `state`（`pending`/`sending`/`failed`）、`attempts`、`error`
+- 认领是 `UPDATE ... RETURNING`（pending → sending），**不删行**；跑完才删，
+  失败留原因；超过 `outbox_claim_timeout` 仍停在 sending 的自动回收成 pending
+- 每次变更都会广播 `session.outbox`（带完整队列），前端据此刷新面板与侧栏角标
+- 失败重试上限由 agent 配置 `outbox_max_attempts`（默认 3）决定
+
+## 会话标题（2026-11-05）
+
+`SessionInfo` 增加 `title` / `preview` / `queued`，`SessionSnapshot` 增加 `title`；
+标题由 session 服务按首条用户消息生成（28 字），`session.rename` 可手改，
+传空标题表示恢复自动（按「当前链」首条用户消息重新推导）。
+
+## 帧级会话标识（2026-11-05）
+
+WebSocket 的 `status` / `stream` / `reply` / `queued_ack` / `cancelled` 帧顶层
+都带 `session_id`，前端才能把事件路由到对应会话（多会话并行的前提）。
+
 ## 迁移阶段
 
 - **Phase 1（本次）**

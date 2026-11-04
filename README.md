@@ -669,6 +669,40 @@ uv run pytest -q
   升级时必须同步该目录的 `README.md` 与许可证文件
 - 生成物（`.blue/`、`services/*/service_runtime_config.json`）已在 `.gitignore`
 
+## 多会话与发件箱
+
+前端不再是「一个活会话槽」：每个会话有自己的一份界面状态（消息、树、忙碌、
+草稿、队列、未读、渲染窗口），渲染统一读「当前会话」，WebSocket 帧按
+`session_id` 路由到各自的会话。
+
+- **多会话并行**：A 会话生成时切到 B 看历史、发消息、打断都不受影响；A 的流在
+  后台继续累积，切回去内容已经在。订阅集合 = 当前会话 + 所有忙碌会话
+- **会话标题在服务端**：首条用户消息自动生成（28 字），双击标题就地改名，
+  留空回车恢复自动；不再依赖浏览器 localStorage
+- **删除两步确认**：第一次点变成「确认」，3 秒后还原
+- **草稿跟着会话走**：切走时存下输入框，切回来放回原处
+- **长会话窗口化**：默认只渲染尾部 60 条，顶部「加载更早」按需追加
+
+### 发件箱（待发送队列）
+
+会话忙时发的消息不再被丢弃或卡在界面上，而是进一个**有状态**的队列：
+
+| 状态 | 含义 | 前端显示 |
+| --- | --- | --- |
+| `pending` | 排队中，等 agent 空闲 | 「待发送」 |
+| `sending` | 已被 agent 认领，正在跑 | 「发送中」（此时不可编辑、不可取消） |
+| `failed` | 跑失败了，原因留在 `error` 里 | 「失败 · 第 N 次」+ 重试按钮 |
+
+- **不丢消息**：认领是「改状态」而不是「删行」，跑完才删；`sending` 超过
+  `outbox_claim_timeout`（默认 300 秒）会自动回到 `pending`——agent 崩在任意
+  一步都能自愈
+- **自动重试**：失败按 `outbox_max_attempts`（默认 3 次，含首次）重排并退避，
+  用满就留在队列里等人工
+- **谁来跑**：本轮对话结束、agent 启动时扫一遍遗留队列、以及 `session.outbox`
+  广播（「立刻发送」和别的端排队）三条路都会拉起队列泵
+- **界面**：面板与输入框同宽、同圆角同边框，就在输入框正上方；头部「立即发送」
+  「全部取消」，行内点正文可改，悬停出现「立刻」「重试」「✕」；侧栏显示 `⬆ N` 角标
+
 ## 对话树
 
 会话不是一条线性消息表，而是一棵树：每条消息记 `parent`（挂在谁下面）与
@@ -759,7 +793,11 @@ WebUI 支持**粘贴 / 拖入 / 选择**图片（PNG、JPEG、GIF、WebP），�
 `session.branch.activate.reply` / `session.node.delete` /
 `session.node.delete.reply` / `session.update` / `session.update.reply` /
 `session.reset` / `session.reset.reply` / `session.state` /
-`session.state.reply` / `session.attachment.get` / `session.attachment.reply`。
+`session.state.reply` / `session.attachment.get` / `session.attachment.reply` /
+`session.rename` / `session.rename.reply` / `session.outbox`（广播）/
+`session.outbox.enqueue` / `.list` / `.remove` / `.update` / `.move` /
+`.send_now` / `.retry` / `.clear` / `.claim` / `.complete` / `.fail`（各自带
+`.reply`）。
 
 多目标/多实例靠载荷字段区分：`tool.call.tool`、`worker_id`、
 `session_id + request_id`。多部署隔离用 RabbitMQ vhost，不要编码进事件名。
