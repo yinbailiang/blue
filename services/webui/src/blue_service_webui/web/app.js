@@ -133,6 +133,9 @@
 
   /** 消息脚注：父节点下有多个分支时给切换条，否则只给操作按钮。 */
   function createFoot(message) {
+    // 工具响应是「助手某一步」的产物，不是独立消息：
+    // 既没有分支可言，也不该被单独重试/删除（要重试就重试那条提问）
+    if (message.role !== "user" && message.role !== "assistant") return null;
     const node = nodeFor(message);
     if (!node) return null;
     const foot = document.createElement("div");
@@ -1476,7 +1479,10 @@
     const regenerate = options.regenerate === true;
     const parent = options.parent ?? null;
     const text = String(rawText || "").trim();
-    const attachments = regenerate ? [] : cur().pendingAttachments.slice();
+    // 编辑可以带上它自己的附件；不传就用输入框里攒的
+    const attachments = regenerate
+      ? []
+      : (options.attachments ?? cur().pendingAttachments).slice();
     if (!regenerate && !text && !attachments.length) return;
     if (regenerate && !state.sessionId) return;
     const sessionId = state.sessionId || uuid();
@@ -1525,8 +1531,10 @@
         tool_calls: [],
       });
     }
-    cur().pendingAttachments = [];
-    renderPendingAttachments();
+    if (!options.attachments) {
+      cur().pendingAttachments = [];
+      renderPendingAttachments();
+    }
     showWelcome(false);
     renderMessages({ scroll: true, force: true });
     renderSessions();
@@ -1623,7 +1631,49 @@
   }
 
   /** 内联编辑用户消息：保存时在同一个父节点下开新分支，再生成新回复。 */
-  function beginEdit(host, node) {
+  /** textarea 跟着内容长高（上限 55vh，再超出就内部滚动）。 */
+  function autoGrowTextarea(area) {
+    const max = Math.round(window.innerHeight * 0.55);
+    area.style.height = "auto";
+    area.style.height = `${Math.min(area.scrollHeight, max)}px`;
+    area.style.overflowY = area.scrollHeight > max ? "auto" : "hidden";
+  }
+
+  /**
+   * 把消息里的图片转回「可再次提交」的附件。
+   * 历史消息里的图是 `/api/attachments/<hash>`，编辑后开新分支要重新上传，
+   * 所以这里读回 base64。
+   */
+  async function attachmentFromUrl(url, name) {
+    if (!url) return null;
+    try {
+      let mime = "image/png";
+      let data = "";
+      if (url.startsWith("data:")) {
+        const [head, payload] = url.split(",");
+        mime = head.slice(5).split(";")[0] || mime;
+        data = payload || "";
+      } else {
+        const response = await fetch(url);
+        if (!response.ok) return null;
+        const blob = await response.blob();
+        mime = blob.type || mime;
+        const dataUrl = await new Promise((resolve, reject) => {
+          const reader = new FileReader();
+          reader.onload = () => resolve(String(reader.result || ""));
+          reader.onerror = () => reject(new Error("读取附件失败"));
+          reader.readAsDataURL(blob);
+        });
+        data = dataUrl.split(",")[1] || "";
+      }
+      if (!data) return null;
+      return { mime, data, name: name || null };
+    } catch {
+      return null;
+    }
+  }
+
+  async function beginEdit(host, node) {
     if (cur().busy) {
       toast("请等待当前回复完成", "info");
       return;
@@ -1632,13 +1682,76 @@
     const message = cur().messages.find((item) => item.id === node.id);
     const bubble = host.querySelector(".bubble");
     if (!message || !bubble) return;
+
     const editor = document.createElement("div");
     editor.className = "editor";
+    editor.__attachments = [];
+
     const area = document.createElement("textarea");
     area.value = String(message.content || "");
-    area.rows = Math.min(12, Math.max(3, area.value.split("\n").length + 1));
+    area.rows = 1;
+    area.placeholder = "编辑这条消息…";
+    area.addEventListener("input", () => autoGrowTextarea(area));
+
+    const attachmentsRow = document.createElement("div");
+    attachmentsRow.className = "editor-attachments";
+    const fileInput = document.createElement("input");
+    fileInput.type = "file";
+    fileInput.accept = ATTACHMENT_TYPES.join(",");
+    fileInput.multiple = true;
+    fileInput.hidden = true;
+    const addButton = document.createElement("button");
+    addButton.type = "button";
+    addButton.className = "editor-add";
+    addButton.textContent = "＋ 图片";
+    addButton.title = `最多 ${MAX_ATTACHMENTS} 张`;
+
+    const renderAttachments = () => {
+      attachmentsRow.textContent = "";
+      editor.__attachments.forEach((attachment, index) => {
+        const chip = document.createElement("div");
+        chip.className = "attachment-chip";
+        const image = document.createElement("img");
+        image.src = `data:${attachment.mime};base64,${attachment.data}`;
+        image.alt = attachment.name || "附件图片";
+        const remove = document.createElement("button");
+        remove.type = "button";
+        remove.className = "attachment-remove";
+        remove.textContent = "×";
+        remove.setAttribute("aria-label", "移除图片");
+        remove.addEventListener("click", () => {
+          editor.__attachments.splice(index, 1);
+          renderAttachments();
+        });
+        chip.append(image, remove);
+        attachmentsRow.appendChild(chip);
+      });
+      attachmentsRow.appendChild(addButton);
+    };
+
+    addButton.addEventListener("click", () => fileInput.click());
+    fileInput.addEventListener("change", async () => {
+      const files = Array.from(fileInput.files || []);
+      for (const file of files) {
+        if (editor.__attachments.length >= MAX_ATTACHMENTS) {
+          toast(`最多 ${MAX_ATTACHMENTS} 张图片`, "info");
+          break;
+        }
+        try {
+          editor.__attachments.push(await prepareAttachment(file));
+        } catch (error) {
+          toast(String(error.message || error), "error");
+        }
+      }
+      fileInput.value = "";
+      renderAttachments();
+    });
+
     const actions = document.createElement("div");
     actions.className = "editor-actions";
+    const hint = document.createElement("span");
+    hint.className = "editor-hint";
+    hint.textContent = "Ctrl/⌘+Enter 保存 · Esc 取消";
     const save = document.createElement("button");
     save.type = "button";
     save.dataset.act = "save-edit";
@@ -1647,10 +1760,14 @@
     cancel.type = "button";
     cancel.dataset.act = "cancel-edit";
     cancel.textContent = "取消";
-    actions.append(save, cancel);
-    editor.append(area, actions);
+    actions.append(hint, save, cancel);
+
+    editor.append(area, attachmentsRow, fileInput, actions);
+    host.classList.add("editing");
     bubble.hidden = true;
     bubble.after(editor);
+    renderAttachments();
+    autoGrowTextarea(area);
     area.focus();
     area.setSelectionRange(area.value.length, area.value.length);
     area.addEventListener("keydown", (event) => {
@@ -1662,12 +1779,30 @@
         cancel.click();
       }
     });
+
+    // 原消息带的图片搬进编辑器（读回 base64，新分支才能重新上传）
+    const images = (message.parts || []).filter(
+      (part) => part.type === "image" && part.url,
+    );
+    if (images.length) {
+      const restored = await Promise.all(
+        images.map((part) => attachmentFromUrl(part.url, "原附件")),
+      );
+      for (const attachment of restored) {
+        if (!attachment) continue;
+        if (editor.__attachments.length >= MAX_ATTACHMENTS) break;
+        editor.__attachments.push(attachment);
+      }
+      renderAttachments();
+      autoGrowTextarea(area);
+    }
   }
 
   function endEdit(host) {
     const editor = host?.querySelector(".editor");
     if (!editor) return;
     editor.remove();
+    host.classList.remove("editing");
     const bubble = host.querySelector(".bubble");
     if (bubble) bubble.hidden = false;
   }
@@ -2537,20 +2672,20 @@
         const act = action.dataset.act;
         if (act === "branch-prev") await switchBranch(node, -1);
         else if (act === "branch-next") await switchBranch(node, 1);
-        else if (act === "edit") beginEdit(host, node);
+        else if (act === "edit") void beginEdit(host, node);
         else if (act === "retry") retryNode(node);
         else if (act === "delete") await deleteBranch(node);
         else if (act === "cancel-edit") endEdit(host);
         else if (act === "save-edit") {
-          const text = String(
-            host.querySelector(".editor textarea")?.value || "",
-          ).trim();
-          if (!text) {
+          const editor = host.querySelector(".editor");
+          const text = String(editor?.querySelector("textarea")?.value || "").trim();
+          const attachments = (editor?.__attachments || []).slice();
+          if (!text && !attachments.length) {
             toast("消息不能为空", "info");
             return;
           }
           endEdit(host);
-          await sendPrompt(text, { parent: node.parent });
+          await sendPrompt(text, { parent: node.parent, attachments });
         }
         return;
       }

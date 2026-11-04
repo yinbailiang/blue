@@ -1211,20 +1211,64 @@ input.rename::placeholder {
 }
 
 /* 内联编辑：编辑用户消息时替换气泡内容 */
+/* 编辑态：和普通气泡同宽（撑满 message-main），输入框跟着内容长高 */
+.message.editing .message-main {
+  width: 100%;
+  align-items: stretch;
+}
+
 .editor {
   display: flex;
   flex-direction: column;
   gap: 8px;
-  min-width: min(560px, 100%);
+  width: 100%;
+  min-width: 0;
   padding: 10px;
   border: 1px solid var(--border-strong);
   border-radius: var(--radius-sm);
   background: var(--panel-solid);
 }
 
+.editor-attachments {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+
+.editor-add {
+  padding: 4px 10px;
+  border: 1px dashed var(--border-strong);
+  border-radius: 999px;
+  background: transparent;
+  color: var(--muted);
+  font-family: inherit;
+  font-size: 11.5px;
+  cursor: pointer;
+}
+
+.editor-add:hover {
+  border-style: solid;
+  background: var(--accent-soft);
+  color: var(--accent-strong);
+}
+
+.editor .attachment-chip {
+  position: relative;
+  margin: 0;
+}
+
+.editor-hint {
+  margin-right: auto;
+  color: var(--muted);
+  font-size: 11px;
+}
+
 .editor textarea {
   width: 100%;
-  resize: vertical;
+  min-height: 2.4em;
+  resize: none;
+  overflow-y: hidden;
   padding: 8px 10px;
   border: 1px solid var(--border);
   border-radius: var(--radius-sm);
