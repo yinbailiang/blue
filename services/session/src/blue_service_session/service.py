@@ -1045,6 +1045,7 @@ def _snapshot(record: SessionRecord) -> SessionSnapshot:
                 current=node.current,
                 message=node.message,
                 created_at=node.created_at,
+                label=node.label,
             )
             for node in record.nodes
         ],
