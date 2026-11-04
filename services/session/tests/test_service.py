@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from pathlib import Path
+from typing import Any, cast
 
 from blue_contracts_session import (
     SessionAppendEvent,
@@ -201,3 +202,48 @@ async def _reap_when_disabled(tmp_path: Path) -> None:
         ]
     finally:
         await service.stop()
+
+
+def test_rpc_handler_registers_every_processor(tmp_path: Path) -> None:
+    """会话服务负责的事件必须全部登记，且都进了订阅列表。
+
+    以前订阅列表是手写的，漏一个事件的表现是「请求一直等到超时」——只能靠往返
+    测试发现。改成 ``ServiceHandler`` 后订阅由 ``@process`` 自动生成，这条测试
+    锁住两件事：**哪些请求归会话服务管**（显式清单，改契约时要同步想清楚），以及
+    「登记了却没订阅」这种错不可能再出现。
+    """
+    from blue_service_session.service import SessionRpcHandler
+
+    # 会话契约里也住着 agent 侧的事件（session.prompt / cancel / activity.*），
+    # 它们不归本服务处理，所以这里用显式清单而不是从 EVENTS 反推。
+    owned = {
+        "session.get",
+        "session.append",
+        "session.update",
+        "session.state",
+        "session.reset",
+        "session.rename",
+        "session.branch.activate",
+        "session.node.delete",
+        "session.node.label",
+        "session.search",
+        "session.read",
+        "session.attachment.get",
+        "session.outbox.enqueue",
+        "session.outbox.list",
+        "session.outbox.remove",
+        "session.outbox.update",
+        "session.outbox.move",
+        "session.outbox.send_now",
+        "session.outbox.retry",
+        "session.outbox.clear",
+        "session.outbox.claim",
+        "session.outbox.complete",
+        "session.outbox.fail",
+    }
+    handler = SessionRpcHandler(backend=cast("Any", None))
+    registered = set(handler.processors)
+    assert registered == owned
+    assert registered.issubset(set(handler.subscriptions))
+    # 每个 processor 都要有应答事件（没有的只能是不回应的单向事件，这里不需要）
+    assert all(meta.response is not None for meta in handler.processors.values())
