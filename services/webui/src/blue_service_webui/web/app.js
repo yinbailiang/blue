@@ -60,6 +60,7 @@
     socket: null,
     socketPromise: null,
     stickToBottom: true,
+    sessionNodes: new Map(),
     suppressScrollSync: false,
     listMetrics: null,
     streamRenderTimer: null,
@@ -697,12 +698,38 @@
    * 侧栏一项：标题（服务端，双击可改）、摘要、消息数/时间、运行状态、
    * 排队角标、未读点。样式与 b64/chat 的会话列表保持一致。
    */
-  function sessionItem(session, active) {
-    const id = session.session_id;
+  /** 侧栏一项的 DOM（只建一次，之后靠 updateSessionItem 就地改）。 */
+  function createSessionItem(session, active) {
+    const id = String(session.session_id);
+    const node = document.createElement("div");
+    node.className = "session-item";
+    node.dataset.session = id;
+    node.setAttribute("role", "button");
+    node.tabIndex = 0;
+    node.innerHTML = `
+      <span class="session-avatar"></span>
+      <span class="session-copy">
+        <span class="session-name" title="双击重命名"></span>
+        <span class="session-meta"></span>
+      </span>
+      <button class="session-delete" type="button" aria-label="删除会话">
+        <svg><use href="#i-trash"></use></svg>
+      </button>`;
+    updateSessionItem(node, session, active);
+    return node;
+  }
+
+  /** 就地更新一项：只改文本/类名/属性，绝不重建节点（否则点击会被吞掉）。 */
+  function updateSessionItem(node, session, active) {
+    const id = String(session.session_id);
     const count = Number(session.message_count || 0);
     const running = sessionRunning(session);
     const queued = Number(session.queued || 0);
     const unread = state.store.get(id)?.unread || 0;
+    const preview = String(session.preview || "").trim();
+    const subline = preview
+      ? escapeHtml(preview)
+      : `${count} 条消息 · ${relativeTime(session.updated_at)}`;
     const meta = running
       ? `<span class="session-running"><span class="session-running-dot"></span>${escapeHtml(
           activityLabel(state.activities[id] || session),
@@ -711,26 +738,37 @@
     const queueBadge = queued
       ? `<span class="session-queue" title="${queued} 条待发送">⬆ ${queued}</span>`
       : "";
-    const preview = String(session.preview || "").trim();
-    const subline = preview
-      ? escapeHtml(preview)
-      : `${count} 条消息 · ${relativeTime(session.updated_at)}`;
-    return `<div class="session-item ${active ? "active" : ""} ${
-      running ? "is-running" : ""
-    } ${unread ? "is-unread" : ""}" data-session="${escapeHtml(
-      id,
-    )}" role="button" tabindex="0" aria-current="${active ? "page" : "false"}">
-      <span class="session-avatar">${escapeHtml(initialsFor(id))}</span>
-      <span class="session-copy">
-        <span class="session-name" title="双击重命名">${escapeHtml(titleFor(id))}</span>
-        <span class="session-meta">${subline}${meta}${queueBadge}${
-          unread ? `<span class="session-unread-dot" title="有新内容"></span>` : ""
-        }</span>
-      </span>
-      <button class="session-delete" type="button" data-delete="${escapeHtml(
-        id,
-      )}" aria-label="删除会话"><svg><use href="#i-trash"></use></svg></button>
-    </div>`;
+    const unreadDot = unread
+      ? '<span class="session-unread-dot" title="有新内容"></span>'
+      : "";
+
+    node.classList.toggle("active", active);
+    node.classList.toggle("is-running", running);
+    node.classList.toggle("is-unread", unread > 0);
+    node.setAttribute("aria-current", active ? "page" : "false");
+    node.querySelector(".session-avatar").textContent = initialsFor(id);
+    // 正在改名时不要覆盖输入框
+    if (!node.querySelector("input.rename")) {
+      node.querySelector(".session-name").textContent = titleFor(id);
+    }
+    node.querySelector(".session-meta").innerHTML = subline + meta + queueBadge + unreadDot;
+    node.querySelector(".session-delete").dataset.delete = id;
+  }
+
+  /** 按顺序摆放元素：只有在位的才动，避免无谓 DOM 操作。 */
+  function placeSessionNodes(desired) {
+    const list = els.sessionList;
+    let cursor = list.firstElementChild;
+    while (cursor && cursor.classList.contains("side-empty")) {
+      cursor = cursor.nextElementSibling;
+    }
+    for (const node of desired) {
+      if (node === cursor) {
+        cursor = cursor.nextElementSibling;
+        continue;
+      }
+      list.insertBefore(node, cursor || null);
+    }
   }
 
   function renderSessions() {
@@ -739,26 +777,50 @@
       .sort((a, b) => (b.updated_at || 0) - (a.updated_at || 0));
     const hasActive =
       state.sessionId && items.some((item) => item.session_id === state.sessionId);
-    let html = "";
+    const wanted = [];
     if (state.sessionId && !hasActive) {
       // 刚发出第一条消息、列表还没刷到时先占个位
-      html += sessionItem(
-        {
-          session_id: state.sessionId,
-          message_count: cur().messages.length,
-          updated_at: Date.now() / 1000,
-          title: cur().title,
-        },
-        true,
-      );
+      wanted.push({
+        session_id: state.sessionId,
+        message_count: cur().messages.length,
+        updated_at: Date.now() / 1000,
+        title: cur().title,
+      });
     }
-    html += items
-      .map((item) => sessionItem(item, item.session_id === state.sessionId))
-      .join("");
-    if (!html) {
-      html = '<div class="side-empty">还没有会话。发出第一条消息，Agent 会为你创建会话。</div>';
+    wanted.push(...items);
+
+    const keep = new Set();
+    const desired = [];
+    for (const item of wanted) {
+      const id = String(item.session_id);
+      keep.add(id);
+      let node = state.sessionNodes.get(id);
+      if (!node) {
+        node = createSessionItem(item, id === state.sessionId);
+        state.sessionNodes.set(id, node);
+      } else {
+        updateSessionItem(node, item, id === state.sessionId);
+      }
+      desired.push(node);
     }
-    els.sessionList.innerHTML = html;
+    for (const [id, node] of [...state.sessionNodes]) {
+      if (keep.has(id)) continue;
+      node.remove();
+      state.sessionNodes.delete(id);
+    }
+
+    let empty = els.sessionList.querySelector(".side-empty");
+    if (!desired.length) {
+      if (!empty) {
+        empty = document.createElement("div");
+        empty.className = "side-empty";
+        empty.textContent = "还没有会话。发出第一条消息，Agent 会为你创建会话。";
+        els.sessionList.appendChild(empty);
+      }
+    } else if (empty) {
+      empty.remove();
+    }
+    placeSessionNodes(desired);
   }
 
   function renderTools() {
