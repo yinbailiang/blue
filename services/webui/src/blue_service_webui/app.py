@@ -450,7 +450,9 @@ def create_app(*, backend: WebBackend, config: WebUIConfig) -> FastAPI:
             pending.extend(prompt_tasks)
             for task in pending:
                 task.cancel()
-            await asyncio.gather(*pending, return_exceptions=True)
+            # 关闭时端点自己也可能被取消：这属于正常收尾，不该冒泡成异常
+            with contextlib.suppress(asyncio.CancelledError):
+                await asyncio.gather(*pending, return_exceptions=True)
 
     async def _view(target: WebBackend, session_id: str) -> SessionView:
         """取会话快照视图；不存在时 404。"""
@@ -628,4 +630,5 @@ async def _stream_prompt(
             for task in (stream_task, prompt_task):
                 if not task.done():
                     task.cancel()
-            await asyncio.gather(stream_task, prompt_task, return_exceptions=True)
+            with contextlib.suppress(asyncio.CancelledError):
+                await asyncio.gather(stream_task, prompt_task, return_exceptions=True)
