@@ -513,6 +513,93 @@ kbd {
   height: 13px;
 }
 
+/* 双击就地改名（与 b64/chat 一致：留空回车恢复自动标题） */
+.session-name:hover {
+  color: var(--text);
+}
+
+input.rename {
+  width: 100%;
+  min-width: 0;
+  padding: 1px 6px;
+  border: 1px solid var(--border-strong);
+  border-radius: 7px;
+  background: var(--bg-soft);
+  color: var(--text);
+  font-family: inherit;
+  font-size: 12.5px;
+  font-weight: 600;
+}
+
+input.rename:focus {
+  outline: 2px solid var(--accent-soft);
+  outline-offset: 1px;
+}
+
+input.rename::placeholder {
+  color: var(--muted);
+  font-weight: 500;
+}
+
+/* 删除两步确认：第一次点击后变成红色「确认」 */
+.session-delete.arm {
+  opacity: 1;
+  width: auto;
+  padding: 0 7px;
+  background: var(--danger-soft);
+  color: var(--danger);
+  font-family: inherit;
+  font-size: 10.5px;
+  font-weight: 700;
+}
+
+/* 排队角标与未读点 */
+.session-queue {
+  display: inline-flex;
+  align-items: center;
+  margin-left: 6px;
+  padding: 1px 6px;
+  border-radius: 999px;
+  background: var(--accent-soft);
+  color: var(--accent-strong);
+  font-size: 10px;
+  font-weight: 700;
+  vertical-align: middle;
+}
+
+.session-unread-dot {
+  display: inline-block;
+  width: 6px;
+  height: 6px;
+  margin-left: 6px;
+  border-radius: 50%;
+  background: var(--accent);
+  vertical-align: middle;
+}
+
+.session-item.is-unread .session-name {
+  color: var(--text);
+}
+
+/* 长会话：顶部「加载更早」 */
+.load-earlier {
+  align-self: center;
+  margin: 4px auto 12px;
+  padding: 6px 14px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--panel-solid);
+  color: var(--text-dim);
+  font-family: inherit;
+  font-size: 11.5px;
+  cursor: pointer;
+}
+
+.load-earlier:hover {
+  border-color: var(--border-strong);
+  color: var(--text);
+}
+
 .side-empty {
   margin: 7px 8px;
   padding: 13px 12px;

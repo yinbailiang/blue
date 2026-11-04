@@ -36,39 +36,95 @@
     toastRegion: document.getElementById("toast-region"),
   };
 
+  /*
+   * 状态分两层：
+   * - state 只放「全局」的东西：会话列表、socket、工具目录、主题…
+   * - 每个会话一份 SessionState（消息、树、忙碌、草稿、队列、未读），存在
+   *   state.store 里；没选中会话时用 state.draft 兜底（「新对话」草稿槽）。
+   * 渲染统一读 cur()，所以切会话只是换一个 SessionState，不会互相覆盖。
+   */
   const state = {
     sessionId: null,
     sessions: [],
+    store: new Map(),
+    draft: createSessionState(null),
     tools: [],
-    messages: [],
-    nodes: [],
-    current: [],
-    titles: readJson("blue.titles", {}),
-    busy: false,
+    activities: {},
     socket: null,
     socketPromise: null,
     stickToBottom: true,
-    liveMessage: null,
     streamRenderTimer: null,
-    pendingAttachments: [],
-    activities: {},
-    outbox: [],
-    watching: null,
-    cancelled: false,
   };
 
+  /** 一个会话的全部界面状态。 */
+  function createSessionState(id) {
+    return {
+      id,
+      title: "",
+      loaded: false,
+      messages: [],
+      nodes: [],
+      chain: [],
+      busy: false,
+      liveMessage: null,
+      cancelled: false,
+      outbox: [],
+      pendingAttachments: [],
+      unread: 0,
+      sentAny: false,
+      windowStart: 0,
+    };
+  }
+
+  /** 取（必要时创建）某个会话的界面状态。 */
+  function store(id) {
+    let session = state.store.get(id);
+    if (!session) {
+      session = createSessionState(id);
+      state.store.set(id, session);
+    }
+    return session;
+  }
+
+  /** 当前正在看的会话状态；没有选中会话时是「新对话」草稿槽。 */
+  function cur() {
+    return state.sessionId ? store(state.sessionId) : state.draft;
+  }
+
+  /** 标题最大长度（与 session 服务保持一致：28 字）。 */
+  const TITLE_HINT = 28;
+
+  /** 首条消息先本地占位标题/摘要，服务端快照到了会被覆盖。 */
+  function sessionPreview(sessionId, text) {
+    const flat = String(text || "").replace(/\s+/g, " ").trim();
+    if (!flat) return;
+    const meta = metaOf(sessionId);
+    if (meta) {
+      if (!meta.title) meta.title = flat.slice(0, TITLE_HINT);
+      meta.preview = flat.slice(0, 120);
+    }
+    const session = store(sessionId);
+    if (!session.title) session.title = flat.slice(0, TITLE_HINT);
+    if (sessionId === state.sessionId) els.chatTitle.textContent = titleFor(sessionId);
+  }
+
+  /** 侧栏里某条会话的元信息（标题、摘要、排队数…）。 */
+  function metaOf(id) {
+    return state.sessions.find((item) => item.session_id === id) || null;
+  }
+
   /*
-   * 对话树：state.nodes 是整棵树（含未选中的分支），state.messages 是当前链。
+   * 对话树：cur().nodes 是整棵树（含未选中的分支），cur().messages 是当前链。
    * 每条消息气泡底部的「分支切换条 + 编辑/重试/删除」都由节点 id 驱动。
    */
   function nodeFor(message) {
     if (!message || !message.id) return null;
-    return state.nodes.find((node) => node.id === message.id) || null;
+    return cur().nodes.find((node) => node.id === message.id) || null;
   }
 
   function siblingsOf(node) {
     if (!node) return [];
-    return state.nodes.filter((item) => item.parent === node.parent).map((item) => item.id);
+    return cur().nodes.filter((item) => item.parent === node.parent).map((item) => item.id);
   }
 
   /** 消息脚注：父节点下有多个分支时给切换条，否则只给操作按钮。 */
@@ -112,7 +168,7 @@
   const ATTACHMENT_TYPES = ["image/png", "image/jpeg", "image/gif", "image/webp"];
 
   /*
-   * 增量渲染缓存：state.messages 的每一项对应一个已挂载节点。
+   * 增量渲染缓存：cur().messages 的每一项对应一个已挂载节点。
    * 流式增量只 patch 变化的节点，避免整表 innerHTML 重建导致
    * 滚动抖动、折叠状态丢失与复制按钮复位。
    */
@@ -121,12 +177,14 @@
     nodes: [],
     signatures: [],
     parts: new WeakMap(),
+    start: -1,
   };
 
   function resetView() {
     view.messages = [];
     view.nodes = [];
     view.signatures = [];
+    view.start = -1;
     els.messageList.replaceChildren();
   }
 
@@ -165,16 +223,16 @@
     return String(id || "").replace(/^s-/, "").slice(0, 8) || "new";
   }
 
+  /*
+   * 会话标题由 session 服务维护（自动取首条用户消息，也可手改），
+   * 浏览器只负责显示：换设备、清缓存都不会丢。
+   */
   function titleFor(id) {
-    return state.titles[id] || `会话 ${shortId(id)}`;
-  }
-
-  function rememberTitle(id, content) {
-    const title = String(content || "").replace(/\s+/g, " ").trim().slice(0, 34);
-    if (!id || !title) return;
-    state.titles[id] = title;
-    saveJson("blue.titles", state.titles);
-    if (id === state.sessionId) els.chatTitle.textContent = title;
+    const meta = metaOf(id);
+    if (meta?.title) return meta.title;
+    const cached = state.store.get(id);
+    if (cached?.title) return cached.title;
+    return `会话 ${shortId(id)}`;
   }
 
   function initialsFor(id) {
@@ -258,40 +316,66 @@
    * 「接续」：另一个页面/设备（或刷新后的本页）订阅某个会话的实时流。
    * 不发起新一轮 prompt，只把正在生成的内容接上来。
    */
-  async function startWatching(sessionId) {
-    if (!sessionId || state.watching === sessionId) return;
-    try {
-      await ensureSocket();
-    } catch {
-      return;
-    }
-    state.watching = sessionId;
+  /*
+   * 多会话并行：同时订阅「当前会话 + 所有正在跑的会话」的实时流。
+   * 后端一个连接本来就支持多个 watch，这里只是把前端该订的都订上。
+   */
+  const watchers = new Set();
+
+  function ensureWatch(sessionId) {
+    if (!sessionId || watchers.has(sessionId)) return;
+    watchers.add(sessionId);
     sendFrame({ type: "watch", session_id: sessionId });
-    const activity = state.activities[sessionId];
-    setBusy(true, `Agent ${activityLabel(activity)}…（已接续）`);
   }
 
-  function stopWatching() {
-    const sessionId = state.watching;
-    state.watching = null;
-    if (sessionId) sendFrame({ type: "unwatch", session_id: sessionId });
+  function dropWatch(sessionId) {
+    if (!watchers.delete(sessionId)) return;
+    sendFrame({ type: "unwatch", session_id: sessionId });
+  }
+
+  /** 校准订阅集合：当前会话 + 所有忙碌会话。 */
+  function syncWatch() {
+    const wanted = new Set();
+    if (state.sessionId) wanted.add(state.sessionId);
+    for (const [id, session] of state.store) {
+      if (session.busy) wanted.add(id);
+    }
+    for (const id of [...watchers]) {
+      if (!wanted.has(id)) dropWatch(id);
+    }
+    for (const id of wanted) ensureWatch(id);
+  }
+
+  /** 只刷新「当前会话」相关的忙碌 UI：按钮、输入态、提示条。 */
+  function applyBusyChrome(busy, label) {
+    const stuck = busy && cur().id !== null;
+    els.typing.hidden = !stuck;
+    els.typingLabel.textContent = label;
+    els.send.classList.toggle("loading", busy && Boolean(state.sessionId));
+    els.sendIcon.setAttribute("href", busy && state.sessionId ? "#i-target" : "#i-send");
+    els.sendLabel.textContent = busy && state.sessionId ? "停止" : "发送";
+    els.send.setAttribute(
+      "aria-label",
+      busy && state.sessionId ? "停止生成" : "发送消息",
+    );
+    updateSendState();
+  }
+
+  /** 设置某个会话的忙碌状态；只有它是当前会话时才动界面。 */
+  function setSessionBusy(session, busy, label = "Agent 正在思考…") {
+    session.busy = busy;
+    if (session === cur()) applyBusyChrome(busy, label);
+    syncWatch();
   }
 
   function setBusy(busy, label = "Agent 正在思考…") {
-    state.busy = busy;
-    els.typing.hidden = !busy;
-    els.typingLabel.textContent = label;
-    els.send.classList.toggle("loading", busy);
-    els.sendIcon.setAttribute("href", busy ? "#i-target" : "#i-send");
-    els.sendLabel.textContent = busy ? "停止" : "发送";
-    els.send.setAttribute("aria-label", busy ? "停止生成" : "发送消息");
-    updateSendState();
+    setSessionBusy(cur(), busy, label);
   }
 
   function updateSendState() {
     // 生成中按钮用于中断，此时即使输入框为空也应可点
-    const hasContent = Boolean(els.prompt.value.trim()) || state.pendingAttachments.length > 0;
-    els.send.disabled = state.busy ? false : !hasContent;
+    const hasContent = Boolean(els.prompt.value.trim()) || cur().pendingAttachments.length > 0;
+    els.send.disabled = cur().busy ? false : !hasContent;
   }
 
   function setSocketOnline(online, label) {
@@ -539,24 +623,39 @@
   /* ------------------------------------------------------------------ */
   /* Rendering                                                          */
   /* ------------------------------------------------------------------ */
+  /*
+   * 侧栏一项：标题（服务端，双击可改）、摘要、消息数/时间、运行状态、
+   * 排队角标、未读点。样式与 b64/chat 的会话列表保持一致。
+   */
   function sessionItem(session, active) {
     const id = session.session_id;
     const count = Number(session.message_count || 0);
     const running = sessionRunning(session);
-    const badge = running
+    const queued = Number(session.queued || 0);
+    const unread = state.store.get(id)?.unread || 0;
+    const meta = running
       ? `<span class="session-running"><span class="session-running-dot"></span>${escapeHtml(
           activityLabel(state.activities[id] || session),
         )}</span>`
       : "";
+    const queueBadge = queued
+      ? `<span class="session-queue" title="${queued} 条待发送">⬆ ${queued}</span>`
+      : "";
+    const preview = String(session.preview || "").trim();
+    const subline = preview
+      ? escapeHtml(preview)
+      : `${count} 条消息 · ${relativeTime(session.updated_at)}`;
     return `<div class="session-item ${active ? "active" : ""} ${
       running ? "is-running" : ""
-    }" data-session="${escapeHtml(
+    } ${unread ? "is-unread" : ""}" data-session="${escapeHtml(
       id,
     )}" role="button" tabindex="0" aria-current="${active ? "page" : "false"}">
       <span class="session-avatar">${escapeHtml(initialsFor(id))}</span>
       <span class="session-copy">
-        <span class="session-name">${escapeHtml(titleFor(id))}</span>
-        <span class="session-meta">${count} 条消息 · ${relativeTime(session.updated_at)}${badge}</span>
+        <span class="session-name" title="双击重命名">${escapeHtml(titleFor(id))}</span>
+        <span class="session-meta">${subline}${meta}${queueBadge}${
+          unread ? `<span class="session-unread-dot" title="有新内容"></span>` : ""
+        }</span>
       </span>
       <button class="session-delete" type="button" data-delete="${escapeHtml(
         id,
@@ -565,16 +664,27 @@
   }
 
   function renderSessions() {
-    const items = state.sessions.slice().sort((a, b) => (b.updated_at || 0) - (a.updated_at || 0));
-    const hasActive = state.sessionId && items.some((item) => item.session_id === state.sessionId);
+    const items = state.sessions
+      .slice()
+      .sort((a, b) => (b.updated_at || 0) - (a.updated_at || 0));
+    const hasActive =
+      state.sessionId && items.some((item) => item.session_id === state.sessionId);
     let html = "";
     if (state.sessionId && !hasActive) {
+      // 刚发出第一条消息、列表还没刷到时先占个位
       html += sessionItem(
-        { session_id: state.sessionId, message_count: state.messages.length, updated_at: Date.now() / 1000 },
+        {
+          session_id: state.sessionId,
+          message_count: cur().messages.length,
+          updated_at: Date.now() / 1000,
+          title: cur().title,
+        },
         true,
       );
     }
-    html += items.map((item) => sessionItem(item, item.session_id === state.sessionId)).join("");
+    html += items
+      .map((item) => sessionItem(item, item.session_id === state.sessionId))
+      .join("");
     if (!html) {
       html = '<div class="side-empty">还没有会话。发出第一条消息，Agent 会为你创建会话。</div>';
     }
@@ -913,14 +1023,33 @@
     view.signatures.push(messageSignature(message));
   }
 
+  /** 一次渲染的尾部条数；更早的消息由「加载更早」按需追加。 */
+  const WINDOW_SIZE = 60;
+
+  /** 当前会话要渲染的那一段（长会话只渲染尾部，切会话/加载更早时重算）。 */
+  function visibleSlice() {
+    const all = cur().messages.filter((message) => message.role !== "system");
+    const extra = Math.max(0, cur().windowStart || 0);
+    const start = Math.max(0, all.length - WINDOW_SIZE - extra);
+    return { messages: all.slice(start), start, hidden: start };
+  }
+
   function syncMessages(options = {}) {
-    const messages = state.messages.filter((message) => message.role !== "system");
+    const slice = visibleSlice();
+    const messages = slice.messages;
     if (!messages.length) {
       showWelcome(true);
       return;
     }
     showWelcome(false);
     els.messageList.hidden = false;
+
+    // 窗口起点变了（切会话/加载更早）：整段重建，索引不能复用
+    if (view.start !== slice.start) {
+      resetView();
+      view.start = slice.start;
+    }
+    renderEarlierButton(slice.hidden);
 
     let common = 0;
     while (
@@ -947,55 +1076,80 @@
       }
     }
 
-    const live = state.messages.find((message) => message.live);
+    const live = cur().messages.find((message) => message.live);
     if (live && (live.content || live.reasoning_content || live.tool_calls?.length)) {
       els.typing.hidden = true;
     }
     if (options.scroll) scrollToBottom(options.force === true);
   }
 
+  /** 顶部「加载更早」按钮：长会话不必一次塞进 DOM。 */
+  function renderEarlierButton(hidden) {
+    let button = els.messageList.querySelector(".load-earlier");
+    if (hidden <= 0) {
+      if (button) button.remove();
+      return;
+    }
+    if (!button) {
+      button = document.createElement("button");
+      button.type = "button";
+      button.className = "load-earlier";
+      button.addEventListener("click", () => {
+        cur().windowStart = (cur().windowStart || 0) + WINDOW_SIZE;
+        resetView();
+        renderMessages({ scroll: false });
+      });
+      els.messageList.prepend(button);
+    }
+    button.textContent = `加载更早的 ${Math.min(hidden, WINDOW_SIZE)} 条（还有 ${hidden} 条）`;
+  }
+
   function renderMessages(options = {}) {
     syncMessages(options);
   }
 
-  function updateTitleFromMessages() {
-    const user = state.messages.find(
-      (message) => message.role === "user" && String(message.content || "").trim(),
-    );
-    if (user) rememberTitle(state.sessionId, user.content);
-  }
-
+  /*
+   * 快照落到「它自己那个会话」的 store 里。后台会话的快照只更新缓存，
+   * 不抢当前视图——这正是多会话并行不串台的关键。
+   */
   function applySnapshot(snapshot, options = {}) {
     if (!snapshot) return;
-    state.sessionId = snapshot.session_id;
-    state.messages = Array.isArray(snapshot.messages) ? snapshot.messages : [];
-    state.nodes = Array.isArray(snapshot.nodes) ? snapshot.nodes : [];
-    state.current = Array.isArray(snapshot.current) ? snapshot.current : [];
-    state.liveMessage = null;
-    try {
-      localStorage.setItem("blue.session", snapshot.session_id);
-    } catch {
-      /* ignore */
-    }
-    updateTitleFromMessages();
-    els.chatTitle.textContent = titleFor(snapshot.session_id);
-    renderMessages({ scroll: true, force: options.force === true });
-    const existing = state.sessions.find((item) => item.session_id === snapshot.session_id);
+    const session = store(snapshot.session_id);
+    session.title = String(snapshot.title || session.title || "");
+    session.messages = Array.isArray(snapshot.messages) ? snapshot.messages : [];
+    session.nodes = Array.isArray(snapshot.nodes) ? snapshot.nodes : [];
+    session.chain = Array.isArray(snapshot.current) ? snapshot.current : [];
+    session.liveMessage = null;
+    session.loaded = true;
+    session.windowStart = 0;
+
+    const existing = metaOf(snapshot.session_id);
     const next = {
       session_id: snapshot.session_id,
       message_count: snapshot.message_count,
       updated_at: snapshot.updated_at,
+      title: snapshot.title || existing?.title || "",
+      preview: existing?.preview || "",
+      queued: existing?.queued || 0,
+      running: existing?.running || false,
+      phase: existing?.phase || "",
+      step: existing?.step || 0,
     };
     if (existing) Object.assign(existing, next);
     else state.sessions.push(next);
+
+    if (state.sessionId === snapshot.session_id) {
+      els.chatTitle.textContent = titleFor(snapshot.session_id);
+      renderMessages({ scroll: true, force: options.force === true });
+    }
     renderSessions();
   }
 
   function appendAssistantText(text) {
     if (!text) return;
-    const last = state.messages[state.messages.length - 1];
+    const last = cur().messages[cur().messages.length - 1];
     if (last?.role === "assistant" && last.content === text) return;
-    state.messages.push({ role: "assistant", content: text, tool_calls: [] });
+    cur().messages.push({ role: "assistant", content: text, tool_calls: [] });
     renderMessages({ scroll: true, force: true });
   }
 
@@ -1035,24 +1189,15 @@
     }
   }
 
+  /** 切到某个会话：先渲染缓存（立刻有内容），再后台刷新快照。 */
   async function loadSession(sessionId, options = {}) {
-    if (state.busy && !state.watching) {
-      toast("请等待当前回复完成", "info");
-      return;
-    }
-    if (state.watching && state.watching !== sessionId) {
-      stopWatching();
-      setBusy(false);
-    }
+    if (!sessionId) return;
+    switchSession(sessionId);
+    closeSidebar();
+    if (options.refresh === false) return;
     try {
       const snapshot = await api(`/api/sessions/${encodeURIComponent(sessionId)}`);
       applySnapshot(snapshot, { force: true });
-      closeSidebar();
-      void refreshOutbox();
-      // 打开一个正在运行的会话：直接接上它的实时流
-      if (!state.busy && state.activities[sessionId]?.running) {
-        void startWatching(sessionId);
-      }
     } catch (error) {
       if (options.silent) {
         localStorage.removeItem("blue.session");
@@ -1062,14 +1207,52 @@
     }
   }
 
-  function newChat(close = true) {
-    if (state.busy) {
-      toast("请等待当前回复完成", "info");
-      return;
+  /** 切换视图到某个会话（纯界面动作，不等待网络）。 */
+  function switchSession(sessionId) {
+    // 草稿跟着会话走：切走时存下输入框，切回来再放回去
+    if (state.sessionId && state.sessionId !== sessionId) {
+      store(state.sessionId).draftText = els.prompt.value;
     }
+    state.sessionId = sessionId;
+    const session = store(sessionId);
+    els.prompt.value = session.draftText || "";
+    resizePrompt();
+    session.unread = 0;
+    state.stickToBottom = true;
+    try {
+      localStorage.setItem("blue.session", sessionId);
+    } catch {
+      /* ignore */
+    }
+    els.chatTitle.textContent = titleFor(sessionId);
+    showWelcome(session.messages.length === 0 && !session.loaded ? true : false);
+    if (!session.loaded) {
+      // 还没加载过：先清空视图，避免残留上一个会话的内容
+      session.messages = [];
+      session.nodes = [];
+      session.chain = [];
+    }
+    // 视图缓存是按当前会话建的，切会话一律重建
+    resetView();
+    renderMessages({ scroll: true, force: true });
+    renderOutbox();
+    applyBusyChrome(session.busy, session.busy ? "Agent 正在思考…" : "");
+    renderSessions();
+    syncWatch();
+    if (session.loaded) void refreshOutbox();
+  }
+
+  /** 新建对话：切到草稿槽；其它会话的生成照常进行。 */
+  function newChat(close = true) {
     state.sessionId = null;
-    state.messages = [];
-    state.liveMessage = null;
+    const draft = state.draft;
+    draft.messages = [];
+    draft.nodes = [];
+    draft.chain = [];
+    draft.liveMessage = null;
+    draft.busy = false;
+    draft.loaded = false;
+    draft.outbox = [];
     state.stickToBottom = true;
     try {
       localStorage.removeItem("blue.session");
@@ -1077,8 +1260,12 @@
       /* ignore */
     }
     els.chatTitle.textContent = "新对话";
+    resetView();
     showWelcome(true);
+    applyBusyChrome(false, "");
+    renderOutbox();
     renderSessions();
+    syncWatch();
     if (close) closeSidebar();
     els.prompt.focus();
   }
@@ -1127,12 +1314,12 @@
 
   async function addAttachments(files) {
     for (const file of files) {
-      if (state.pendingAttachments.length >= MAX_ATTACHMENTS) {
+      if (cur().pendingAttachments.length >= MAX_ATTACHMENTS) {
         toast(`一次最多附带 ${MAX_ATTACHMENTS} 张图片`, "info");
         break;
       }
       try {
-        state.pendingAttachments.push(await prepareAttachment(file));
+        cur().pendingAttachments.push(await prepareAttachment(file));
       } catch (error) {
         toast(error.message || "图片处理失败", "error");
       }
@@ -1144,8 +1331,8 @@
   function renderPendingAttachments() {
     if (!els.attachments) return;
     els.attachments.textContent = "";
-    els.attachments.hidden = state.pendingAttachments.length === 0;
-    state.pendingAttachments.forEach((attachment, index) => {
+    els.attachments.hidden = cur().pendingAttachments.length === 0;
+    cur().pendingAttachments.forEach((attachment, index) => {
       const chip = document.createElement("div");
       chip.className = "attachment-chip";
       const image = document.createElement("img");
@@ -1157,7 +1344,7 @@
       remove.textContent = "×";
       remove.setAttribute("aria-label", "移除图片");
       remove.addEventListener("click", () => {
-        state.pendingAttachments.splice(index, 1);
+        cur().pendingAttachments.splice(index, 1);
         renderPendingAttachments();
         updateSendState();
       });
@@ -1169,7 +1356,7 @@
   async function sendViaRest(
     sessionId,
     text,
-    attachments = state.pendingAttachments,
+    attachments = cur().pendingAttachments,
     options = {},
   ) {
     const reply = await api("/api/chat", {
@@ -1200,7 +1387,7 @@
     const regenerate = options.regenerate === true;
     const parent = options.parent ?? null;
     const text = String(rawText || "").trim();
-    const attachments = regenerate ? [] : state.pendingAttachments.slice();
+    const attachments = regenerate ? [] : cur().pendingAttachments.slice();
     if (!regenerate && !text && !attachments.length) return;
     if (regenerate && !state.sessionId) return;
     const sessionId = state.sessionId || uuid();
@@ -1213,9 +1400,26 @@
       }
     }
     if (!regenerate) {
-      rememberTitle(sessionId, text || (attachments.length ? "[图片]" : ""));
+      // 新对话落成正式会话槽：草稿里攒的内容搬过去
+      if (!state.sessionId) {
+        const draft = state.draft;
+        const session = store(sessionId);
+        session.messages = draft.messages;
+        session.loaded = true;
+        state.sessionId = sessionId;
+        draft.messages = [];
+        state.draft = createSessionState(null);
+        try {
+          localStorage.setItem("blue.session", sessionId);
+        } catch {
+          /* ignore */
+        }
+      }
+      const meta = metaOf(sessionId);
+      if (meta && !meta.title) meta.title = text.slice(0, TITLE_HINT);
+      sessionPreview(sessionId, text);
     }
-    state.liveMessage = null;
+    cur().liveMessage = null;
     if (!regenerate) {
       const localParts = [];
       if (text) localParts.push({ type: "text", text });
@@ -1225,21 +1429,21 @@
           url: `data:${attachment.mime};base64,${attachment.data}`,
         });
       });
-      state.messages.push({
+      cur().messages.push({
         role: "user",
         content: text,
         parts: localParts,
         tool_calls: [],
       });
     }
-    state.pendingAttachments = [];
+    cur().pendingAttachments = [];
     renderPendingAttachments();
     showWelcome(false);
     renderMessages({ scroll: true, force: true });
     renderSessions();
-    stopWatching();
-    state.cancelled = false;
+    cur().cancelled = false;
     setBusy(true, regenerate ? "正在生成新分支…" : "Agent 正在思考…");
+    cur().sentAny = true;
     els.prompt.value = "";
     resizePrompt();
 
@@ -1260,7 +1464,7 @@
         await sendViaRest(sessionId, text, attachments, { parent, regenerate });
       } catch (error) {
         setBusy(false);
-        state.messages.push({
+        cur().messages.push({
           role: "assistant",
           content: `⚠️ ${error.message || "发送失败"}`,
           tool_calls: [],
@@ -1276,7 +1480,7 @@
   /* ------------------------------------------------------------------ */
   /** 切换到同父的相邻分支；只改后端指针，历史一条不丢。 */
   async function switchBranch(node, step) {
-    if (state.busy) {
+    if (cur().busy) {
       toast("请等待当前回复完成", "info");
       return;
     }
@@ -1299,7 +1503,7 @@
 
   /** 重试：再生成一条回复分支，旧回复原样保留。 */
   function retryNode(node) {
-    if (state.busy) {
+    if (cur().busy) {
       toast("请等待当前回复完成", "info");
       return;
     }
@@ -1311,7 +1515,7 @@
 
   /** 删除一条分支：该消息与其后续一起消失，界面上立刻重渲染。 */
   async function deleteBranch(node) {
-    if (state.busy) {
+    if (cur().busy) {
       toast("请等待当前回复完成", "info");
       return;
     }
@@ -1331,12 +1535,12 @@
 
   /** 内联编辑用户消息：保存时在同一个父节点下开新分支，再生成新回复。 */
   function beginEdit(host, node) {
-    if (state.busy) {
+    if (cur().busy) {
       toast("请等待当前回复完成", "info");
       return;
     }
     if (host.querySelector(".editor")) return;
-    const message = state.messages.find((item) => item.id === node.id);
+    const message = cur().messages.find((item) => item.id === node.id);
     const bubble = host.querySelector(".bubble");
     if (!message || !bubble) return;
     const editor = document.createElement("div");
@@ -1379,11 +1583,23 @@
     if (bubble) bubble.hidden = false;
   }
 
+  /** 把某个会话的队列整体替换掉（REST 拉取或 session.outbox 推送都用它）。 */
+  function applyOutbox(sessionId, messages) {
+    if (!sessionId) return;
+    const session = store(sessionId);
+    session.outbox = Array.isArray(messages) ? messages : [];
+    const meta = metaOf(sessionId);
+    if (meta) meta.queued = session.outbox.length;
+    if (session === cur()) renderOutbox();
+    renderSessions();
+  }
+
   function renderOutbox() {
     if (!els.outbox) return;
-    els.outbox.hidden = state.outbox.length === 0;
+    const items = cur().outbox;
+    els.outbox.hidden = items.length === 0;
     els.outbox.innerHTML = "";
-    state.outbox.forEach((item, index) => {
+    items.forEach((item, index) => {
       const row = document.createElement("div");
       row.className = "outbox-item";
       const number = document.createElement("span");
@@ -1406,20 +1622,20 @@
     });
   }
 
-  async function refreshOutbox() {
-    const sessionId = state.sessionId;
+  /** 拉取某个会话的队列；默认当前会话。 */
+  async function refreshOutbox(sessionId = state.sessionId) {
     if (!sessionId) {
-      state.outbox = [];
       renderOutbox();
       return;
     }
     try {
-      const payload = await api(`/api/sessions/${encodeURIComponent(sessionId)}/outbox`);
-      state.outbox = payload.messages || [];
+      const payload = await api(
+        `/api/sessions/${encodeURIComponent(sessionId)}/outbox`,
+      );
+      applyOutbox(sessionId, payload.messages || []);
     } catch {
       // 网络抖动时保留上一次结果
     }
-    renderOutbox();
   }
 
   async function dropQueued(messageId) {
@@ -1433,11 +1649,11 @@
     } catch (error) {
       toast(error.message || "取消失败", "error");
     }
-    void refreshOutbox();
+    void refreshOutbox(sessionId);
   }
 
   function cancelPrompt() {
-    if (!state.busy) return;
+    if (!cur().busy) return;
     const socket = state.socket;
     if (!socket || socket.readyState !== WebSocket.OPEN) {
       toast("实时连接不可用，无法中断", "error");
@@ -1482,33 +1698,44 @@
         window.clearTimeout(timer);
         state.socket = null;
         state.socketPromise = null;
-        state.watching = null;
+        watchers.clear();
         setSocketOnline(false, "离线");
-        if (state.liveMessage) state.liveMessage.live = false;
-        state.liveMessage = null;
-        if (state.busy) {
-          setBusy(false);
-          toast("实时连接已断开，请重试", "error");
+        let wasBusy = false;
+        for (const session of state.store.values()) {
+          if (session.liveMessage) session.liveMessage.live = false;
+          session.liveMessage = null;
+          if (session.busy) {
+            session.busy = false;
+            wasBusy = true;
+          }
         }
+        if (cur().busy) {
+          cur().busy = false;
+          wasBusy = true;
+        }
+        applyBusyChrome(false, "");
+        renderSessions();
+        if (wasBusy) toast("实时连接已断开，请重试", "error");
       };
     });
     return state.socketPromise;
   }
 
-  function currentLiveMessage() {
-    if (state.liveMessage && state.messages.includes(state.liveMessage)) {
-      return state.liveMessage;
+  /** 某个会话「正在生成的 assistant 消息」（流式增量都累积在它身上）。 */
+  function currentLiveMessage(session) {
+    if (session.liveMessage && session.messages.includes(session.liveMessage)) {
+      return session.liveMessage;
     }
-    const last = state.messages.at(-1);
+    const last = session.messages.at(-1);
     if (last?.role === "assistant" && last.live) {
-      state.liveMessage = last;
+      session.liveMessage = last;
       return last;
     }
     return null;
   }
 
-  function beginStreamStep() {
-    const current = currentLiveMessage();
+  function beginStreamStep(session) {
+    const current = currentLiveMessage(session);
     if (
       current &&
       !current.content &&
@@ -1524,17 +1751,16 @@
       tool_calls: [],
       live: true,
     };
-    state.messages.push(message);
-    state.liveMessage = message;
-    els.typing.hidden = true;
-    scheduleStreamRender();
+    session.messages.push(message);
+    session.liveMessage = message;
+    touchSession(session);
     return message;
   }
 
-  function markToolCallStatus(callId, status) {
+  function markToolCallStatus(session, callId, status) {
     if (!callId) return;
-    for (let index = state.messages.length - 1; index >= 0; index -= 1) {
-      const message = state.messages[index];
+    for (let index = session.messages.length - 1; index >= 0; index -= 1) {
+      const message = session.messages[index];
       if (message.role !== "assistant") continue;
       const call = (message.tool_calls || []).find((item) => item.id === callId);
       if (call) {
@@ -1544,86 +1770,94 @@
     }
   }
 
-  function handleStreamEvent(event) {
-    const kind = event.kind;
-    if (kind === "queued") {
-      // 同一会话已有请求在跑（可能是别的端）：进入等待态并提示
-      if (!state.busy) {
-        state.watching = state.watching || state.sessionId;
-      }
-      setBusy(true, event.text || "正在等待上一个回复结束…");
+  /* 某个会话的状态变了：当前会话直接重绘，后台会话只加未读角标。 */
+  function touchSession(session) {
+    if (session === cur()) {
+      scheduleStreamRender();
       return;
     }
-    if (!state.busy && !state.watching) return;
+    session.unread += 1;
+    renderSessions();
+  }
+
+  function handleStreamEvent(session, event) {
+    const kind = event.kind;
+    if (kind === "queued") {
+      // 同一会话已有请求在跑（可能是另一台设备/另一个标签页）：进入等待态
+      setSessionBusy(session, true, event.text || "正在等待上一个回复结束…");
+      return;
+    }
+    if (!session.busy && !watchers.has(session.id)) return;
     if (kind === "step_start") {
-      beginStreamStep();
+      beginStreamStep(session);
       return;
     }
     if (kind === "thinking") {
-      const live = currentLiveMessage() || beginStreamStep();
+      const live = currentLiveMessage(session) || beginStreamStep(session);
       live.reasoning_content = `${live.reasoning_content || ""}${event.text || ""}`;
-      scheduleStreamRender();
+      touchSession(session);
       return;
     }
     if (kind === "text") {
-      const live = currentLiveMessage() || beginStreamStep();
+      const live = currentLiveMessage(session) || beginStreamStep(session);
       live.content = `${live.content || ""}${event.text || ""}`;
-      els.typing.hidden = true;
-      scheduleStreamRender();
+      if (session === cur()) els.typing.hidden = true;
+      touchSession(session);
       return;
     }
     if (kind === "tool_calls") {
-      const live = currentLiveMessage() || beginStreamStep();
+      const live = currentLiveMessage(session) || beginStreamStep(session);
       live.tool_calls = (event.tool_calls || []).map((call) => ({
         id: call.id,
         name: call.name,
         arguments: call.arguments || {},
       }));
-      scheduleStreamRender();
+      touchSession(session);
       return;
     }
     if (kind === "tool_start") {
       const call = event.tool_call || {};
-      markToolCallStatus(call.id, "running");
-      els.typingLabel.textContent = `正在执行 ${call.name || "工具"}…`;
-      scheduleStreamRender();
+      markToolCallStatus(session, call.id, "running");
+      if (session === cur()) {
+        els.typingLabel.textContent = `正在执行 ${call.name || "工具"}…`;
+      }
+      touchSession(session);
       return;
     }
     if (kind === "tool_result") {
       const call = event.tool_call || {};
-      markToolCallStatus(call.id, "done");
+      markToolCallStatus(session, call.id, "done");
       const toolParts = [];
       if (event.text) toolParts.push({ type: "text", text: event.text });
       for (const hash of event.attachments || []) {
         toolParts.push({ type: "image", hash, url: `/api/attachments/${hash}` });
       }
-      state.messages.push({
+      session.messages.push({
         role: "tool",
         content: event.text || "",
         parts: toolParts,
         tool_call_id: call.id || null,
         name: call.name || null,
       });
-      scheduleStreamRender();
+      touchSession(session);
       return;
     }
     if (kind === "done") {
-      els.typing.hidden = true;
+      if (session === cur()) els.typing.hidden = true;
       return;
     }
     if (kind === "error") {
+      const live = session.liveMessage;
       if (
-        state.liveMessage &&
-        !state.liveMessage.content &&
-        !state.liveMessage.reasoning_content &&
-        !(state.liveMessage.tool_calls || []).length
+        live &&
+        !live.content &&
+        !live.reasoning_content &&
+        !(live.tool_calls || []).length
       ) {
-        state.messages = state.messages.filter(
-          (message) => message !== state.liveMessage,
-        );
+        session.messages = session.messages.filter((message) => message !== live);
       }
-      state.liveMessage = null;
-      scheduleStreamRender();
+      session.liveMessage = null;
+      touchSession(session);
     }
   }
 
@@ -1631,14 +1865,38 @@
    * 运行状态刷新：谁在跑、跑到哪一步。
    * 当前会话由别处（另一台设备 / 刷新前的本页）发起时，自动接续它的实时流。
    */
+  /*
+   * 运行状态刷新：谁在跑、跑到哪一步。
+   * 正在跑的会话都会被订阅，所以后台会话也能持续推进；切回去时内容已经在了。
+   */
   function handleActivityFrame(frame) {
     const incoming = Array.isArray(frame.sessions) ? frame.sessions : [];
     for (const activity of incoming) {
       const id = activity?.session_id;
       if (!id) continue;
-      if (activity.running) state.activities[id] = activity;
-      else delete state.activities[id];
-      const summary = state.sessions.find((item) => item.session_id === id);
+      const session = store(id);
+      if (activity.running) {
+        state.activities[id] = activity;
+        ensureWatch(id);
+        if (!session.busy) {
+          setSessionBusy(session, true, `Agent ${activityLabel(activity)}…（已接续）`);
+        }
+      } else {
+        const wasRunning = Boolean(state.activities[id]) || session.busy;
+        delete state.activities[id];
+        if (session.busy) {
+          session.busy = false;
+          session.liveMessage = null;
+          if (session === cur()) {
+            applyBusyChrome(false, "");
+            void refreshSession(id);
+          } else if (wasRunning) {
+            session.unread += 1;
+            void refreshSession(id);
+          }
+        }
+      }
+      const summary = metaOf(id);
       if (summary) {
         summary.running = Boolean(activity.running);
         summary.phase = activity.phase || "";
@@ -1646,22 +1904,41 @@
       }
     }
     renderSessions();
-    const current = state.sessionId;
-    if (!current) return;
-    const activity = state.activities[current];
-    if (activity?.running) {
-      if (state.watching === current) {
-        els.typingLabel.textContent = `Agent ${activityLabel(activity)}…（已接续）`;
-      } else if (!state.busy) {
-        void startWatching(current);
-      }
-    } else if (state.watching === current) {
-      stopWatching();
-      setBusy(false);
-      toast("本轮生成已结束", "info");
-      void loadSession(current, { silent: true });
-      void refreshSessions();
+    syncWatch();
+  }
+
+  /** 后台刷新某个会话的快照（不切换视图）。 */
+  async function refreshSession(sessionId) {
+    try {
+      const snapshot = await api(`/api/sessions/${encodeURIComponent(sessionId)}`);
+      applySnapshot(snapshot, { force: false });
+    } catch {
+      // 网络抖动：下一次推送/刷新还会来
     }
+  }
+
+  /*
+   * 所有帧都按 session_id 路由到「它自己那个会话」，与当前看的是哪个无关。
+   * 只有当前会话的帧会立刻重绘；后台会话攒着，切过去就在。
+   */
+  function frameSession(frame) {
+    const id =
+      frame.session_id ||
+      frame.event?.session_id ||
+      frame.session?.session_id ||
+      null;
+    return id ? store(id) : null;
+  }
+
+  function dropOptimisticUser(session) {
+    for (let index = session.messages.length - 1; index >= 0; index -= 1) {
+      const message = session.messages[index];
+      if (message.role === "user" && (message.id === null || message.id === undefined)) {
+        session.messages.splice(index, 1);
+        return true;
+      }
+    }
+    return false;
   }
 
   function handleSocketMessage(event) {
@@ -1673,8 +1950,7 @@
     }
     if (frame.type === "ready") {
       setSocketOnline(true, "实时连接");
-      const activity = state.sessionId ? state.activities[state.sessionId] : null;
-      if (activity?.running) void startWatching(state.sessionId);
+      syncWatch();
       return;
     }
     if (frame.type === "activity") {
@@ -1682,73 +1958,93 @@
       return;
     }
     if (frame.type === "status") {
-      setBusy(true, frame.label || "Agent 正在思考…");
+      const session = frameSession(frame);
+      if (session) setSessionBusy(session, true, frame.label || "Agent 正在思考…");
       return;
     }
     if (frame.type === "stream") {
-      handleStreamEvent(frame.event || {});
+      const session = frameSession(frame);
+      if (session) handleStreamEvent(session, frame.event || {});
       return;
     }
     if (frame.type === "progress") {
       applySnapshot(frame.session, { force: state.stickToBottom });
-      const last = state.messages.filter((message) => message.role !== "system").at(-1);
-      if (last?.role === "tool") setBusy(true, "工具执行完成，继续思考…");
-      else if (last?.role === "assistant" && last.tool_calls?.length)
-        setBusy(true, "正在调用工具…");
+      const session = store(frame.session?.session_id || state.sessionId);
+      const last = session.messages.filter((m) => m.role !== "system").at(-1);
+      if (last?.role === "tool") setSessionBusy(session, true, "工具执行完成，继续思考…");
+      else if (last?.role === "assistant" && last.tool_calls?.length) {
+        setSessionBusy(session, true, "正在调用工具…");
+      }
       return;
     }
     if (frame.type === "queued_ack") {
-      // 这一轮没有真正开始：不动 busy（当前正在生成的那轮状态由它自己维护）
-      toast("会话忙，已加入待发送队列", "info");
-      void refreshOutbox();
+      // 这一轮没有真正开始：消息进了后端队列，别在气泡区留一条幽灵消息
+      const session = frameSession(frame) || cur();
+      dropOptimisticUser(session);
+      session.busy = false;
+      if (session === cur()) {
+        applyBusyChrome(false, "");
+        renderMessages({ scroll: true, force: state.stickToBottom });
+      }
+      toast("会话忙，已加入发件箱", "info");
+      void refreshOutbox(session.id);
       return;
     }
     if (frame.type === "cancelled") {
-      if (state.liveMessage?.live) state.liveMessage.live = false;
-      state.liveMessage = null;
-      state.cancelled = true;
-      stopWatching();
-      setBusy(false);
+      const session = frameSession(frame) || cur();
+      if (session.liveMessage?.live) session.liveMessage.live = false;
+      session.liveMessage = null;
+      session.cancelled = true;
+      setSessionBusy(session, false);
       toast("已中断生成", "info");
-      renderMessages({ scroll: true, force: state.stickToBottom });
+      if (session === cur()) renderMessages({ scroll: true, force: state.stickToBottom });
       return;
     }
     if (frame.type === "reply") {
-      stopWatching();
-      setBusy(false);
-      const wasCancelled = state.cancelled;
-      state.cancelled = false;
+      const session = frameSession(frame) || cur();
+      setSessionBusy(session, false);
+      const wasCancelled = session.cancelled;
+      session.cancelled = false;
       if (wasCancelled) {
         // 中断提示已由 cancelled 帧给出，这里不再重复报错
       } else if (frame.success === false) {
         toast(frame.text || "Agent 处理失败", "error");
       } else {
-        if (!state.liveMessage?.content) appendAssistantText(frame.text);
+        if (session === cur() && !session.liveMessage?.content) {
+          appendAssistantText(frame.text);
+        }
         toast(`已完成 · ${frame.steps || 0} 个模型步骤`, "success");
       }
       return;
     }
     if (frame.type === "session") {
+      const id = frame.session?.session_id;
+      const isCurrent = !id || id === state.sessionId;
       applySnapshot(frame.session, { force: state.stickToBottom });
-      stopWatching();
-      setBusy(false);
+      if (id) setSessionBusy(store(id), false);
+      if (isCurrent && state.sessionId) applyBusyChrome(false, "");
       void refreshSessions();
-      void refreshOutbox();
+      void refreshOutbox(id || state.sessionId);
+      return;
+    }
+    if (frame.type === "outbox") {
+      applyOutbox(frame.session_id, frame.messages || []);
       return;
     }
     if (frame.type === "error") {
-      setBusy(false);
-      if (state.liveMessage?.live) state.liveMessage.live = false;
-      state.liveMessage = null;
+      const session = frameSession(frame) || cur();
+      setSessionBusy(session, false);
+      if (session.liveMessage?.live) session.liveMessage.live = false;
+      session.liveMessage = null;
       const message = frame.message || "请求失败";
-      const last = state.messages.at(-1);
+      const last = session.messages.at(-1);
       if (!(last?.role === "assistant" && last.content?.startsWith("⚠️"))) {
-        state.messages.push({
+        session.messages.push({
           role: "assistant",
           content: `⚠️ ${message}`,
           tool_calls: [],
         });
-        renderMessages({ scroll: true, force: true });
+        if (session === cur()) renderMessages({ scroll: true, force: true });
       }
       toast(message, "error");
     }
@@ -1789,7 +2085,7 @@
     els.newChat.addEventListener("click", () => newChat());
     els.refreshSessions.addEventListener("click", () => void refreshSessions(true));
     els.resetChat.addEventListener("click", async () => {
-      if (state.busy) {
+      if (cur().busy) {
         toast("请等待当前回复完成", "info");
         return;
       }
@@ -1818,7 +2114,7 @@
     els.composer.addEventListener("submit", (event) => {
       event.preventDefault();
       // 提交只由按钮触发（回车已被 keydown 拦下）：忙时按钮是「停止」
-      if (state.busy) {
+      if (cur().busy) {
         cancelPrompt();
         return;
       }
@@ -1875,18 +2171,44 @@
       });
     });
 
+    /*
+     * 侧栏：单击切换、双击标题改名、删除要点两次（自制确认，避免原生
+     * confirm 被沙箱拦掉——与 b64/chat 一致）。
+     */
     els.sessionList.addEventListener("click", (event) => {
       const deleteButton = event.target.closest("[data-delete]");
       if (deleteButton) {
         event.stopPropagation();
-        void deleteSession(deleteButton.dataset.delete);
+        void armDelete(deleteButton);
         return;
       }
+      if (event.target.closest("input.rename")) return;
       const item = event.target.closest("[data-session]");
       if (item) void loadSession(item.dataset.session);
     });
 
+    els.sessionList.addEventListener("dblclick", (event) => {
+      const name = event.target.closest(".session-name");
+      const item = event.target.closest("[data-session]");
+      if (!name || !item || item.dataset.session !== state.sessionId) {
+        // 双击非当前会话的标题：先切过去，再改名
+        if (name && item) void loadSession(item.dataset.session);
+        return;
+      }
+      event.preventDefault();
+      beginRename(item.dataset.session, name);
+    });
+
     els.sessionList.addEventListener("keydown", (event) => {
+      if (event.key === "F2") {
+        const item = event.target.closest("[data-session]");
+        const name = item?.querySelector(".session-name");
+        if (item && name && item.dataset.session === state.sessionId) {
+          event.preventDefault();
+          beginRename(item.dataset.session, name);
+        }
+        return;
+      }
       if (event.key !== "Enter" && event.key !== " ") return;
       const item = event.target.closest("[data-session]");
       if (!item) return;
@@ -1899,7 +2221,7 @@
       if (action) {
         const host = action.closest("[data-node]");
         const nodeId = Number(host?.dataset.node || "");
-        const node = state.nodes.find((item) => item.id === nodeId) || null;
+        const node = cur().nodes.find((item) => item.id === nodeId) || null;
         if (!node) return;
         const act = action.dataset.act;
         if (act === "branch-prev") await switchBranch(node, -1);
@@ -1944,20 +2266,98 @@
     });
   }
 
-  async function deleteSession(sessionId) {
+  /** 删除要点两次：第一次变「确认」，3 秒后退回（与 b64/chat 一致）。 */
+  async function armDelete(button) {
+    const sessionId = button.dataset.delete;
     if (!sessionId) return;
-    if (state.busy) {
-      toast("请等待当前回复完成", "info");
+    if (button.dataset.arm) {
+      delete button.dataset.arm;
+      await deleteSession(sessionId);
       return;
     }
-    if (!window.confirm("删除这个会话及其历史记录？")) return;
+    button.dataset.arm = "1";
+    button.classList.add("arm");
+    button.textContent = "确认";
+    toast(`再点一次「确认」删除会话「${titleFor(sessionId)}」`, "info");
+    window.setTimeout(() => {
+      if (!button.isConnected) return;
+      delete button.dataset.arm;
+      button.classList.remove("arm");
+      button.innerHTML = '<svg><use href="#i-trash"></use></svg>';
+    }, 3000);
+  }
+
+  async function deleteSession(sessionId) {
+    if (!sessionId) return;
+    if (store(sessionId).busy) {
+      toast("该会话正在生成，先中断再删除", "info");
+      return;
+    }
     try {
       await api(`/api/sessions/${encodeURIComponent(sessionId)}`, { method: "DELETE" });
+      dropWatch(sessionId);
+      state.store.delete(sessionId);
       if (sessionId === state.sessionId) newChat(false);
       await refreshSessions();
       toast("会话已删除", "success");
     } catch (error) {
       toast(`删除失败：${error.message}`, "error");
+    }
+  }
+
+  /** 双击标题就地改名；留空回车 = 恢复自动标题（与服务端语义一致）。 */
+  function beginRename(sessionId, nameEl) {
+    if (!nameEl || !nameEl.isConnected) return;
+    if (nameEl.parentElement?.querySelector("input.rename")) return;
+    const input = document.createElement("input");
+    input.className = "rename";
+    input.type = "text";
+    input.maxLength = 80;
+    input.placeholder = "留空恢复自动标题";
+    input.value = metaOf(sessionId)?.title || "";
+    let done = false;
+    const finish = async (save) => {
+      if (done) return;
+      done = true;
+      const value = input.value.trim();
+      // 就地恢复标题节点，不重建整个列表（重建会把点击目标换掉）
+      input.replaceWith(nameEl);
+      if (save) await renameSession(sessionId, value);
+    };
+    input.addEventListener("click", (event) => event.stopPropagation());
+    input.addEventListener("dblclick", (event) => event.stopPropagation());
+    input.addEventListener("keydown", (event) => {
+      if (event.key === "Enter") {
+        event.preventDefault();
+        void finish(true);
+      } else if (event.key === "Escape") {
+        event.preventDefault();
+        void finish(false);
+      }
+    });
+    input.addEventListener("blur", () => void finish(true));
+    nameEl.replaceWith(input);
+    input.focus();
+    input.select();
+  }
+
+  async function renameSession(sessionId, title) {
+    try {
+      const payload = await api(
+        `/api/sessions/${encodeURIComponent(sessionId)}/title`,
+        { method: "PATCH", body: JSON.stringify({ title }) },
+      );
+      const resolved = String(payload.title || "");
+      const meta = metaOf(sessionId);
+      if (meta) meta.title = resolved;
+      const session = state.store.get(sessionId);
+      if (session) session.title = resolved;
+      if (sessionId === state.sessionId) {
+        els.chatTitle.textContent = titleFor(sessionId);
+      }
+      renderSessions();
+    } catch (error) {
+      toast(`改名失败：${error.message}`, "error");
     }
   }
 
@@ -1975,14 +2375,15 @@
 
     await Promise.allSettled([loadTools(), loadSystem(), refreshSessions()]);
     const saved = localStorage.getItem("blue.session");
-    if (saved) {
+    if (saved && metaOf(saved)) {
       await loadSession(saved, { silent: true });
+    } else if (saved) {
+      // 会话已被删除：别再拿旧 id 去猜
+      localStorage.removeItem("blue.session");
     }
     if (!state.sessionId) showWelcome(true);
     void refreshOutbox();
-    setInterval(() => {
-      if (state.outbox.length || state.busy) void refreshOutbox();
-    }, 3000);
+    // 队列变化由 session.outbox 广播实时推送，不再轮询
     void ensureSocket().catch(() => {
       setSocketOnline(false, "离线");
     });
