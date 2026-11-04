@@ -67,7 +67,10 @@ def main(argv: Sequence[str] | None = None) -> int:
                     follow=bool(args.follow),
                 )
             case "_supervise":
-                return _up(config_path, foreground=True)
+                return _up(
+                    cast(str, args.config_path) or config_path,
+                    foreground=True,
+                )
             case "down":
                 return _down(config_path, timeout=float(args.timeout))
             case "config-check":
@@ -838,6 +841,11 @@ def _parser() -> argparse.ArgumentParser:
     plan_parser.add_argument("--json", action="store_true", help="输出 JSON")
     plan_parser.add_argument("--diff", action="store_true", help="展示配置的字段级变化")
     subparsers.add_parser("doctor", help="检查运行依赖")
+
+    # 内部命令：up 的后台调谐器与 execv 自重启都靠它，不出现在 --help 里。
+    supervise_parser = subparsers.add_parser("_supervise", help=argparse.SUPPRESS)
+    supervise_parser.add_argument("config_path", nargs="?", default=None)
+
     mcp_parser = subparsers.add_parser(
         "mcp-tools", help="列出 MCP server 真实提供的工具名（写白名单用）"
     )

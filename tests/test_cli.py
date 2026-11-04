@@ -5,6 +5,8 @@ from __future__ import annotations
 import json
 import os
 import signal
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -339,3 +341,26 @@ def test_exec_self_uses_the_supervise_subcommand(
     with pytest.raises(SystemExit):
         _exec_self(desired)
     assert captured and captured[0][1][-2:] == ["_supervise", str(desired.config_path)]
+
+
+def test_supervise_subcommand_accepts_config_path(tmp_path: Path) -> None:
+    """``_supervise`` 必须能解析 up / execv 传入的配置路径。"""
+    from blue.cli import _parser  # pyright: ignore[reportPrivateUsage]
+
+    config = tmp_path / "blue.infd"
+    args = _parser().parse_args(["_supervise", str(config)])
+    assert args.command == "_supervise"
+    assert args.config_path == str(config)
+
+
+def test_module_entry_point_works() -> None:
+    """``python -m blue`` 可用：后台调谐器与自重启都依赖这个入口。"""
+    result = subprocess.run(
+        [sys.executable, "-m", "blue", "--help"],
+        capture_output=True,
+        text=True,
+        check=False,
+        env={**os.environ, "PYTHONPATH": str(ROOT / "src")},
+    )
+    assert result.returncode == 0, result.stderr
+    assert "up" in result.stdout
