@@ -44,7 +44,8 @@ __all__ = [
     "COMPACT_KEEP_MESSAGES",
     "COMPACT_LIST_ITEMS",
     "COMPACT_TEXT_CHARS",
-    "SLIM_CHARS",
+    "DROPPED_NOTE",
+    "NOTES_RESERVE",
     "CompactRule",
     "compact_history",
     "estimate_chars",
@@ -63,8 +64,13 @@ COMPACT_ERROR_CHARS = 600
 COMPACT_LIST_ITEMS = 3
 """列表字段保留的条数。"""
 
-SLIM_CHARS = 120
-"""预算不够、把更早的消息降级成一行时保留的开头字符数。"""
+DROPPED_NOTE = (
+    "[早期历史已省略：{steps} 步 / {messages} 条消息；需要细节请重新读取文件或重跑命令]"
+)
+"""超预算时插在原处的省略说明（不逐条截断，见 ``_fit_budget``）。"""
+
+NOTES_RESERVE = 200
+"""给省略说明预留的字符数，避免插进去又超预算。"""
 
 COMPACT_BOUNDARY_STEP = 50
 """投影分界的量化步长。
@@ -183,56 +189,56 @@ def compact_history(
     return compacted
 
 
-def _fit_budget(messages: list[Message], *, target_chars: int) -> list[Message]:
-    """把最旧的消息逐条降级成一行，直到整体进入预算。
+def _split_steps(messages: Sequence[Message], start: int) -> list[tuple[int, int]]:
+    """把消息切成「步」：一条 assistant 加上紧随其后的 tool 结果。
 
-    从最旧往最新扫，所以尾部 ``keep_messages`` 天然最后才被动到：只要把更早的
-    消息降级就够用，最近这几条一定原样保留；实在压不下去（比如最近一条本身就是
-    几十 KB 的工具结果）才会继续往尾部降级 —— 预算是硬约束。
-
-    降到极致仍有下限：每条消息的角色、tool_call 结构、省略标记本身也要占字符，
-    所以全部降级后可能依然高于预算，此时返回的就是最省的形态。
+    淘汰只能按步来：把 assistant 丢掉却留下它的 tool 结果（或反过来），下游会直接
+    报「tool_call 没有对应结果」，整轮对话就废了。
     """
+    steps: list[tuple[int, int]] = []
+    index = start
+    while index < len(messages):
+        end = index + 1
+        if messages[index].role == MessageRole.ASSISTANT and messages[index].tool_calls:
+            while end < len(messages) and messages[end].role == MessageRole.TOOL:
+                end += 1
+        steps.append((index, end))
+        index = end
+    return steps
+
+
+def _fit_budget(messages: list[Message], *, target_chars: int) -> list[Message]:
+    """超预算时从最旧的**整步**开始丢弃，并在原位留一句省略说明。
+
+    为什么不是"把每条旧消息截成一行"：工具结果几乎都是 JSON，截前 120 字拿到的
+    是 `{` 和第一个键名——既没信息量，又和「按字段投影」那层语义重复。丢弃整步
+    更省、更干净，模型也只需要知道"这段被省略了，要细节可以重读"。
+
+    保留：系统提示、最后一步（当前这轮的输入）；预算压到小于最后一步时也不丢它，
+    只是如实承认超预算。
+    """
+    if target_chars <= 0 or len(messages) <= 1:
+        return messages
     total = estimate_chars(messages)
     if total <= target_chars:
         return messages
-    out = list(messages)
-    for index, message in enumerate(out):
-        if total <= target_chars:
-            break
-        if message.role == MessageRole.SYSTEM:
-            continue  # 系统提示永远原样
-        slim = _slim_message(message, chars=SLIM_CHARS)
-        if slim is message:
-            continue
-        total += estimate_chars([slim]) - estimate_chars([message])
-        out[index] = slim
-    return out
 
-
-def _slim_message(message: Message, *, chars: int) -> Message:
-    """把一条旧消息降级成一句摘要，但保持 tool_call 与 tool 结果仍然配对。"""
-    text = _message_text(message)
-    if message.role == MessageRole.TOOL:
-        head = " ".join(text.split())[:chars]
-        return message.model_copy(
-            update={"content": f"<elided {len(text)} chars> {head}"}
-        )
-    if message.role == MessageRole.ASSISTANT and message.tool_calls:
-        calls = [
-            ToolCall(
-                id=call.id,
-                function=FunctionCall(name=call.function.name, arguments={}),
-            )
-            for call in message.tool_calls
-        ]
-        content = f"{text[:chars]}…" if len(text) > chars else text
-        return message.model_copy(update={"content": content, "tool_calls": calls})
-    if len(text) <= chars:
-        return message
-    return message.model_copy(
-        update={"content": f"{text[:chars]}…[{len(text)} chars omitted]"}
-    )
+    head = 1 if messages[0].role == MessageRole.SYSTEM else 0
+    budget = max(0, target_chars - NOTES_RESERVE)
+    dropped = 0
+    dropped_steps = 0
+    resume = head
+    for start, end in _split_steps(messages, head):
+        if total <= budget or end >= len(messages):
+            break  # 进预算了，或只剩最后一步（当前轮输入，不能丢）
+        total -= estimate_chars(messages[start:end])
+        dropped += end - start
+        dropped_steps += 1
+        resume = end
+    if not dropped:
+        return messages
+    note = Message.user(DROPPED_NOTE.format(steps=dropped_steps, messages=dropped))
+    return [*messages[:head], note, *messages[resume:]]
 
 
 def learn_profiles(
