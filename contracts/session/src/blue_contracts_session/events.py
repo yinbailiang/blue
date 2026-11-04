@@ -440,6 +440,113 @@ class SessionAttachmentReplyEvent(EventDeclaration):
     payload_type = SessionAttachmentResponse
 
 
+class QueuedMessage(BaseModel):
+    """会话待发送队列里的一条消息（后端持久化，刷新/多端都看得到）。"""
+
+    id: str = Field(description="队列项 ID")
+    session_id: str = Field(description="所属会话")
+    text: str = Field(default="", description="消息正文")
+    attachments: list[SessionAttachment] = Field(
+        default_factory=list[SessionAttachment], description="随消息一起排队的附件"
+    )
+    created_at: float = Field(default=0.0, description="入队时间")
+    position: int = Field(default=0, description="1 起的排队位置")
+
+
+class SessionOutboxPayload(BaseModel):
+    """某个会话当前的全部排队消息（广播用）。"""
+
+    session_id: str
+    messages: list[QueuedMessage] = Field(default_factory=list[QueuedMessage])
+
+
+class SessionOutboxEvent(EventDeclaration):
+    """排队列表变化广播。"""
+
+    name = "session.outbox"
+    payload_type = SessionOutboxPayload
+
+
+class SessionOutboxEnqueueRequest(RequestProtocol):
+    """把一条消息加入待发送队列。"""
+
+    text: str = Field(default="")
+    attachments: list[SessionAttachment] = Field(
+        default_factory=list[SessionAttachment]
+    )
+
+
+class SessionOutboxEnqueueResponse(ResponseProtocol):
+    queued: QueuedMessage | None = Field(default=None)
+    position: int = Field(default=0, description="1 起的排队位置")
+
+
+class SessionOutboxListRequest(RequestProtocol):
+    """查询待发送队列。"""
+
+
+class SessionOutboxListResponse(ResponseProtocol):
+    messages: list[QueuedMessage] = Field(default_factory=list[QueuedMessage])
+
+
+class SessionOutboxRemoveRequest(RequestProtocol):
+    """取消一条排队消息。"""
+
+    message_id: str = Field(description="队列项 ID")
+
+
+class SessionOutboxRemoveResponse(ResponseProtocol):
+    removed: bool = Field(default=False)
+
+
+class SessionOutboxClaimRequest(RequestProtocol):
+    """取出队首（供 agent 消费）；没有则返回 None。"""
+
+
+class SessionOutboxClaimResponse(ResponseProtocol):
+    message: QueuedMessage | None = Field(default=None)
+
+
+class SessionOutboxEnqueueEvent(EventDeclaration):
+    name = "session.outbox.enqueue"
+    payload_type = SessionOutboxEnqueueRequest
+
+
+class SessionOutboxEnqueueReplyEvent(EventDeclaration):
+    name = "session.outbox.enqueue.reply"
+    payload_type = SessionOutboxEnqueueResponse
+
+
+class SessionOutboxListEvent(EventDeclaration):
+    name = "session.outbox.list"
+    payload_type = SessionOutboxListRequest
+
+
+class SessionOutboxListReplyEvent(EventDeclaration):
+    name = "session.outbox.list.reply"
+    payload_type = SessionOutboxListResponse
+
+
+class SessionOutboxRemoveEvent(EventDeclaration):
+    name = "session.outbox.remove"
+    payload_type = SessionOutboxRemoveRequest
+
+
+class SessionOutboxRemoveReplyEvent(EventDeclaration):
+    name = "session.outbox.remove.reply"
+    payload_type = SessionOutboxRemoveResponse
+
+
+class SessionOutboxClaimEvent(EventDeclaration):
+    name = "session.outbox.claim"
+    payload_type = SessionOutboxClaimRequest
+
+
+class SessionOutboxClaimReplyEvent(EventDeclaration):
+    name = "session.outbox.claim.reply"
+    payload_type = SessionOutboxClaimResponse
+
+
 EVENTS: tuple[type[EventDeclaration], ...] = (
     SessionPromptEvent,
     SessionReplyEvent,
@@ -461,5 +568,14 @@ EVENTS: tuple[type[EventDeclaration], ...] = (
     SessionActivityReplyEvent,
     SessionAttachmentGetEvent,
     SessionAttachmentReplyEvent,
+    SessionOutboxEvent,
+    SessionOutboxEnqueueEvent,
+    SessionOutboxEnqueueReplyEvent,
+    SessionOutboxListEvent,
+    SessionOutboxListReplyEvent,
+    SessionOutboxRemoveEvent,
+    SessionOutboxRemoveReplyEvent,
+    SessionOutboxClaimEvent,
+    SessionOutboxClaimReplyEvent,
 )
 """会话领域全部跨进程事件声明。"""

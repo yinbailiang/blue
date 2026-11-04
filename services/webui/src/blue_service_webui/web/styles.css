@@ -2101,3 +2101,63 @@ details[open] > summary > .chevron {
   border-radius: 10px;
   border: 1px solid var(--border, #d8dee9);
 }
+
+/* 待发送队列：等宽、贴输入区上方，占满时内部滚动 */
+.outbox {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  max-height: 28vh;
+  overflow-y: auto;
+  margin: 0 0 8px;
+  padding: 6px 8px;
+  border: 1px dashed var(--border);
+  border-radius: 10px;
+  background: var(--panel);
+  font-family: var(--mono);
+  font-size: 11.5px;
+  line-height: 1.5;
+}
+
+.outbox[hidden] {
+  display: none;
+}
+
+.outbox-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  color: var(--text-dim);
+}
+
+.outbox-index {
+  flex: 0 0 auto;
+  color: var(--muted);
+}
+
+.outbox-text {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.outbox-remove {
+  flex: 0 0 auto;
+  padding: 0 6px;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--muted);
+  font-family: var(--mono);
+  font-size: 13px;
+  line-height: 1.2;
+  cursor: pointer;
+}
+
+.outbox-remove:hover {
+  background: var(--surface-hover, rgba(255, 255, 255, 0.08));
+  color: var(--text);
+}

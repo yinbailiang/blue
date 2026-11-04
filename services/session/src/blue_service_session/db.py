@@ -7,13 +7,20 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
+import uuid
 from collections.abc import Iterable
 from dataclasses import dataclass, field
 from pathlib import Path
 
 import aiosqlite
-from blue_contracts_session import SessionInfo, collect_attachment_hashes
+from blue_contracts_session import (
+    QueuedMessage,
+    SessionAttachment,
+    SessionInfo,
+    collect_attachment_hashes,
+)
 from infinity_agent import Message
 
 from blue.errors import BlueError
@@ -70,6 +77,16 @@ CREATE TABLE IF NOT EXISTS message_attachments (
 
 CREATE INDEX IF NOT EXISTS idx_message_attachments_hash
     ON message_attachments(hash);
+
+CREATE TABLE IF NOT EXISTS session_outbox (
+    id TEXT PRIMARY KEY,
+    session_id TEXT NOT NULL REFERENCES sessions(session_id) ON DELETE CASCADE,
+    payload TEXT NOT NULL,
+    created_at REAL NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_session_outbox_session
+    ON session_outbox(session_id, created_at);
 """
 
 _SCHEMA_VERSION = 2
@@ -625,7 +642,131 @@ class SessionDatabase:
                 links,
             )
 
+    async def enqueue_message(
+        self,
+        session_id: str,
+        text: str,
+        attachments: list[SessionAttachment],
+        *,
+        now: float,
+    ) -> QueuedMessage:
+        """把一条消息放进该会话的待发送队列（会话必须已存在）。"""
+        message = QueuedMessage(
+            id=uuid.uuid4().hex,
+            session_id=session_id,
+            text=text,
+            attachments=list(attachments),
+            created_at=now,
+        )
+        payload = json.dumps(
+            {
+                "text": text,
+                "attachments": [item.model_dump(mode="json") for item in attachments],
+            },
+            ensure_ascii=False,
+        )
+        async with self._lock:
+            connection = self._connection_or_raise()
+            await connection.execute("BEGIN IMMEDIATE")
+            try:
+                await connection.execute(
+                    """
+                    INSERT INTO session_outbox (id, session_id, payload, created_at)
+                    VALUES (?, ?, ?, ?)
+                    """,
+                    (message.id, session_id, payload, now),
+                )
+                await connection.commit()
+            except Exception:
+                await connection.rollback()
+                raise
+        return message
+
+    async def list_outbox(self, session_id: str) -> list[QueuedMessage]:
+        """按入队顺序列出待发送消息。"""
+        async with self._lock:
+            connection = self._connection_or_raise()
+            cursor = await connection.execute(
+                """
+                SELECT id, payload, created_at FROM session_outbox
+                 WHERE session_id = ?
+                 ORDER BY created_at, rowid
+                """,
+                (session_id,),
+            )
+            rows = await cursor.fetchall()
+            await cursor.close()
+        return [
+            _queued_from_row(row, position, session_id)
+            for position, row in enumerate(rows, 1)
+        ]
+
+    async def remove_message(self, session_id: str, message_id: str) -> bool:
+        """取消一条排队消息；返回是否确实删掉了。"""
+        async with self._lock:
+            connection = self._connection_or_raise()
+            cursor = await connection.execute(
+                "DELETE FROM session_outbox WHERE session_id = ? AND id = ?",
+                (session_id, message_id),
+            )
+            await connection.commit()
+            removed = cursor.rowcount > 0
+            await cursor.close()
+        return removed
+
+    async def claim_message(
+        self, session_id: str, *, now: float
+    ) -> QueuedMessage | None:
+        """取出队首并从队列移除（agent 消费用）。"""
+        del now
+        async with self._lock:
+            connection = self._connection_or_raise()
+            await connection.execute("BEGIN IMMEDIATE")
+            try:
+                cursor = await connection.execute(
+                    """
+                    SELECT id, payload, created_at FROM session_outbox
+                     WHERE session_id = ?
+                     ORDER BY created_at, rowid
+                     LIMIT 1
+                    """,
+                    (session_id,),
+                )
+                row = await cursor.fetchone()
+                await cursor.close()
+                if row is None:
+                    await connection.commit()
+                    return None
+                await connection.execute(
+                    "DELETE FROM session_outbox WHERE id = ?", (str(row[0]),)
+                )
+                await connection.commit()
+            except Exception:
+                await connection.rollback()
+                raise
+        return _queued_from_row(row, 1, session_id)
+
     def _connection_or_raise(self) -> aiosqlite.Connection:
         if self._connection is None:
             raise RuntimeError("会话数据库尚未连接")
         return self._connection
+
+
+def _queued_from_row(
+    row: Iterable[object], position: int, session_id: str
+) -> QueuedMessage:
+    """把一行 outbox 记录还原成 :class:`QueuedMessage`。"""
+    fields = list(row)
+    payload = json.loads(str(fields[1]))
+    attachments = [
+        SessionAttachment.model_validate(item)
+        for item in payload.get("attachments", [])
+    ]
+    return QueuedMessage(
+        id=str(fields[0]),
+        session_id=session_id,
+        text=str(payload.get("text", "")),
+        attachments=attachments,
+        created_at=float(str(fields[2])),
+        position=position,
+    )

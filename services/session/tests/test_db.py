@@ -207,3 +207,35 @@ async def _prune_disabled(tmp_path: Path) -> None:
         assert result.evicted == []
     finally:
         await db.close()
+
+
+def test_outbox_enqueue_list_claim_remove(tmp_path: Path) -> None:
+    """待发送队列：先进先出、可取队首、可取消。"""
+    asyncio.run(_outbox_flow(tmp_path))
+
+
+async def _outbox_flow(tmp_path: Path) -> None:
+    db = SessionDatabase(tmp_path / "sessions.db")
+    await db.connect()
+    try:
+        await db.ensure("s1", "sys", now=1.0)
+        first = await db.enqueue_message("s1", "第一条", [], now=1.0)
+        second = await db.enqueue_message("s1", "第二条", [], now=2.0)
+
+        pending = await db.list_outbox("s1")
+        assert [item.text for item in pending] == ["第一条", "第二条"]
+        assert [item.position for item in pending] == [1, 2]
+        assert all(item.session_id == "s1" for item in pending)
+
+        claimed = await db.claim_message("s1", now=3.0)
+        assert claimed is not None
+        assert claimed.id == first.id
+        assert [item.text for item in await db.list_outbox("s1")] == ["第二条"]
+
+        assert await db.remove_message("s1", second.id) is True
+        assert await db.list_outbox("s1") == []
+        assert await db.claim_message("s1", now=4.0) is None
+        # 取消不存在的项返回 False
+        assert await db.remove_message("s1", second.id) is False
+    finally:
+        await db.close()

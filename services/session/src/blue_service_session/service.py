@@ -12,10 +12,12 @@ from collections.abc import Iterable
 from typing import Protocol
 
 from blue_contracts_session import (
+    QueuedMessage,
     SessionAppendEvent,
     SessionAppendReplyEvent,
     SessionAppendRequest,
     SessionAppendResponse,
+    SessionAttachment,
     SessionAttachmentBlob,
     SessionAttachmentGetEvent,
     SessionAttachmentGetRequest,
@@ -26,6 +28,24 @@ from blue_contracts_session import (
     SessionGetRequest,
     SessionGetResponse,
     SessionInfo,
+    SessionOutboxClaimEvent,
+    SessionOutboxClaimReplyEvent,
+    SessionOutboxClaimRequest,
+    SessionOutboxClaimResponse,
+    SessionOutboxEnqueueEvent,
+    SessionOutboxEnqueueReplyEvent,
+    SessionOutboxEnqueueRequest,
+    SessionOutboxEnqueueResponse,
+    SessionOutboxEvent,
+    SessionOutboxListEvent,
+    SessionOutboxListReplyEvent,
+    SessionOutboxListRequest,
+    SessionOutboxListResponse,
+    SessionOutboxPayload,
+    SessionOutboxRemoveEvent,
+    SessionOutboxRemoveReplyEvent,
+    SessionOutboxRemoveRequest,
+    SessionOutboxRemoveResponse,
     SessionResetEvent,
     SessionResetReplyEvent,
     SessionResetRequest,
@@ -82,6 +102,31 @@ class SessionBackend(Protocol):
 
     async def get_attachment(self, digest: str) -> AttachmentRecord | None:
         """按哈希取附件。"""
+        ...
+
+    async def enqueue_message(
+        self,
+        session_id: str,
+        text: str,
+        attachments: list[SessionAttachment],
+        *,
+        now: float,
+    ) -> QueuedMessage:
+        """把一条消息放进待发送队列。"""
+        ...
+
+    async def list_outbox(self, session_id: str) -> list[QueuedMessage]:
+        """按入队顺序列出待发送消息。"""
+        ...
+
+    async def remove_message(self, session_id: str, message_id: str) -> bool:
+        """取消一条排队消息。"""
+        ...
+
+    async def claim_message(
+        self, session_id: str, *, now: float
+    ) -> QueuedMessage | None:
+        """取出队首并从队列移除。"""
         ...
 
     async def update(
@@ -223,6 +268,31 @@ class SessionService:
         """列出会话。"""
         return await self._db.state()
 
+    async def enqueue_message(
+        self,
+        session_id: str,
+        text: str,
+        attachments: list[SessionAttachment],
+        *,
+        now: float,
+    ) -> QueuedMessage:
+        """把一条消息放进待发送队列。"""
+        return await self._db.enqueue_message(session_id, text, attachments, now=now)
+
+    async def list_outbox(self, session_id: str) -> list[QueuedMessage]:
+        """按入队顺序列出待发送消息。"""
+        return await self._db.list_outbox(session_id)
+
+    async def remove_message(self, session_id: str, message_id: str) -> bool:
+        """取消一条排队消息。"""
+        return await self._db.remove_message(session_id, message_id)
+
+    async def claim_message(
+        self, session_id: str, *, now: float
+    ) -> QueuedMessage | None:
+        """取出队首并从队列移除。"""
+        return await self._db.claim_message(session_id, now=now)
+
     async def _prune_loop(self) -> None:
         """定期回收旧会话与无引用附件；启动时先做一轮，重启后立刻见效。"""
         interval = self._config.prune_interval
@@ -276,6 +346,10 @@ class SessionRpcHandler(EventHandler):
                 SessionResetEvent.name,
                 SessionStateEvent.name,
                 SessionAttachmentGetEvent.name,
+                SessionOutboxEnqueueEvent.name,
+                SessionOutboxListEvent.name,
+                SessionOutboxRemoveEvent.name,
+                SessionOutboxClaimEvent.name,
             ],
             handle_timeout=15.0,
         )
@@ -300,6 +374,92 @@ class SessionRpcHandler(EventHandler):
             await self._handle_state(payload, bus_proxy)
         elif isinstance(payload, SessionAttachmentGetRequest):
             await self._handle_attachment(payload, bus_proxy)
+        elif isinstance(payload, SessionOutboxEnqueueRequest):
+            await self._handle_outbox_enqueue(payload, bus_proxy)
+        elif isinstance(payload, SessionOutboxListRequest):
+            await self._handle_outbox_list(payload, bus_proxy)
+        elif isinstance(payload, SessionOutboxRemoveRequest):
+            await self._handle_outbox_remove(payload, bus_proxy)
+        elif isinstance(payload, SessionOutboxClaimRequest):
+            await self._handle_outbox_claim(payload, bus_proxy)
+
+    async def _publish_outbox(self, session_id: str, bus_proxy: EventBus.Proxy) -> None:
+        """广播该会话最新的待发送队列。"""
+        messages = await self._backend.list_outbox(session_id)
+        await bus_proxy.publish(
+            SessionOutboxEvent.name,
+            SessionOutboxPayload(session_id=session_id, messages=messages),
+        )
+
+    async def _handle_outbox_enqueue(
+        self, payload: SessionOutboxEnqueueRequest, bus_proxy: EventBus.Proxy
+    ) -> None:
+        try:
+            message = await self._backend.enqueue_message(
+                payload.session_id,
+                payload.text,
+                payload.attachments,
+                now=time.time(),
+            )
+            pending = await self._backend.list_outbox(payload.session_id)
+            reply = SessionOutboxEnqueueResponse(
+                session_id=payload.session_id,
+                request_id=payload.request_id,
+                queued=message,
+                position=len(pending),
+            )
+        except BlueError as error:
+            reply = SessionOutboxEnqueueResponse(
+                session_id=payload.session_id,
+                request_id=payload.request_id,
+                success=False,
+                error_msg=str(error),
+            )
+        await bus_proxy.publish(SessionOutboxEnqueueReplyEvent.name, reply)
+        await self._publish_outbox(payload.session_id, bus_proxy)
+
+    async def _handle_outbox_list(
+        self, payload: SessionOutboxListRequest, bus_proxy: EventBus.Proxy
+    ) -> None:
+        messages = await self._backend.list_outbox(payload.session_id)
+        await bus_proxy.publish(
+            SessionOutboxListReplyEvent.name,
+            SessionOutboxListResponse(
+                session_id=payload.session_id,
+                request_id=payload.request_id,
+                messages=messages,
+            ),
+        )
+
+    async def _handle_outbox_remove(
+        self, payload: SessionOutboxRemoveRequest, bus_proxy: EventBus.Proxy
+    ) -> None:
+        removed = await self._backend.remove_message(
+            payload.session_id, payload.message_id
+        )
+        await bus_proxy.publish(
+            SessionOutboxRemoveReplyEvent.name,
+            SessionOutboxRemoveResponse(
+                session_id=payload.session_id,
+                request_id=payload.request_id,
+                removed=removed,
+            ),
+        )
+        await self._publish_outbox(payload.session_id, bus_proxy)
+
+    async def _handle_outbox_claim(
+        self, payload: SessionOutboxClaimRequest, bus_proxy: EventBus.Proxy
+    ) -> None:
+        message = await self._backend.claim_message(payload.session_id, now=time.time())
+        await bus_proxy.publish(
+            SessionOutboxClaimReplyEvent.name,
+            SessionOutboxClaimResponse(
+                session_id=payload.session_id,
+                request_id=payload.request_id,
+                message=message,
+            ),
+        )
+        await self._publish_outbox(payload.session_id, bus_proxy)
 
     async def _handle_get(
         self, payload: SessionGetRequest, bus_proxy: EventBus.Proxy
