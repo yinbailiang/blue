@@ -105,6 +105,10 @@ class SessionReplyResponse(ResponseProtocol):
 
     text: str = Field(default="", description="回复文本")
     steps: int = Field(default=0, description="本次处理消耗的模型步数")
+    queued: bool = Field(
+        default=False,
+        description="会话忙时消息已进入待发送队列（本轮没有真正开始处理）",
+    )
 
 
 class SessionCancelRequest(RequestProtocol):

@@ -24,6 +24,12 @@ from blue_contracts_session import (
     SessionActivityEvent,
     SessionActivityPayload,
     SessionAttachmentBlob,
+    SessionOutboxClaimEvent,
+    SessionOutboxClaimReplyEvent,
+    SessionOutboxClaimResponse,
+    SessionOutboxEnqueueEvent,
+    SessionOutboxEnqueueReplyEvent,
+    SessionOutboxEnqueueResponse,
     SessionPromptRequest,
     SessionReplyResponse,
     SessionStreamEvent,
@@ -152,6 +158,8 @@ class AgentCore:
         )
         self._session_locks: dict[str, asyncio.Lock] = {}
         self._active_turns: dict[str, asyncio.Task[Any]] = {}
+        self._draining: set[str] = set()
+        self._drain_tasks: set[asyncio.Task[None]] = set()
         self._cancelling: set[str] = set()
         self._activity: dict[str, SessionActivity] = {}
         self._catalog: ToolCatalogClient = catalog or ToolCatalogClient(runtime=runtime)
@@ -217,6 +225,17 @@ class AgentCore:
         同一会话的并发请求会排队（``queue_timeout`` 秒），超时返回「会话繁忙」；
         不同会话互不影响。
         """
+        session_id = payload.session_id
+        lock = self._session_locks.setdefault(session_id, asyncio.Lock())
+        if lock.locked():
+            # 会话正忙：消息进入后端队列（刷新/换端都看得到），空闲后自动执行
+            position = await self._enqueue_outbox(payload, bus_proxy)
+            if position > 0:
+                return SessionReplyResponse(
+                    session_id=session_id,
+                    request_id=payload.request_id,
+                    queued=True,
+                )
         task = asyncio.current_task()
         if task is not None:
             self._active_turns[payload.session_id] = task
@@ -245,6 +264,78 @@ class AgentCore:
                 running=False,
                 request_id=payload.request_id,
             )
+            drain = asyncio.create_task(
+                self._drain_outbox(session_id, bus_proxy),
+                name=f"agent.outbox.{session_id}",
+            )
+            self._drain_tasks.add(drain)
+            drain.add_done_callback(self._drain_tasks.discard)
+
+    async def _enqueue_outbox(
+        self, payload: SessionPromptRequest, bus_proxy: EventBus.Proxy
+    ) -> int:
+        """把消息放进该会话的后端待发送队列；返回排队位置（0 表示失败）。"""
+        try:
+            response = await request(
+                bus_proxy,
+                SessionOutboxEnqueueEvent.name,
+                {
+                    "text": payload.text,
+                    "attachments": [
+                        item.model_dump(mode="json") for item in payload.attachments
+                    ],
+                },
+                SessionOutboxEnqueueReplyEvent.name,
+                session_id=payload.session_id,
+                timeout=2.0,
+            )
+        except Exception:
+            logger.warning("会话 %s 入队失败", payload.session_id, exc_info=True)
+            return 0
+        if isinstance(response, SessionOutboxEnqueueResponse):
+            return max(response.position, 1) if response.success else 0
+        return 0
+
+    async def _drain_outbox(self, session_id: str, bus_proxy: EventBus.Proxy) -> None:
+        """本轮结束后，按顺序把队列里的消息继续跑掉。"""
+        if session_id in self._draining:
+            return
+        self._draining.add(session_id)
+        try:
+            while session_id not in self._active_turns:
+                try:
+                    response = await request(
+                        bus_proxy,
+                        SessionOutboxClaimEvent.name,
+                        {},
+                        SessionOutboxClaimReplyEvent.name,
+                        session_id=session_id,
+                        timeout=10.0,
+                    )
+                except Exception:
+                    logger.warning("会话 %s 取队列失败", session_id, exc_info=True)
+                    return
+                if not isinstance(response, SessionOutboxClaimResponse):
+                    return
+                message = response.message
+                if message is None:
+                    return
+                logger.info(
+                    "会话 %s 继续处理排队消息：%s",
+                    session_id,
+                    (message.text or "")[:40],
+                )
+                await self.handle_prompt(
+                    SessionPromptRequest(
+                        session_id=session_id,
+                        request_id=f"queued-{message.id}",
+                        text=message.text,
+                        attachments=message.attachments,
+                    ),
+                    bus_proxy,
+                )
+        finally:
+            self._draining.discard(session_id)
 
     @asynccontextmanager
     async def _turn_slot(

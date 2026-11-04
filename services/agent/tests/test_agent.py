@@ -768,7 +768,7 @@ async def _queue_timeout() -> None:
 
 
 def test_queue_event_announces_waiting() -> None:
-    """排队期间会推送 kind=queued 事件，前端据此显示「等待中」。"""
+    """入队失败时退回「排队等待」，并推送 kind=queued 事件给前端。"""
     asyncio.run(_queue_event())
 
 
