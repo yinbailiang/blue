@@ -9,7 +9,9 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import logging
 import os
+import sys
 import uuid
 from collections.abc import Callable, Iterable
 from pathlib import Path
@@ -32,6 +34,7 @@ __all__ = [
     "WorkspaceConfig",
     "build_runtime",
     "bus_url",
+    "configure_logging",
     "configure_workspace",
     "load_runtime_config",
     "project_root",
@@ -248,8 +251,26 @@ def build_runtime(
     )
 
 
+def configure_logging() -> None:
+    """按 ``BLUE_LOG_LEVEL``（默认 INFO）把日志打到 stderr。
+
+    服务进程的 stderr 由 supervisor 收集成 ``.blue/logs/<name>.log``。此前没有
+    任何地方配置 logging，root logger 停在 WARNING，于是所有 ``logger.info``
+    （服务上下线、会话回收…）都被丢掉了——后台在悄悄干活，前台却没有任何痕迹。
+    """
+    level_name = os.environ.get("BLUE_LOG_LEVEL", "INFO").strip().upper()
+    level = logging.getLevelNamesMapping().get(level_name, logging.INFO)
+    logging.basicConfig(
+        level=level,
+        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+        datefmt="%Y-%m-%dT%H:%M:%S%z",
+        stream=sys.stderr,
+    )
+
+
 def run_service(service: LifecycleService) -> int:
     """把生命周期服务跑到收到 SIGINT / SIGTERM。"""
+    configure_logging()
     asyncio.run(serve_forever(service))
     return 0
 

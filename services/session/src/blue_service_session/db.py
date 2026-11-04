@@ -9,7 +9,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections.abc import Iterable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import aiosqlite
@@ -23,6 +23,7 @@ logger = logging.getLogger(__name__)
 
 __all__ = [
     "AttachmentRecord",
+    "PruneResult",
     "SessionDatabase",
     "SessionMeta",
     "SessionNotFoundError",
@@ -108,6 +109,27 @@ class SessionRecord:
     messages: list[str]
 
 
+@dataclass(frozen=True)
+class PruneResult:
+    """一次回收的结果：过期回收的会话与超容量淘汰的会话分开记账。"""
+
+    expired: list[str] = field(default_factory=list[str])
+    """超过 ``idle_ttl`` 被回收的会话。"""
+
+    evicted: list[str] = field(default_factory=list[str])
+    """因超出 ``max_sessions`` 被淘汰的最久未活动会话。"""
+
+    @property
+    def removed(self) -> list[str]:
+        """本次删除的全部会话 id（过期在前，容量淘汰在后）。"""
+        return [*self.expired, *self.evicted]
+
+    @property
+    def total(self) -> int:
+        """本次删除的会话数。"""
+        return len(self.expired) + len(self.evicted)
+
+
 class SessionDatabase:
     """SQLite 会话数据库。"""
 
@@ -118,15 +140,25 @@ class SessionDatabase:
         max_sessions: int = 512,
         idle_ttl: float = 7200.0,
         busy_timeout_ms: int = 5000,
+        active_grace: float = 0.0,
+        prune_batch_size: int = 200,
+        enforce_capacity: bool = False,
     ) -> None:
         if max_sessions < 1:
             raise ValueError("max_sessions 必须 >= 1")
         if idle_ttl <= 0:
             raise ValueError("idle_ttl 必须 > 0")
+        if active_grace < 0:
+            raise ValueError("active_grace 不能为负")
+        if prune_batch_size < 1:
+            raise ValueError("prune_batch_size 必须 >= 1")
         self._path = path
         self._max_sessions = max_sessions
         self._idle_ttl = idle_ttl
         self._busy_timeout_ms = busy_timeout_ms
+        self._active_grace = active_grace
+        self._prune_batch_size = prune_batch_size
+        self._enforce_capacity = enforce_capacity
         self._connection: aiosqlite.Connection | None = None
         self._lock = asyncio.Lock()
 
@@ -191,7 +223,7 @@ class SessionDatabase:
                         """,
                         (session_id,),
                     )
-                await self._enforce_capacity_locked(connection)
+                await self._enforce_capacity_locked(connection, now=now)
                 await connection.commit()
             except Exception:
                 await connection.rollback()
@@ -406,32 +438,41 @@ class SessionDatabase:
             for row in rows
         ]
 
-    async def prune(self, *, now: float) -> list[str]:
-        """回收空闲会话，并按上限淘汰最久未活动会话。"""
+    async def prune(self, *, now: float) -> PruneResult:
+        """回收空闲会话，并按上限淘汰最久未活动会话。
+
+        过期的先删（最多 ``prune_batch_size`` 个，避免一次长事务锁库），
+        再按容量淘汰；容量淘汰会跳过 ``active_grace`` 秒内活动过的会话，
+        以免误删正在跑长任务的对话。
+        """
         cutoff = now - self._idle_ttl
-        removed: list[str] = []
+        expired: list[str] = []
         async with self._lock:
             connection = self._connection_or_raise()
             await connection.execute("BEGIN IMMEDIATE")
             try:
                 cursor = await connection.execute(
-                    "SELECT session_id FROM sessions WHERE updated_at < ?",
-                    (cutoff,),
+                    """
+                    SELECT session_id FROM sessions
+                     WHERE updated_at < ?
+                     ORDER BY updated_at ASC
+                     LIMIT ?
+                    """,
+                    (cutoff, self._prune_batch_size),
                 )
-                removed.extend(
-                    str(row["session_id"]) for row in await cursor.fetchall()
-                )
-                if removed:
+                expired = [str(row["session_id"]) for row in await cursor.fetchall()]
+                await cursor.close()
+                if expired:
                     await connection.executemany(
                         "DELETE FROM sessions WHERE session_id = ?",
-                        [(session_id,) for session_id in removed],
+                        [(session_id,) for session_id in expired],
                     )
-                removed.extend(await self._enforce_capacity_locked(connection))
+                evicted = await self._enforce_capacity_locked(connection, now=now)
                 await connection.commit()
             except Exception:
                 await connection.rollback()
                 raise
-        return removed
+        return PruneResult(expired=expired, evicted=evicted)
 
     async def _init_schema(self, connection: aiosqlite.Connection) -> None:
         cursor = await connection.execute("PRAGMA user_version")
@@ -491,28 +532,47 @@ class SessionDatabase:
         )
 
     async def _enforce_capacity_locked(
-        self, connection: aiosqlite.Connection
+        self, connection: aiosqlite.Connection, *, now: float
     ) -> list[str]:
+        """超出 ``max_sessions`` 时淘汰最久未活动的会话。
+
+        * ``enforce_capacity=False``（自动回收关闭）时直接跳过；
+        * ``active_grace`` 秒内活动过的会话受保护，宁可临时超上限也不误删；
+        * 单次最多淘汰 ``prune_batch_size`` 个，避免一个事务删太多。
+        """
+        if not self._enforce_capacity:
+            return []
         cursor = await connection.execute("SELECT COUNT(*) AS count FROM sessions")
         row = await cursor.fetchone()
+        await cursor.close()
         count = int(row["count"]) if row is not None else 0
-        overflow = count - self._max_sessions
+        overflow = min(count - self._max_sessions, self._prune_batch_size)
         if overflow <= 0:
             return []
         cursor = await connection.execute(
             """
             SELECT session_id FROM sessions
+             WHERE updated_at <= ?
              ORDER BY updated_at ASC
              LIMIT ?
             """,
-            (overflow,),
+            (now - self._active_grace, overflow),
         )
         removed = [str(row["session_id"]) for row in await cursor.fetchall()]
-        if removed:
-            await connection.executemany(
-                "DELETE FROM sessions WHERE session_id = ?",
-                [(session_id,) for session_id in removed],
+        await cursor.close()
+        if not removed:
+            return []
+        if len(removed) < overflow:
+            logger.debug(
+                "有 %s 个会话在保护期内（active_grace=%ss），本次只淘汰 %s 个",
+                overflow - len(removed),
+                self._active_grace,
+                len(removed),
             )
+        await connection.executemany(
+            "DELETE FROM sessions WHERE session_id = ?",
+            [(session_id,) for session_id in removed],
+        )
         return removed
 
     async def _upsert_attachments_locked(

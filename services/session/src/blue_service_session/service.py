@@ -110,6 +110,9 @@ class SessionService:
             max_sessions=config.max_sessions,
             idle_ttl=config.idle_ttl,
             busy_timeout_ms=config.busy_timeout_ms,
+            active_grace=config.active_grace,
+            prune_batch_size=config.prune_batch_size,
+            enforce_capacity=config.prune_enabled,
         )
         self._pruner: asyncio.Task[None] | None = None
 
@@ -128,8 +131,22 @@ class SessionService:
             await self._runtime.stop()
             await self._db.close()
             raise
-        self._pruner = asyncio.create_task(self._prune_loop(), name="session.pruner")
-        logger.info("session 服务已启动（%s）", self._db.path)
+        if self._config.prune_enabled:
+            self._pruner = asyncio.create_task(
+                self._prune_loop(), name="session.pruner"
+            )
+            logger.info(
+                "session 服务已启动（%s）；自动回收已开启：上限 %s 个会话、"
+                "空闲 %s 秒回收",
+                self._db.path,
+                self._config.max_sessions,
+                self._config.idle_ttl,
+            )
+        else:
+            logger.info(
+                "session 服务已启动（%s）；自动回收已关闭：不会自动删除会话或附件",
+                self._db.path,
+            )
 
     async def stop(self) -> None:
         """停止回收任务、总线与数据库。"""
@@ -207,25 +224,44 @@ class SessionService:
         return await self._db.state()
 
     async def _prune_loop(self) -> None:
+        """定期回收旧会话与无引用附件；启动时先做一轮，重启后立刻见效。"""
         interval = self._config.prune_interval
         while True:
+            try:
+                await self.reap_once()
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.warning("会话回收失败", exc_info=True)
             await asyncio.sleep(interval)
-            try:
-                removed = await self._db.prune(now=time.time())
-            except Exception:
-                logger.warning("会话过期回收失败", exc_info=True)
-                continue
-            if removed:
-                logger.info("已回收会话：%s", ", ".join(removed))
-            try:
-                swept = await self._db.sweep_attachments(
-                    now=time.time(), grace=self._config.attachment_grace
-                )
-            except Exception:
-                logger.warning("附件回收失败", exc_info=True)
-            else:
-                if swept:
-                    logger.info("已回收无引用附件 %s 个", swept)
+
+    async def reap_once(self) -> None:
+        """执行一轮回收（会话 + 附件），结果写日志。
+
+        只有在 ``prune_enabled`` 打开时才会删除会话；关闭时这里什么都不做，
+        因此也可以安全地被外部（测试/运维）调用。
+        """
+        if not self._config.prune_enabled:
+            logger.debug("自动回收已关闭，跳过本轮回收")
+            return
+        now = time.time()
+        result = await self._db.prune(now=now)
+        if result.total:
+            sample = ", ".join(result.removed[:10])
+            if result.total > 10:
+                sample += f" …（共 {result.total} 个）"
+            logger.info(
+                "已回收会话 %s 个（过期 %s / 超限淘汰 %s）：%s",
+                result.total,
+                len(result.expired),
+                len(result.evicted),
+                sample,
+            )
+        swept = await self._db.sweep_attachments(
+            now=now, grace=self._config.attachment_grace
+        )
+        if swept:
+            logger.info("已回收无引用附件 %s 个", swept)
 
 
 class SessionRpcHandler(EventHandler):

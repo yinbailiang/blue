@@ -52,6 +52,15 @@ bus = BusService(
 registry = RegistryService()
 
 session = SessionService()
+# 会话存储与保留策略：**默认不自动删除任何会话**（prune_enabled = false）。
+# 需要限制磁盘占用时再打开：
+#   session = SessionService(
+#     prune_enabled = true,
+#     max_sessions = 512,     # 超过就淘汰最久未活动的
+#     idle_ttl = 7200.0,      # 空闲超过 2 小时回收
+#     prune_interval = 60.0,  # 每 60 秒扫一遍
+#     active_grace = 60.0,    # 容量淘汰时保护最近 60 秒活动过的会话
+#   )
 
 agent = AgentService(
   provider = "deepseek",

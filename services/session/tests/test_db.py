@@ -95,21 +95,115 @@ def test_prune_idle_and_capacity(tmp_path: Path) -> None:
 
 
 async def _prune_idle_and_capacity(tmp_path: Path) -> None:
-    db = SessionDatabase(tmp_path / "sessions.db", max_sessions=2, idle_ttl=10.0)
+    db = SessionDatabase(
+        tmp_path / "sessions.db",
+        max_sessions=2,
+        idle_ttl=10.0,
+        enforce_capacity=True,
+    )
     await db.connect()
     try:
         await db.ensure("old", "sys", now=100.0)
         await db.ensure("new", "sys", now=105.0)
-        removed = await db.prune(now=200.0)
-        assert removed == ["old", "new"]
+        result = await db.prune(now=200.0)
+        assert result.removed == ["old", "new"]
+        assert len(result.expired) == 2
+        assert result.evicted == []
         assert await db.state() == []
 
         await db.ensure("s1", "sys", now=200.0)
         await db.ensure("s2", "sys", now=201.0)
-        removed = await db.prune(now=201.0)
-        assert removed == []
+        result = await db.prune(now=201.0)
+        assert result.removed == []
         await db.ensure("s3", "sys", now=202.0)
         state = await db.state()
         assert [item.session_id for item in state] == ["s3", "s2"]
+    finally:
+        await db.close()
+
+
+def test_prune_protects_recent_sessions_from_capacity_eviction(
+    tmp_path: Path,
+) -> None:
+    """active_grace 内的会话不参与容量淘汰，宁可变相关闭也不误删。"""
+    asyncio.run(_prune_protects_recent(tmp_path))
+
+
+async def _prune_protects_recent(tmp_path: Path) -> None:
+    db = SessionDatabase(
+        tmp_path / "sessions.db",
+        max_sessions=1,
+        idle_ttl=10_000.0,
+        active_grace=120.0,
+        enforce_capacity=True,
+    )
+    await db.connect()
+    try:
+        await db.ensure("busy", "sys", now=100.0)
+        await db.ensure("newer", "sys", now=110.0)
+        result = await db.prune(now=200.0)
+        # 两个都在 120s 保护期内：一个都不淘汰
+        assert result.removed == []
+        assert [item.session_id for item in await db.state()] == ["newer", "busy"]
+
+        # 过了保护期后，最久未活动的 busy 先被淘汰
+        result = await db.prune(now=400.0)
+        assert result.evicted == ["busy"]
+        assert [item.session_id for item in await db.state()] == ["newer"]
+    finally:
+        await db.close()
+
+
+def test_prune_batch_size_limits_one_pass(tmp_path: Path) -> None:
+    """单次回收不超过 prune_batch_size 个，剩下的下一轮再处理。"""
+    asyncio.run(_prune_batch_limits(tmp_path))
+
+
+async def _prune_batch_limits(tmp_path: Path) -> None:
+    db = SessionDatabase(
+        tmp_path / "sessions.db",
+        max_sessions=100,
+        idle_ttl=10.0,
+        prune_batch_size=2,
+        enforce_capacity=True,
+    )
+    await db.connect()
+    try:
+        for index in range(5):
+            await db.ensure(f"s{index}", "sys", now=100.0)
+        first = await db.prune(now=1000.0)
+        assert first.total == 2
+        assert len(await db.state()) == 3
+        second = await db.prune(now=1000.0)
+        assert second.total == 2
+        third = await db.prune(now=1000.0)
+        assert third.total == 1
+        assert await db.state() == []
+    finally:
+        await db.close()
+
+
+def test_prune_disabled_keeps_everything(tmp_path: Path) -> None:
+    """自动回收关闭时，即使超上限或很旧也不删（只靠人工 reset）。"""
+    asyncio.run(_prune_disabled(tmp_path))
+
+
+async def _prune_disabled(tmp_path: Path) -> None:
+    db = SessionDatabase(
+        tmp_path / "sessions.db",
+        max_sessions=1,
+        idle_ttl=10.0,
+        enforce_capacity=False,
+    )
+    await db.connect()
+    try:
+        await db.ensure("a", "sys", now=100.0)
+        await db.ensure("b", "sys", now=101.0)
+        await db.ensure("c", "sys", now=102.0)
+        assert [item.session_id for item in await db.state()] == ["c", "b", "a"]
+        # service 层在关闭时不会调用 prune；这里即使调用也只会按 TTL 走，
+        # 而容量淘汰必须被禁用。
+        result = await db.prune(now=10_000.0)
+        assert result.evicted == []
     finally:
         await db.close()

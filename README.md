@@ -287,13 +287,21 @@ services/<name>/service_runtime_config.json
   "database_path": "sessions.db",
   "max_sessions": 512,
   "idle_ttl": 7200.0,
+  "prune_enabled": false,
   "prune_interval": 60.0,
+  "prune_batch_size": 200,
+  "active_grace": 60.0,
   "busy_timeout_ms": 5000
 }
 ```
 
 - `database_path` 为相对路径时解析到 `BLUE_STATE_DIR`，默认
   `.blue/sessions.db`；
+- **`prune_enabled` 默认 `false`：不会自动删除任何会话或附件**，磁盘占满前
+  不会丢历史；需要自动回收时显式打开；
+- 打开后：`idle_ttl` 秒没活动的会话被回收，超过 `max_sessions` 时淘汰最久
+  未活动的会话；`active_grace` 秒内活动过的会话在容量淘汰时受保护（避免误删
+  正在跑长任务的对话）；`prune_batch_size` 限制单次回收数量，避免长事务锁库；
 - SQLite 使用 WAL + `BEGIN IMMEDIATE`，一个 session 服务进程独占数据库；
 - 消息以 `blue.messages` 编码后的 JSON 文本存储，保证 tool_calls 可 round-trip。
 
@@ -378,6 +386,10 @@ uv run blue doctor              # 检查 uv / RabbitMQ / 状态目录
 ```
 
 全局参数：`--config <path>`、`--verbose`。
+
+服务进程的日志默认打到 stderr（supervisor 收集到 `.blue/logs/<name>.log`），级别
+默认 `INFO`（服务上下线、会话回收等都会留下痕迹），可用环境变量
+`BLUE_LOG_LEVEL=DEBUG|INFO|WARNING|ERROR` 调整；未知取值回退 `INFO`。
 
 ## 快速开始
 

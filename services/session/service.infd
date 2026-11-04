@@ -2,7 +2,10 @@
   database_path: str = "sessions.db"
   max_sessions: <int, range(1, 100000)> = 512
   idle_ttl: <float, positive> = 7200.0
+  prune_enabled: bool = false
   prune_interval: <float, positive> = 60.0
+  prune_batch_size: <int, range(1, 100000)> = 200
+  active_grace: <float, range(0, 86400)> = 60.0
   busy_timeout_ms: <int, range(100, 60000)> = 5000
   max_attachment_bytes: <int, range(1024, 33554432)> = 2097152
   max_attachments_per_message: <int, range(1, 16)> = 4
