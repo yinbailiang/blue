@@ -8,7 +8,12 @@ import re
 from pathlib import Path
 from typing import Any, cast
 
-from blue_contracts_session import SessionActivity, SessionAttachment, SessionInfo
+from blue_contracts_session import (
+    QueuedMessage,
+    SessionActivity,
+    SessionAttachment,
+    SessionInfo,
+)
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, Response
 from fastapi.staticfiles import StaticFiles
@@ -69,6 +74,12 @@ class SessionsResponse(BaseModel):
     """会话列表（含运行状态）。"""
 
     sessions: list[SessionSummary] = Field(default_factory=list[SessionSummary])
+
+
+class OutboxResponse(BaseModel):
+    """待发送队列。"""
+
+    messages: list[QueuedMessage] = Field(default_factory=list[QueuedMessage])
 
 
 class ActivityResponse(BaseModel):
@@ -138,6 +149,23 @@ def create_app(*, backend: WebBackend, config: WebUIConfig) -> FastAPI:
             return ActivityResponse(sessions=await backend.activity())
         except BlueError as error:
             raise HTTPException(status_code=503, detail=str(error)) from error
+
+    @app.get("/api/sessions/{session_id}/outbox", response_model=OutboxResponse)
+    async def outbox(session_id: str) -> OutboxResponse:
+        """该会话的待发送队列（刷新/换端都能看到）。"""
+        try:
+            return OutboxResponse(messages=await backend.outbox(session_id))
+        except BlueError as error:
+            raise HTTPException(status_code=503, detail=str(error)) from error
+
+    @app.delete("/api/sessions/{session_id}/outbox/{message_id}")
+    async def drop_queued(session_id: str, message_id: str) -> dict[str, bool]:
+        """取消一条排队消息。"""
+        try:
+            removed = await backend.remove_queued(session_id, message_id)
+        except BlueError as error:
+            raise HTTPException(status_code=503, detail=str(error)) from error
+        return {"removed": removed}
 
     @app.get("/api/sessions/{session_id}", response_model=SessionView)
     async def session_detail(session_id: str) -> SessionView:
@@ -407,6 +435,10 @@ async def _stream_prompt(
                     break
 
             reply = await prompt_task
+            if reply.queued:
+                # 会话忙：消息已进后端队列，本轮没有真正开始
+                await sender.send({"type": "queued_ack"})
+                return
             await sender.send(
                 {
                     "type": "reply",

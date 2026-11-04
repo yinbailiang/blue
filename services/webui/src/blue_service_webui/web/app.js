@@ -9,6 +9,7 @@
     newChat: document.getElementById("new-chat"),
     refreshSessions: document.getElementById("refresh-sessions"),
     resetChat: document.getElementById("reset-chat"),
+    outbox: document.getElementById("outbox"),
     themeToggle: document.getElementById("theme-toggle"),
     sessionList: document.getElementById("session-list"),
     toolList: document.getElementById("tool-list"),
@@ -49,6 +50,7 @@
     streamRenderTimer: null,
     pendingAttachments: [],
     activities: {},
+    outbox: [],
     watching: null,
     cancelled: false,
   };
@@ -986,6 +988,7 @@
       const snapshot = await api(`/api/sessions/${encodeURIComponent(sessionId)}`);
       applySnapshot(snapshot, { force: true });
       closeSidebar();
+      void refreshOutbox();
       // 打开一个正在运行的会话：直接接上它的实时流
       if (!state.busy && state.activities[sessionId]?.running) {
         void startWatching(sessionId);
@@ -1126,10 +1129,6 @@
     const text = String(rawText || "").trim();
     const attachments = state.pendingAttachments.slice();
     if (!text && !attachments.length) return;
-    if (state.busy) {
-      toast("上一条还在处理，等它结束或点停止", "warn");
-      return;
-    }
     const sessionId = state.sessionId || uuid();
     if (!state.sessionId) {
       state.sessionId = sessionId;
@@ -1190,6 +1189,63 @@
         toast(error.message || "发送失败", "error");
       }
     }
+  }
+
+  function renderOutbox() {
+    if (!els.outbox) return;
+    els.outbox.hidden = state.outbox.length === 0;
+    els.outbox.innerHTML = "";
+    state.outbox.forEach((item, index) => {
+      const row = document.createElement("div");
+      row.className = "outbox-item";
+      const number = document.createElement("span");
+      number.className = "outbox-index";
+      number.textContent = `${index + 1}`;
+      const body = document.createElement("span");
+      body.className = "outbox-text";
+      const preview = String(item.text || "").replace(/\s+/g, " ").slice(0, 120);
+      const count = (item.attachments || []).length;
+      body.textContent = preview || "[图片]";
+      if (count) body.textContent += ` (+${count} 图)`;
+      const remove = document.createElement("button");
+      remove.type = "button";
+      remove.className = "outbox-remove";
+      remove.textContent = "×";
+      remove.title = "取消这条待发送消息";
+      remove.addEventListener("click", () => void dropQueued(item.id));
+      row.append(number, body, remove);
+      els.outbox.append(row);
+    });
+  }
+
+  async function refreshOutbox() {
+    const sessionId = state.sessionId;
+    if (!sessionId) {
+      state.outbox = [];
+      renderOutbox();
+      return;
+    }
+    try {
+      const payload = await api(`/api/sessions/${encodeURIComponent(sessionId)}/outbox`);
+      state.outbox = payload.messages || [];
+    } catch {
+      // 网络抖动时保留上一次结果
+    }
+    renderOutbox();
+  }
+
+  async function dropQueued(messageId) {
+    const sessionId = state.sessionId;
+    if (!sessionId) return;
+    try {
+      await api(
+        `/api/sessions/${encodeURIComponent(sessionId)}/outbox/${encodeURIComponent(messageId)}`,
+        { method: "DELETE" },
+      );
+    } catch (error) {
+      toast(error.message || "取消失败", "error");
+    }
+    void refreshOutbox();
   }
 
   function cancelPrompt() {
@@ -1453,6 +1509,12 @@
         setBusy(true, "正在调用工具…");
       return;
     }
+    if (frame.type === "queued_ack") {
+      setBusy(false);
+      toast("会话忙，已加入待发送队列", "info");
+      void refreshOutbox();
+      return;
+    }
     if (frame.type === "cancelled") {
       if (state.liveMessage?.live) state.liveMessage.live = false;
       state.liveMessage = null;
@@ -1483,6 +1545,7 @@
       stopWatching();
       setBusy(false);
       void refreshSessions();
+      void refreshOutbox();
       return;
     }
     if (frame.type === "error") {
@@ -1703,6 +1766,10 @@
       await loadSession(saved, { silent: true });
     }
     if (!state.sessionId) showWelcome(true);
+    void refreshOutbox();
+    setInterval(() => {
+      if (state.outbox.length || state.busy) void refreshOutbox();
+    }, 3000);
     void ensureSocket().catch(() => {
       setSocketOnline(false, "离线");
     });

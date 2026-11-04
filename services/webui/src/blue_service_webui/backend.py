@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any, Protocol
 
 from blue_contracts_session import (
+    QueuedMessage,
     SessionActivity,
     SessionActivityEvent,
     SessionActivityPayload,
@@ -27,6 +28,11 @@ from blue_contracts_session import (
     SessionGetReplyEvent,
     SessionGetResponse,
     SessionInfo,
+    SessionOutboxListEvent,
+    SessionOutboxListReplyEvent,
+    SessionOutboxListResponse,
+    SessionOutboxRemoveEvent,
+    SessionOutboxRemoveReplyEvent,
     SessionPromptEvent,
     SessionReplyEvent,
     SessionReplyResponse,
@@ -230,6 +236,14 @@ class WebBackend(Protocol):
         """读取会话快照。"""
         ...
 
+    async def outbox(self, session_id: str) -> list[QueuedMessage]:
+        """读取该会话的待发送队列。"""
+        ...
+
+    async def remove_queued(self, session_id: str, message_id: str) -> bool:
+        """取消一条排队消息。"""
+        ...
+
     async def prompt(
         self,
         session_id: str,
@@ -322,6 +336,30 @@ class BusBackend:
     async def activity(self) -> list[SessionActivity]:
         """当前正在运行的会话。"""
         return [item for item in self._activity.values() if item.running]
+
+    async def outbox(self, session_id: str) -> list[QueuedMessage]:
+        """读取该会话的待发送队列。"""
+        response = await self._request(
+            SessionOutboxListEvent.name,
+            {},
+            SessionOutboxListReplyEvent.name,
+            session_id=session_id,
+            timeout=10.0,
+        )
+        if isinstance(response, SessionOutboxListResponse):
+            return list(response.messages)
+        return []
+
+    async def remove_queued(self, session_id: str, message_id: str) -> bool:
+        """取消一条排队消息。"""
+        response = await self._request(
+            SessionOutboxRemoveEvent.name,
+            {"message_id": message_id},
+            SessionOutboxRemoveReplyEvent.name,
+            session_id=session_id,
+            timeout=10.0,
+        )
+        return bool(getattr(response, "removed", False))
 
     async def refresh_activity(self) -> None:
         """向 Agent 拉一次运行状态快照。

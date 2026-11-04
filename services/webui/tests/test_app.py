@@ -8,6 +8,7 @@ from contextlib import asynccontextmanager
 from typing import Any
 
 from blue_contracts_session import (
+    QueuedMessage,
     SessionActivity,
     SessionActivityPayload,
     SessionAttachment,
@@ -57,6 +58,14 @@ class FakeBackend:
                 updated_at=1_700_000_000.0,
             )
         ]
+
+    async def outbox(self, session_id: str) -> list[QueuedMessage]:
+        del session_id
+        return []
+
+    async def remove_queued(self, session_id: str, message_id: str) -> bool:
+        del session_id, message_id
+        return True
 
     async def activity(self) -> list[SessionActivity]:
         return list(self.activities)
