@@ -556,6 +556,7 @@ class AgentCore:
                         error_chars=self._settings.compact_error_chars,
                         rules=self._settings.compact_rules,
                         profiles=learn_profiles(messages),
+                        target_chars=self._settings.compact_target_chars,
                     )
                     after = estimate_chars(messages)
                     if before > after:

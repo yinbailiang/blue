@@ -17,6 +17,7 @@
   compact_text_chars: <int, range(20, 20000)> = 200
   compact_error_chars: <int, range(0, 20000)> = 600
   compact_rules: <list, each(field(tool, str)), size(0, 1024)> = []
+  compact_target_chars: <int, range(0, 10000000)> = 200000
   session_timeout: <float, positive> = 10.0
 }
 

@@ -283,6 +283,7 @@ services/<name>/service_runtime_config.json
   "compact_keep_messages": 60,
   "compact_text_chars": 200,
   "compact_error_chars": 600,
+  "compact_target_chars": 200000,
   "session_timeout": 10.0,
   "system_prompt": "你是 blue，一个通过工具完成任务的智能体。",
   "tool_timeout": 30.0
@@ -316,7 +317,13 @@ services/<name>/service_runtime_config.json
   `success` 原样保留，`stdout`/`content` 截成「开头 + `…[N chars omitted]`」，
   失败时额外保留结尾（错误通常在尾部），列表只留前几条，`write_file` 的正文
   直接省略（文件已落盘）。**只压较早的消息**，尾部 `compact_keep_messages`
-  （默认 60 条 ≈ 最近 2–3 轮）原样发送——模型正在用的工具结果不能被截断。
+  （默认 300 条）原样发送——模型正在用的工具结果不能被截断。
+- `compact_target_chars`（默认 `200000`，`0` = 不限）：提示体量的**预算**。
+  只按条数保留是不够的：1700 条历史里每条哪怕只剩 200 字，加起来也有 1 MB
+  （≈40 万 token）。超预算时从**最旧**的消息开始逐条降级成一行摘要（工具结果
+  变成「`<elided N chars> 开头`」，带 `tool_calls` 的助手消息保留调用名、参数清空，
+  配对关系不破），直到进入预算；预算压得太低时才会继续动尾部——预算是硬约束，
+  但降级到极致仍有下限（角色与结构本身也占字符）。
   只影响发给模型的副本，库里始终是完整历史，需要细节时可以再读；
 - `database_path` 为相对路径时解析到 `BLUE_STATE_DIR`，默认
   `.blue/sessions.db`；

@@ -77,6 +77,11 @@ class AgentConfig(BaseModel):
     compact_error_chars: int = Field(
         default=600, ge=0, description="失败结果额外保留的结尾字符数"
     )
+    compact_target_chars: int = Field(
+        default=200_000,
+        ge=0,
+        description="提示目标体量（字符）；超预算时把最旧的消息降级成一行，0 = 不限",
+    )
     compact_rules: list[CompactRule] = Field(
         default_factory=list[CompactRule],
         description="按工具定制的压缩规则（字段路径用 a.b 表示嵌套，tool 支持 * 通配）",

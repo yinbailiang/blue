@@ -43,6 +43,7 @@ __all__ = [
     "COMPACT_KEEP_MESSAGES",
     "COMPACT_LIST_ITEMS",
     "COMPACT_TEXT_CHARS",
+    "SLIM_CHARS",
     "CompactRule",
     "compact_history",
     "estimate_chars",
@@ -60,6 +61,9 @@ COMPACT_ERROR_CHARS = 600
 
 COMPACT_LIST_ITEMS = 3
 """列表字段保留的条数。"""
+
+SLIM_CHARS = 120
+"""预算不够、把更早的消息降级成一行时保留的开头字符数。"""
 
 MAX_DEPTH = 4
 """递归深度上限（再深的嵌套直接折叠）。"""
@@ -139,11 +143,18 @@ def compact_history(
     list_items: int = COMPACT_LIST_ITEMS,
     rules: Sequence[CompactRule] = (),
     profiles: Mapping[str, Mapping[str, FieldProfile]] | None = None,
+    target_chars: int = 0,
 ) -> list[Message]:
     """返回压缩后的历史副本；尾部 ``keep_messages`` 条原样保留。
 
+    只按「条数」保留是不够的：1700 条历史哪怕每条只剩 200 字，加起来也有几百 KB。
+    因此再加一层**预算**：``target_chars > 0`` 时，如果压完仍超预算，
+    就从最旧的消息开始逐条降级成一行摘要（工具结果只留「多少字 + 开头」），
+    直到进入预算或再没有可降级的消息。
+
     :param rules: 按工具定制的规则（优先生效）。
     :param profiles: ``工具名 → 字段画像``，来自 :class:`SchemaLearner`。
+    :param target_chars: 目标提示体量（字符）；``0`` 表示只按条数压缩。
     :return: 新列表；入参不会被修改。
     """
     source = list(messages)
@@ -157,7 +168,61 @@ def compact_history(
         tool = tools.get(message.tool_call_id or "", "")
         limits = _limits_for(tool, rules, profiles, text_chars, error_chars, list_items)
         compacted.append(_compact_message(message, tool=tool, limits=limits))
+    if target_chars > 0:
+        return _fit_budget(compacted, target_chars=target_chars)
     return compacted
+
+
+def _fit_budget(messages: list[Message], *, target_chars: int) -> list[Message]:
+    """把最旧的消息逐条降级成一行，直到整体进入预算。
+
+    从最旧往最新扫，所以尾部 ``keep_messages`` 天然最后才被动到：只要把更早的
+    消息降级就够用，最近这几条一定原样保留；实在压不下去（比如最近一条本身就是
+    几十 KB 的工具结果）才会继续往尾部降级 —— 预算是硬约束。
+
+    降到极致仍有下限：每条消息的角色、tool_call 结构、省略标记本身也要占字符，
+    所以全部降级后可能依然高于预算，此时返回的就是最省的形态。
+    """
+    total = estimate_chars(messages)
+    if total <= target_chars:
+        return messages
+    out = list(messages)
+    for index, message in enumerate(out):
+        if total <= target_chars:
+            break
+        if message.role == MessageRole.SYSTEM:
+            continue  # 系统提示永远原样
+        slim = _slim_message(message, chars=SLIM_CHARS)
+        if slim is message:
+            continue
+        total += estimate_chars([slim]) - estimate_chars([message])
+        out[index] = slim
+    return out
+
+
+def _slim_message(message: Message, *, chars: int) -> Message:
+    """把一条旧消息降级成一句摘要，但保持 tool_call 与 tool 结果仍然配对。"""
+    text = _message_text(message)
+    if message.role == MessageRole.TOOL:
+        head = " ".join(text.split())[:chars]
+        return message.model_copy(
+            update={"content": f"<elided {len(text)} chars> {head}"}
+        )
+    if message.role == MessageRole.ASSISTANT and message.tool_calls:
+        calls = [
+            ToolCall(
+                id=call.id,
+                function=FunctionCall(name=call.function.name, arguments={}),
+            )
+            for call in message.tool_calls
+        ]
+        content = f"{text[:chars]}…" if len(text) > chars else text
+        return message.model_copy(update={"content": content, "tool_calls": calls})
+    if len(text) <= chars:
+        return message
+    return message.model_copy(
+        update={"content": f"{text[:chars]}…[{len(text)} chars omitted]"}
+    )
 
 
 def learn_profiles(
