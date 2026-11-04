@@ -277,7 +277,7 @@ dev = [
 
 [[package]]
 name = "blue-contracts-session"
-version = "0.3.0"
+version = "0.4.0"
 source = { editable = "contracts/session" }
 dependencies = [
     { name = "infinity-bus", extra = ["templates"] },
@@ -309,7 +309,7 @@ requires-dist = [
 
 [[package]]
 name = "blue-service-agent"
-version = "0.3.0"
+version = "0.4.0"
 source = { editable = "services/agent" }
 dependencies = [
     { name = "blue" },
@@ -546,7 +546,7 @@ requires-dist = [
 
 [[package]]
 name = "blue-service-session"
-version = "0.3.0"
+version = "0.4.0"
 source = { editable = "services/session" }
 dependencies = [
     { name = "aiosqlite" },
@@ -671,7 +671,7 @@ requires-dist = [
 
 [[package]]
 name = "blue-service-webui"
-version = "0.3.0"
+version = "0.4.0"
 source = { editable = "services/webui" }
 dependencies = [
     { name = "blue" },

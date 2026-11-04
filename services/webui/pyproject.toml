@@ -1,6 +1,6 @@
 [project]
 name = "blue-service-webui"
-version = "0.3.0"
+version = "0.4.0"
 description = "blue agent FastAPI WebUI"
 requires-python = ">=3.14"
 dependencies = [
