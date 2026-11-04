@@ -5,10 +5,21 @@ from __future__ import annotations
 import asyncio
 from pathlib import Path
 
-from blue_service_session.db import SessionDatabase, SessionNotFoundError
+from blue_service_session.db import (
+    SessionDatabase,
+    SessionNotFoundError,
+    SessionRecord,
+)
 from infinity_agent import Message, MessageRole
 
 from blue.messages import decode_messages, encode_message
+from blue.tree import Tree
+
+
+def _chain(record: SessionRecord) -> list[Message]:
+    """当前链上的消息（会话树里被选中的那条）。"""
+    tree = Tree(record.nodes, root_current=record.meta.root_current)
+    return decode_messages(node.message for node in tree.collect(tree.chain()))
 
 
 def test_ensure_creates_system_message(tmp_path: Path) -> None:
@@ -24,7 +35,7 @@ async def _ensure_creates_system_message(tmp_path: Path) -> None:
         assert record.meta.session_id == "s1"
         assert record.meta.message_count == 1
         assert record.meta.created_at == 100.0
-        messages = decode_messages(record.messages)
+        messages = _chain(record)
         assert [message.role for message in messages] == [MessageRole.SYSTEM]
         assert messages[0].content == "系统提示"
     finally:
@@ -42,12 +53,12 @@ async def _append_update_and_reopen(tmp_path: Path) -> None:
     await db.connect()
     try:
         await db.ensure("s1", "sys", now=100.0)
-        meta = await db.append(
+        result = await db.append(
             "s1",
             [encode_message(Message.user("hi"))],
             now=101.0,
         )
-        assert meta.message_count == 2
+        assert result.meta.message_count == 2
         updated = await db.update("s1", steps=3, touch=True, now=102.0)
         assert updated.steps == 3
     finally:
@@ -59,7 +70,7 @@ async def _append_update_and_reopen(tmp_path: Path) -> None:
         record = await reopened.get("s1")
         assert record is not None
         assert record.meta.steps == 3
-        assert [message.role for message in decode_messages(record.messages)] == [
+        assert [message.role for message in _chain(record)] == [
             MessageRole.SYSTEM,
             MessageRole.USER,
         ]

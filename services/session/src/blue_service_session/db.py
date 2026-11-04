@@ -25,14 +25,17 @@ from infinity_agent import Message
 
 from blue.errors import BlueError
 from blue.messages import encode_message
+from blue.tree import ROOT_ID, Tree, pick_current
 
 logger = logging.getLogger(__name__)
 
 __all__ = [
+    "AppendResult",
     "AttachmentRecord",
     "PruneResult",
     "SessionDatabase",
     "SessionMeta",
+    "SessionNodeRecord",
     "SessionNotFoundError",
     "SessionRecord",
 ]
@@ -43,12 +46,15 @@ CREATE TABLE IF NOT EXISTS sessions (
     created_at REAL NOT NULL,
     updated_at REAL NOT NULL,
     steps INTEGER NOT NULL DEFAULT 0,
-    message_count INTEGER NOT NULL DEFAULT 0
+    message_count INTEGER NOT NULL DEFAULT 0,
+    root_current_id INTEGER
 );
 
 CREATE TABLE IF NOT EXISTS messages (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     session_id TEXT NOT NULL REFERENCES sessions(session_id) ON DELETE CASCADE,
+    parent_id INTEGER NOT NULL DEFAULT 0,
+    current_id INTEGER,
     payload TEXT NOT NULL,
     created_at REAL NOT NULL
 );
@@ -89,8 +95,13 @@ CREATE INDEX IF NOT EXISTS idx_session_outbox_session
     ON session_outbox(session_id, created_at);
 """
 
-_SCHEMA_VERSION = 3
-"""schema 版本；所有建表语句都是 ``IF NOT EXISTS``，老库按需补表即可。"""
+_SCHEMA_VERSION = 4
+"""schema 版本；所有建表语句都是 ``IF NOT EXISTS``，老库按需补列/补表即可。
+
+版本 4 引入对话树：``messages`` 多了 ``parent_id`` / ``current_id``，
+``sessions`` 多了 ``root_current_id``。老库升级时按「一条单链」回填：
+前一条是父、后一条是选中分支，历史顺序与升级前完全一致。
+"""
 
 
 class SessionNotFoundError(BlueError):
@@ -106,6 +117,8 @@ class SessionMeta:
     updated_at: float
     steps: int
     message_count: int
+    root_current: int | None = None
+    """根当前选中的顶层分支（第一条消息那一层）。"""
 
 
 @dataclass(frozen=True)
@@ -119,11 +132,36 @@ class AttachmentRecord:
 
 
 @dataclass(frozen=True)
+class SessionNodeRecord:
+    """会话树里的一个节点：一条消息 + 它在树里的位置。
+
+    ``parent`` 为 :data:`blue.tree.ROOT_ID` 表示挂在会话根上；``current`` 是
+    该节点当前选中的子节点，``None`` 表示它是叶子。
+    """
+
+    id: int
+    parent: int
+    current: int | None
+    message: str
+    """``blue.messages`` 编码后的消息 JSON 文本。"""
+
+    created_at: float
+
+
+@dataclass(frozen=True)
 class SessionRecord:
-    """会话完整记录；消息为 ``blue.messages`` 编码后的 JSON 文本。"""
+    """会话完整记录：整棵树（不只是当前链）。"""
 
     meta: SessionMeta
-    messages: list[str]
+    nodes: list[SessionNodeRecord] = field(default_factory=list[SessionNodeRecord])
+
+
+@dataclass(frozen=True)
+class AppendResult:
+    """一次追加的结果：新元信息 + 新节点的 id（按插入顺序）。"""
+
+    meta: SessionMeta
+    nodes: list[int] = field(default_factory=list[int])
 
 
 @dataclass(frozen=True)
@@ -225,20 +263,25 @@ class SessionDatabase:
                 created = cursor.rowcount > 0
                 if created and system_prompt:
                     payload = encode_message(Message.system(system_prompt))
-                    await connection.execute(
+                    inserted = await connection.execute(
                         """
-                        INSERT INTO messages (session_id, payload, created_at)
-                        VALUES (?, ?, ?)
+                        INSERT INTO messages
+                            (session_id, parent_id, payload, created_at)
+                        VALUES (?, ?, ?, ?)
                         """,
-                        (session_id, payload, now),
+                        (session_id, ROOT_ID, payload, now),
                     )
+                    system_id = inserted.lastrowid
+                    await inserted.close()
+                    # system 消息就是根的第一条分支：之后所有消息都挂在它下面
                     await connection.execute(
                         """
                         UPDATE sessions
-                           SET message_count = 1
+                           SET message_count = 1,
+                               root_current_id = ?
                          WHERE session_id = ?
                         """,
-                        (session_id,),
+                        (system_id, session_id),
                     )
                 await self._enforce_capacity_locked(connection, now=now)
                 await connection.commit()
@@ -317,12 +360,22 @@ class SessionDatabase:
         *,
         now: float,
         attachments: Iterable[tuple[str, str, bytes]] = (),
-    ) -> SessionMeta:
-        """追加消息（可同时落库它们引用的附件）并刷新 updated_at。"""
+        parent: int | None = None,
+    ) -> AppendResult:
+        """追加消息（可同时落库它们引用的附件）并刷新 updated_at。
+
+        这批消息自动串成一条链：第 k 条挂在第 k-1 条下，所以
+        ``assistant + 它的工具结果`` 是一次原子提交的一整段分支。
+        ``parent`` 只决定第一个节点的挂载点；``None`` 表示当前链末端（正常发言），
+        显式给出则是在那条消息下开新分支（编辑 / 重试）。
+
+        :raises SessionNotFoundError: 会话不存在
+        :raises TreeError: 挂载点不存在（已过期或被删）
+        """
         blobs = list(attachments)
         if not payloads and not blobs:
             meta = await self.meta(session_id)
-            return meta
+            return AppendResult(meta=meta)
 
         async with self._lock:
             connection = self._connection_or_raise()
@@ -332,18 +385,30 @@ class SessionDatabase:
                 if meta is None:
                     raise SessionNotFoundError(f"会话不存在：{session_id}")
                 await self._upsert_attachments_locked(blobs, now=now)
+                mount = await self._resolve_mount_locked(connection, meta, parent)
+                new_ids: list[int] = []
+                previous = mount
                 for payload in payloads:
-                    cursor = await connection.execute(
+                    inserted = await connection.execute(
                         """
-                        INSERT INTO messages (session_id, payload, created_at)
-                        VALUES (?, ?, ?)
+                        INSERT INTO messages
+                            (session_id, parent_id, payload, created_at)
+                        VALUES (?, ?, ?, ?)
                         """,
-                        (session_id, payload, now),
+                        (session_id, previous, payload, now),
                     )
-                    message_id = cursor.lastrowid
-                    await cursor.close()
-                    if message_id is not None:
-                        await self._link_attachments_locked(int(message_id), payload)
+                    row_id = inserted.lastrowid
+                    await inserted.close()
+                    if row_id is None:
+                        raise RuntimeError("插入消息后拿不到 rowid")
+                    node_id = int(row_id)
+                    # 新分支立刻成为父节点的当前分支
+                    await self._select_child_locked(
+                        connection, session_id, previous, node_id
+                    )
+                    await self._link_attachments_locked(node_id, payload)
+                    previous = node_id
+                    new_ids.append(node_id)
                 if payloads:
                     await connection.execute(
                         """
@@ -361,7 +426,85 @@ class SessionDatabase:
             updated = await self._meta_locked(session_id)
         if updated is None:
             raise SessionNotFoundError(f"会话不存在：{session_id}")
+        return AppendResult(meta=updated, nodes=new_ids)
+
+    async def set_current(self, session_id: str, node_id: int) -> SessionMeta:
+        """切换当前分支：把该节点的父节点指针指到它。
+
+        只动指针，不动任何消息——这正是「分支切换不丢历史」的原因。
+
+        :raises SessionNotFoundError: 会话不存在
+        :raises TreeError: 节点不存在
+        """
+        async with self._lock:
+            connection = self._connection_or_raise()
+            await connection.execute("BEGIN IMMEDIATE")
+            try:
+                meta = await self._meta_locked(session_id)
+                if meta is None:
+                    raise SessionNotFoundError(f"会话不存在：{session_id}")
+                tree = await self._tree_locked(connection, meta)
+                node = tree.require(node_id)
+                await self._select_child_locked(
+                    connection, session_id, node.parent, node.id
+                )
+                await connection.commit()
+            except Exception:
+                await connection.rollback()
+                raise
+            updated = await self._meta_locked(session_id)
+        if updated is None:
+            raise SessionNotFoundError(f"会话不存在：{session_id}")
         return updated
+
+    async def delete_node(self, session_id: str, node_id: int, *, now: float) -> int:
+        """删除一条分支：该节点与其全部后代一起消失。
+
+        父节点若选中的正是被删分支，则回落到剩下的最后一个孩子（最新分支）。
+
+        :return: 删除的节点数（含后代）
+        :raises SessionNotFoundError: 会话不存在
+        :raises TreeError: 节点不存在
+        """
+        async with self._lock:
+            connection = self._connection_or_raise()
+            await connection.execute("BEGIN IMMEDIATE")
+            try:
+                meta = await self._meta_locked(session_id)
+                if meta is None:
+                    raise SessionNotFoundError(f"会话不存在：{session_id}")
+                tree = await self._tree_locked(connection, meta)
+                node = tree.require(node_id)
+                doomed = tree.subtree(node_id)
+                doomed_set = set(doomed)
+                placeholders = ",".join("?" * len(doomed))
+                await connection.execute(
+                    "DELETE FROM messages"
+                    f" WHERE session_id = ? AND id IN ({placeholders})",
+                    (session_id, *doomed),
+                )
+                remaining = [
+                    child
+                    for child in tree.children(node.parent)
+                    if child not in doomed_set
+                ]
+                await self._select_child_locked(
+                    connection, session_id, node.parent, pick_current(remaining)
+                )
+                await connection.execute(
+                    """
+                    UPDATE sessions
+                       SET updated_at = ?,
+                           message_count = MAX(message_count - ?, 0)
+                     WHERE session_id = ?
+                    """,
+                    (now, len(doomed), session_id),
+                )
+                await connection.commit()
+            except Exception:
+                await connection.rollback()
+                raise
+        return len(doomed)
 
     async def meta(self, session_id: str) -> SessionMeta:
         """读取会话元信息。
@@ -504,40 +647,177 @@ class SessionDatabase:
             )
         if version == _SCHEMA_VERSION:
             return
-        # 建表语句全是 IF NOT EXISTS：老库只需补缺失的表，不需要重写数据
+        # 建表语句全是 IF NOT EXISTS：老库只需补缺失的表与列，不需要重写数据
         await connection.executescript(_SCHEMA)
+        if await self._add_tree_columns(connection):
+            # 老库只有线性顺序：按「前一条是父、后一条是选中分支」补成一条单链
+            await self._backfill_linear_tree(connection)
         await connection.execute(f"PRAGMA user_version = {_SCHEMA_VERSION}")
+
+    async def _add_tree_columns(self, connection: aiosqlite.Connection) -> bool:
+        """给 v4 之前的老库补上树形列。
+
+        :return: 是否真的补了列（补了说明库里有线性数据要回填指针）
+        """
+        added = False
+        message_columns = await _table_columns(connection, "messages")
+        if "parent_id" not in message_columns:
+            await connection.execute(
+                "ALTER TABLE messages ADD COLUMN parent_id INTEGER NOT NULL DEFAULT 0"
+            )
+            added = True
+        if "current_id" not in message_columns:
+            await connection.execute(
+                "ALTER TABLE messages ADD COLUMN current_id INTEGER"
+            )
+            added = True
+        session_columns = await _table_columns(connection, "sessions")
+        if "root_current_id" not in session_columns:
+            await connection.execute(
+                "ALTER TABLE sessions ADD COLUMN root_current_id INTEGER"
+            )
+        # 索引必须在这里建：老库的 messages 表要先补好列才能引用 parent_id，
+        # 所以它不能写在 _SCHEMA 里（executescript 会先于补列执行）
+        await connection.execute(
+            "CREATE INDEX IF NOT EXISTS idx_messages_parent"
+            " ON messages(session_id, parent_id)"
+        )
+        return added
+
+    async def _backfill_linear_tree(self, connection: aiosqlite.Connection) -> None:
+        """把线性历史原样折成一条单链：顺序不变，只是补出父子与选中指针。"""
+        cursor = await connection.execute(
+            "SELECT session_id, id FROM messages ORDER BY session_id, id"
+        )
+        rows = await cursor.fetchall()
+        await cursor.close()
+        grouped: dict[str, list[int]] = {}
+        for row in rows:
+            grouped.setdefault(str(row["session_id"]), []).append(int(row["id"]))
+        if not grouped:
+            return
+        updates: list[tuple[int, int | None, int]] = []
+        roots: list[tuple[int, str]] = []
+        for session_id, ids in grouped.items():
+            for index, node_id in enumerate(ids):
+                parent = ids[index - 1] if index else ROOT_ID
+                current = ids[index + 1] if index + 1 < len(ids) else None
+                updates.append((parent, current, node_id))
+            roots.append((ids[0], session_id))
+        await connection.execute("BEGIN IMMEDIATE")
+        try:
+            await connection.executemany(
+                "UPDATE messages SET parent_id = ?, current_id = ? WHERE id = ?",
+                updates,
+            )
+            await connection.executemany(
+                "UPDATE sessions SET root_current_id = ? WHERE session_id = ?",
+                roots,
+            )
+            await connection.commit()
+        except Exception:
+            await connection.rollback()
+            raise
+        logger.info(
+            "会话库已升级到 schema %s：%s 个会话 / %s 条消息折成单链",
+            _SCHEMA_VERSION,
+            len(grouped),
+            len(updates),
+        )
 
     async def _record_locked(self, session_id: str) -> SessionRecord | None:
         meta = await self._meta_locked(session_id)
         if meta is None:
             return None
         connection = self._connection_or_raise()
+        return SessionRecord(
+            meta=meta, nodes=await self._nodes_locked(connection, session_id)
+        )
+
+    async def _nodes_locked(
+        self, connection: aiosqlite.Connection, session_id: str
+    ) -> list[SessionNodeRecord]:
+        """按 id 升序读出该会话的全部节点。"""
         cursor = await connection.execute(
             """
-            SELECT payload FROM messages
+            SELECT id, parent_id, current_id, payload, created_at
+              FROM messages
              WHERE session_id = ?
              ORDER BY id
             """,
             (session_id,),
         )
         rows = await cursor.fetchall()
-        return SessionRecord(
-            meta=meta,
-            messages=[str(row["payload"]) for row in rows],
-        )
+        await cursor.close()
+        return [
+            SessionNodeRecord(
+                id=int(row["id"]),
+                parent=int(row["parent_id"]),
+                current=None if row["current_id"] is None else int(row["current_id"]),
+                message=str(row["payload"]),
+                created_at=float(row["created_at"]),
+            )
+            for row in rows
+        ]
+
+    async def _tree_locked(
+        self, connection: aiosqlite.Connection, meta: SessionMeta
+    ) -> Tree[SessionNodeRecord]:
+        """事务内的树视图（节点 + 根指针）。"""
+        nodes = await self._nodes_locked(connection, meta.session_id)
+        return Tree(nodes, root_current=meta.root_current)
+
+    async def _resolve_mount_locked(
+        self,
+        connection: aiosqlite.Connection,
+        meta: SessionMeta,
+        parent: int | None,
+    ) -> int:
+        """新消息该挂在谁下面：显式 ``parent`` 优先，否则挂到当前链末端。
+
+        :raises TreeError: 显式给出的挂载点不存在
+        """
+        if parent is not None and parent != ROOT_ID:
+            tree = await self._tree_locked(connection, meta)
+            tree.require(parent)
+            return parent
+        if parent == ROOT_ID:
+            return ROOT_ID
+        tree = await self._tree_locked(connection, meta)
+        return tree.leaf() or ROOT_ID
+
+    async def _select_child_locked(
+        self,
+        connection: aiosqlite.Connection,
+        session_id: str,
+        parent: int,
+        child: int | None,
+    ) -> None:
+        """把 ``parent`` 的当前分支指向 ``child``（``None`` 表示取消选中）。"""
+        if parent == ROOT_ID:
+            await connection.execute(
+                "UPDATE sessions SET root_current_id = ? WHERE session_id = ?",
+                (child, session_id),
+            )
+        else:
+            await connection.execute(
+                "UPDATE messages SET current_id = ? WHERE id = ? AND session_id = ?",
+                (child, parent, session_id),
+            )
 
     async def _meta_locked(self, session_id: str) -> SessionMeta | None:
         connection = self._connection_or_raise()
         cursor = await connection.execute(
             """
-            SELECT session_id, created_at, updated_at, steps, message_count
+            SELECT session_id, created_at, updated_at, steps, message_count,
+                   root_current_id
               FROM sessions
              WHERE session_id = ?
             """,
             (session_id,),
         )
         row = await cursor.fetchone()
+        await cursor.close()
         if row is None:
             return None
         return SessionMeta(
@@ -546,6 +826,9 @@ class SessionDatabase:
             updated_at=float(row["updated_at"]),
             steps=int(row["steps"]),
             message_count=int(row["message_count"]),
+            root_current=(
+                None if row["root_current_id"] is None else int(row["root_current_id"])
+            ),
         )
 
     async def _enforce_capacity_locked(
@@ -750,6 +1033,14 @@ class SessionDatabase:
         if self._connection is None:
             raise RuntimeError("会话数据库尚未连接")
         return self._connection
+
+
+async def _table_columns(connection: aiosqlite.Connection, table: str) -> set[str]:
+    """读取表的列名（迁移时判断要不要补列）。"""
+    cursor = await connection.execute(f"PRAGMA table_info({table})")
+    rows = await cursor.fetchall()
+    await cursor.close()
+    return {str(row["name"]) for row in rows}
 
 
 def _queued_from_row(

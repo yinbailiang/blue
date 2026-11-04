@@ -118,8 +118,8 @@ async def _append_missing_blob(tmp_path: Path) -> None:
     try:
         await db.ensure("s1", "系统", now=100.0)
         payload = _message_with_attachment("f" * 64)
-        meta = await db.append("s1", [payload], now=110.0)
-        assert meta.message_count == 2
+        result = await db.append("s1", [payload], now=110.0)
+        assert result.meta.message_count == 2
 
         connection = db._connection_or_raise()  # pyright: ignore[reportPrivateUsage]
         cursor = await connection.execute("SELECT COUNT(*) FROM message_attachments")
@@ -203,7 +203,7 @@ async def _schema_version(tmp_path: Path) -> None:
         cursor = await connection.execute("PRAGMA user_version")
         row = await cursor.fetchone()
         await cursor.close()
-        assert row is not None and row[0] == 3
+        assert row is not None and row[0] == 4
 
         digest, mime, data = _blob()
         await db.put_attachments([(digest, mime, data)], now=100.0)

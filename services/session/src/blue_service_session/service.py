@@ -23,11 +23,20 @@ from blue_contracts_session import (
     SessionAttachmentGetRequest,
     SessionAttachmentReplyEvent,
     SessionAttachmentResponse,
+    SessionBranchActivateEvent,
+    SessionBranchActivateReplyEvent,
+    SessionBranchActivateRequest,
+    SessionBranchActivateResponse,
     SessionGetEvent,
     SessionGetReplyEvent,
     SessionGetRequest,
     SessionGetResponse,
     SessionInfo,
+    SessionNode,
+    SessionNodeDeleteEvent,
+    SessionNodeDeleteReplyEvent,
+    SessionNodeDeleteRequest,
+    SessionNodeDeleteResponse,
     SessionOutboxClaimEvent,
     SessionOutboxClaimReplyEvent,
     SessionOutboxClaimRequest,
@@ -66,11 +75,14 @@ from pydantic import BaseModel
 
 from blue.errors import BlueError
 from blue.transport import BusRuntime
+from blue.tree import Tree, TreeError
 from blue_service_session.config import SessionConfig
 from blue_service_session.db import (
+    AppendResult,
     AttachmentRecord,
     SessionDatabase,
     SessionMeta,
+    SessionNodeRecord,
     SessionNotFoundError,
     SessionRecord,
 )
@@ -96,7 +108,8 @@ class SessionBackend(Protocol):
         session_id: str,
         payloads: list[str],
         attachments: Iterable[SessionAttachmentBlob] = (),
-    ) -> SessionMeta:
+        parent: int | None = None,
+    ) -> AppendResult:
         """追加消息（可同时落库附件）。"""
         ...
 
@@ -137,6 +150,14 @@ class SessionBackend(Protocol):
 
     async def reset(self, session_id: str) -> bool:
         """删除会话。"""
+        ...
+
+    async def set_current(self, session_id: str, node_id: int) -> SessionMeta:
+        """切换当前分支。"""
+        ...
+
+    async def delete_node(self, session_id: str, node_id: int) -> int:
+        """删除节点及其后代，返回删除条数。"""
         ...
 
     async def state(self) -> list[SessionInfo]:
@@ -212,14 +233,15 @@ class SessionService:
         session_id: str,
         payloads: list[str],
         attachments: Iterable[SessionAttachmentBlob] = (),
-    ) -> SessionMeta:
+        parent: int | None = None,
+    ) -> AppendResult:
         """追加消息；附件与消息在同一事务里落库。
 
         :raises SessionAttachmentError: 附件超限、base64 损坏或哈希不匹配
         """
         blobs = self._decode_attachments(list(attachments))
         return await self._db.append(
-            session_id, payloads, now=time.time(), attachments=blobs
+            session_id, payloads, now=time.time(), attachments=blobs, parent=parent
         )
 
     async def get_attachment(self, digest: str) -> AttachmentRecord | None:
@@ -263,6 +285,14 @@ class SessionService:
     async def reset(self, session_id: str) -> bool:
         """删除会话。"""
         return await self._db.reset(session_id)
+
+    async def set_current(self, session_id: str, node_id: int) -> SessionMeta:
+        """切换当前分支。"""
+        return await self._db.set_current(session_id, node_id)
+
+    async def delete_node(self, session_id: str, node_id: int) -> int:
+        """删除一条分支（节点 + 后代）。"""
+        return await self._db.delete_node(session_id, node_id, now=time.time())
 
     async def state(self) -> list[SessionInfo]:
         """列出会话。"""
@@ -342,6 +372,8 @@ class SessionRpcHandler(EventHandler):
             subscriptions=[
                 SessionGetEvent.name,
                 SessionAppendEvent.name,
+                SessionBranchActivateEvent.name,
+                SessionNodeDeleteEvent.name,
                 SessionUpdateEvent.name,
                 SessionResetEvent.name,
                 SessionStateEvent.name,
@@ -366,6 +398,10 @@ class SessionRpcHandler(EventHandler):
             await self._handle_get(payload, bus_proxy)
         elif isinstance(payload, SessionAppendRequest):
             await self._handle_append(payload, bus_proxy)
+        elif isinstance(payload, SessionBranchActivateRequest):
+            await self._handle_branch_activate(payload, bus_proxy)
+        elif isinstance(payload, SessionNodeDeleteRequest):
+            await self._handle_node_delete(payload, bus_proxy)
         elif isinstance(payload, SessionUpdateRequest):
             await self._handle_update(payload, bus_proxy)
         elif isinstance(payload, SessionResetRequest):
@@ -486,16 +522,20 @@ class SessionRpcHandler(EventHandler):
         self, payload: SessionAppendRequest, bus_proxy: EventBus.Proxy
     ) -> None:
         try:
-            meta = await self._backend.append(
-                payload.session_id, payload.messages, payload.attachments
+            result = await self._backend.append(
+                payload.session_id,
+                payload.messages,
+                payload.attachments,
+                payload.parent,
             )
             reply = SessionAppendResponse(
                 session_id=payload.session_id,
                 request_id=payload.request_id,
-                message_count=meta.message_count,
-                updated_at=meta.updated_at,
+                message_count=result.meta.message_count,
+                updated_at=result.meta.updated_at,
+                nodes=result.nodes,
             )
-        except (SessionNotFoundError, SessionAttachmentError) as error:
+        except (SessionNotFoundError, SessionAttachmentError, TreeError) as error:
             reply = SessionAppendResponse(
                 session_id=payload.session_id,
                 request_id=payload.request_id,
@@ -503,6 +543,45 @@ class SessionRpcHandler(EventHandler):
                 error_msg=str(error),
             )
         await bus_proxy.publish(SessionAppendReplyEvent.name, reply)
+
+    async def _handle_branch_activate(
+        self, payload: SessionBranchActivateRequest, bus_proxy: EventBus.Proxy
+    ) -> None:
+        """切换当前分支：只改指针，不动任何消息。"""
+        try:
+            await self._backend.set_current(payload.session_id, payload.node)
+            reply = SessionBranchActivateResponse(
+                session_id=payload.session_id,
+                request_id=payload.request_id,
+            )
+        except (SessionNotFoundError, TreeError) as error:
+            reply = SessionBranchActivateResponse(
+                session_id=payload.session_id,
+                request_id=payload.request_id,
+                success=False,
+                error_msg=str(error),
+            )
+        await bus_proxy.publish(SessionBranchActivateReplyEvent.name, reply)
+
+    async def _handle_node_delete(
+        self, payload: SessionNodeDeleteRequest, bus_proxy: EventBus.Proxy
+    ) -> None:
+        """删除一条分支（节点与其后代）。"""
+        try:
+            removed = await self._backend.delete_node(payload.session_id, payload.node)
+            reply = SessionNodeDeleteResponse(
+                session_id=payload.session_id,
+                request_id=payload.request_id,
+                removed=removed,
+            )
+        except (SessionNotFoundError, TreeError) as error:
+            reply = SessionNodeDeleteResponse(
+                session_id=payload.session_id,
+                request_id=payload.request_id,
+                success=False,
+                error_msg=str(error),
+            )
+        await bus_proxy.publish(SessionNodeDeleteReplyEvent.name, reply)
 
     async def _handle_update(
         self, payload: SessionUpdateRequest, bus_proxy: EventBus.Proxy
@@ -591,10 +670,23 @@ class SessionRpcHandler(EventHandler):
 
 
 def _snapshot(record: SessionRecord) -> SessionSnapshot:
+    """把数据库记录转成线上快照：整棵树 + 当前链。"""
     meta = record.meta
+    tree: Tree[SessionNodeRecord] = Tree(record.nodes, root_current=meta.root_current)
     return SessionSnapshot(
         session_id=meta.session_id,
-        messages=record.messages,
+        nodes=[
+            SessionNode(
+                id=node.id,
+                parent=node.parent,
+                current=node.current,
+                message=node.message,
+                created_at=node.created_at,
+            )
+            for node in record.nodes
+        ],
+        current=tree.chain(),
+        root_current=meta.root_current,
         created_at=meta.created_at,
         updated_at=meta.updated_at,
         steps=meta.steps,

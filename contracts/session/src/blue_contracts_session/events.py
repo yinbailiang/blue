@@ -28,6 +28,10 @@ __all__ = [
     "SessionAttachmentBlob",
     "SessionAttachmentGetRequest",
     "SessionAttachmentResponse",
+    "SessionBranchActivateEvent",
+    "SessionBranchActivateReplyEvent",
+    "SessionBranchActivateRequest",
+    "SessionBranchActivateResponse",
     "SessionCancelEvent",
     "SessionCancelReplyEvent",
     "SessionCancelRequest",
@@ -37,6 +41,11 @@ __all__ = [
     "SessionGetRequest",
     "SessionGetResponse",
     "SessionInfo",
+    "SessionNode",
+    "SessionNodeDeleteEvent",
+    "SessionNodeDeleteReplyEvent",
+    "SessionNodeDeleteRequest",
+    "SessionNodeDeleteResponse",
     "SessionPromptEvent",
     "SessionPromptRequest",
     "SessionReplyEvent",
@@ -82,20 +91,34 @@ class SessionAttachmentBlob(BaseModel):
 
 
 class SessionPromptRequest(RequestProtocol):
-    """用户向某个会话投递一条消息（可携带附件）。"""
+    """用户向某个会话投递一条消息（可携带附件）。
+
+    对话树语义由两个字段表达：
+
+    - ``parent``：新用户消息挂在哪个节点下；``None`` 表示挂到当前链末端，
+      于是「正常发言」什么都不用传，「在某条消息下开新分支」才显式指定；
+    - ``regenerate``：不追加用户消息，直接在 ``parent`` 下生成一条新回复。
+      重试某条回复就是它——新回复成为同级分支，旧的留着。
+    """
 
     text: str = Field(default="", description="用户消息；与 attachments 至少给一个")
     attachments: list[SessionAttachment] = Field(
         default_factory=list[SessionAttachment], description="内联附件"
     )
+    parent: int | None = Field(
+        default=None, description="新用户消息的父节点；None 表示当前链末端"
+    )
+    regenerate: bool = Field(
+        default=False, description="只生成回复、不追加用户消息（重试 / 换分支）"
+    )
 
     @model_validator(mode="after")
     def validate_content(self) -> SessionPromptRequest:
-        """文本与附件不能同时为空。
+        """文本与附件不能同时为空（重试时不需要新消息，故豁免）。
 
-        :raises ValueError: 两者都为空
+        :raises ValueError: 两者都为空且不是重试
         """
-        if not self.text.strip() and not self.attachments:
+        if not self.regenerate and not self.text.strip() and not self.attachments:
             raise ValueError("text 与 attachments 至少要有一个")
         return self
 
@@ -137,17 +160,42 @@ class SessionInfo(BaseModel):
     updated_at: float = Field(description="最后更新时间（epoch 秒）")
 
 
+class SessionNode(BaseModel):
+    """会话树中的一个节点：一条消息 + 它在树里的位置。
+
+    消息本身仍是``blue.messages`` 编码的 JSON 文本，树只负责「谁挂在谁下面」。
+    ``parent`` 用 ``0`` 表示会话根（也就是第一条消息的父节点），因此不需要
+    「空挂载点」这种特殊情况。
+    """
+
+    id: int = Field(description="节点 id；会话内唯一，按创建顺序递增")
+    parent: int = Field(default=0, description="父节点 id；0 表示会话根")
+    current: int | None = Field(
+        default=None, description="当前选中的子节点；None 表示这是叶子"
+    )
+    message: str = Field(description="Message JSON 文本")
+    created_at: float = Field(default=0.0, description="创建时间（epoch 秒）")
+
+
 class SessionSnapshot(BaseModel):
-    """会话完整快照；消息以 JSON 文本传输，避免 Message 字段序列化歧义。"""
+    """会话完整快照：整棵树 + 当前链。
+
+    ``current`` 是派生字段（从根沿 ``current`` 走到叶的节点 id），界面直接照它
+    渲染；``nodes`` 是全部节点，含未被选中的分支，用于画分支切换条。
+    """
 
     session_id: str = Field(description="会话 ID")
-    messages: list[str] = Field(
-        default_factory=list[str], description="Message JSON 文本列表"
+    nodes: list[SessionNode] = Field(
+        default_factory=list[SessionNode], description="全部节点，按 id 升序"
     )
+    current: list[int] = Field(
+        default_factory=list[int], description="当前链的节点 id（早 → 新）"
+    )
+    root_current: int | None = Field(default=None, description="根当前选中的顶层分支")
     created_at: float = Field(description="创建时间（epoch 秒）")
     updated_at: float = Field(description="最后更新时间（epoch 秒）")
     steps: int = Field(default=0, description="最近一轮消耗的模型步数")
-    message_count: int = Field(default=0, description="消息条数")
+    message_count: int = Field(default=0, description="节点总数")
 
 
 class StreamToolCall(BaseModel):
@@ -274,7 +322,11 @@ class SessionGetResponse(ResponseProtocol):
 
 
 class SessionAppendRequest(RequestProtocol):
-    """向会话追加消息（可同时提交消息引用的附件负载）。"""
+    """向会话追加消息（可同时提交消息引用的附件负载）。
+
+    一次追加的若干条消息自动串成一条链（第 k 条的父节点是第 k-1 条），
+    ``parent`` 只决定第一个节点挂在谁下面；追加完这条链就是新的当前分支。
+    """
 
     messages: list[str] = Field(
         default_factory=list[str], description="Message JSON 文本列表"
@@ -283,6 +335,9 @@ class SessionAppendRequest(RequestProtocol):
         default_factory=list[SessionAttachmentBlob],
         description="消息里引用的附件负载（按哈希去重后落库）",
     )
+    parent: int | None = Field(
+        default=None, description="首个消息的父节点；None 表示当前链末端"
+    )
 
 
 class SessionAppendResponse(ResponseProtocol):
@@ -290,6 +345,9 @@ class SessionAppendResponse(ResponseProtocol):
 
     message_count: int = Field(default=0, description="追加后的消息总数")
     updated_at: float = Field(default=0.0, description="最后更新时间")
+    nodes: list[int] = Field(
+        default_factory=list[int], description="新节点的 id（按插入顺序）"
+    )
 
 
 class SessionUpdateRequest(RequestProtocol):
@@ -333,6 +391,56 @@ class SessionAppendReplyEvent(EventDeclaration):
 
     name = "session.append.reply"
     payload_type = SessionAppendResponse
+
+
+class SessionBranchActivateRequest(RequestProtocol):
+    """切换当前查看的分支：把该节点的父节点指针指到它。"""
+
+    node: int = Field(description="要切换到的节点 id（它将成为父节点的当前分支）")
+
+
+class SessionBranchActivateResponse(ResponseProtocol):
+    """切换结果。"""
+
+
+class SessionBranchActivateEvent(EventDeclaration):
+    """分支切换请求事件。"""
+
+    name = "session.branch.activate"
+    payload_type = SessionBranchActivateRequest
+
+
+class SessionBranchActivateReplyEvent(EventDeclaration):
+    """分支切换响应事件。"""
+
+    name = "session.branch.activate.reply"
+    payload_type = SessionBranchActivateResponse
+
+
+class SessionNodeDeleteRequest(RequestProtocol):
+    """删除一条分支：该节点连同它的全部后代一起消失。"""
+
+    node: int = Field(description="要删除的节点 id")
+
+
+class SessionNodeDeleteResponse(ResponseProtocol):
+    """删除结果。"""
+
+    removed: int = Field(default=0, description="删除的节点数（含后代）")
+
+
+class SessionNodeDeleteEvent(EventDeclaration):
+    """节点删除请求事件。"""
+
+    name = "session.node.delete"
+    payload_type = SessionNodeDeleteRequest
+
+
+class SessionNodeDeleteReplyEvent(EventDeclaration):
+    """节点删除响应事件。"""
+
+    name = "session.node.delete.reply"
+    payload_type = SessionNodeDeleteResponse
 
 
 class SessionUpdateEvent(EventDeclaration):
@@ -564,6 +672,10 @@ EVENTS: tuple[type[EventDeclaration], ...] = (
     SessionGetReplyEvent,
     SessionAppendEvent,
     SessionAppendReplyEvent,
+    SessionBranchActivateEvent,
+    SessionBranchActivateReplyEvent,
+    SessionNodeDeleteEvent,
+    SessionNodeDeleteReplyEvent,
     SessionUpdateEvent,
     SessionUpdateReplyEvent,
     SessionStreamEvent,

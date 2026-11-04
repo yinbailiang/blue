@@ -15,6 +15,7 @@ from blue_contracts_session import (
     SessionResetEvent,
     SessionResetReplyEvent,
     SessionResetResponse,
+    SessionSnapshot,
     SessionStateEvent,
     SessionStateReplyEvent,
     SessionStateResponse,
@@ -30,6 +31,13 @@ from tests.support import make_runtime
 
 from blue.messages import decode_messages, encode_message
 from blue.transport import MemoryFanout
+from blue.tree import Tree
+
+
+def _chain(snapshot: SessionSnapshot) -> list[Message]:
+    """快照里当前链上的消息。"""
+    tree = Tree(snapshot.nodes, root_current=snapshot.root_current)
+    return decode_messages(node.message for node in tree.collect(tree.chain()))
 
 
 def test_session_rpc_roundtrip(tmp_path: Path) -> None:
@@ -61,7 +69,7 @@ async def _session_rpc_roundtrip(tmp_path: Path) -> None:
         assert isinstance(got, SessionGetResponse)
         assert got.success is True
         assert got.session is not None
-        messages = decode_messages(got.session.messages)
+        messages = _chain(got.session)
         assert [message.role for message in messages] == [MessageRole.SYSTEM]
 
         appended = await request(
