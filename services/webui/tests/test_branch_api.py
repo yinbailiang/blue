@@ -116,3 +116,26 @@ def test_empty_message_is_rejected_unless_regenerating() -> None:
     assert client.post("/api/chat", json={"session_id": "s1"}).status_code == 422
     allowed = client.post("/api/chat", json={"session_id": "s1", "regenerate": True})
     assert allowed.status_code == 200
+
+
+def test_rename_branch_sets_label() -> None:
+    """PATCH /branches/{node} 给分支起名，视图里能读到。"""
+    client, backend = _client()
+    response: Any = client.patch(
+        "/api/sessions/s1/branches/3", json={"label": "  严谨 版 "}
+    )
+    assert response.status_code == 200
+    assert backend.label_calls == [(3, "  严谨 版 ")]
+    payload = response.json()
+    labels = {node["id"]: node["label"] for node in payload["nodes"]}
+    assert labels[3] == "严谨 版"
+
+
+def test_rename_branch_clears_label() -> None:
+    """传空串 = 恢复序号显示。"""
+    client, _ = _client()
+    client.patch("/api/sessions/s1/branches/3", json={"label": "临时"})
+    response: Any = client.patch("/api/sessions/s1/branches/3", json={"label": ""})
+    assert response.status_code == 200
+    labels = {node["id"]: node["label"] for node in response.json()["nodes"]}
+    assert labels[3] == ""

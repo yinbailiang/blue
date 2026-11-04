@@ -41,6 +41,7 @@ from blue.tree import ROOT_ID, Tree, pick_current
 logger = logging.getLogger(__name__)
 
 __all__ = [
+    "LABEL_LIMIT",
     "AppendResult",
     "AttachmentRecord",
     "PruneResult",
@@ -67,6 +68,7 @@ CREATE TABLE IF NOT EXISTS messages (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     session_id TEXT NOT NULL REFERENCES sessions(session_id) ON DELETE CASCADE,
     parent_id INTEGER NOT NULL DEFAULT 0,
+    label TEXT NOT NULL DEFAULT '',
     current_id INTEGER,
     payload TEXT NOT NULL,
     created_at REAL NOT NULL
@@ -113,7 +115,10 @@ CREATE INDEX IF NOT EXISTS idx_session_outbox_session
     ON session_outbox(session_id, position);
 """
 
-_SCHEMA_VERSION = 6
+LABEL_LIMIT = 24
+"""分支名长度上限（字）。"""
+
+_SCHEMA_VERSION = 7
 """schema 版本；所有建表语句都是 ``IF NOT EXISTS``，老库按需补列/补表即可。
 
 版本 6 把待发送队列升级成**有状态**的：``state``（pending/sending/failed）、
@@ -164,7 +169,8 @@ class SessionNodeRecord:
     """会话树里的一个节点：一条消息 + 它在树里的位置。
 
     ``parent`` 为 :data:`blue.tree.ROOT_ID` 表示挂在会话根上；``current`` 是
-    该节点当前选中的子节点，``None`` 表示它是叶子。
+    该节点当前选中的子节点，``None`` 表示它是叶子。``label`` 是这个节点作为
+    「一条分支的起点」时的分支名，空串表示界面用序号显示。
     """
 
     id: int
@@ -174,6 +180,7 @@ class SessionNodeRecord:
     """``blue.messages`` 编码后的消息 JSON 文本。"""
 
     created_at: float
+    label: str = ""
 
 
 @dataclass(frozen=True)
@@ -364,6 +371,20 @@ class SessionDatabase:
             hash=str(row[0]), mime=str(row[1]), size=int(row[2]), data=bytes(row[3])
         )
 
+    async def _collect_orphan_attachments_locked(
+        self, connection: aiosqlite.Connection
+    ) -> int:
+        """删掉没有任何消息引用的附件（调用方负责事务）。"""
+        cursor = await connection.execute(
+            """
+            DELETE FROM attachments
+             WHERE hash NOT IN (SELECT hash FROM message_attachments)
+            """
+        )
+        removed = int(cursor.rowcount or 0)
+        await cursor.close()
+        return max(0, removed)
+
     async def sweep_attachments(self, *, now: float, grace: float) -> int:
         """回收不再被任何消息引用、且超过宽限期的附件；返回删除条数。"""
         async with self._lock:
@@ -531,6 +552,33 @@ class SessionDatabase:
             raise SessionNotFoundError(f"会话不存在：{session_id}")
         return updated
 
+    async def set_label(self, session_id: str, node_id: int, label: str) -> str:
+        """给分支起名（节点 id = 分支起点）；空串表示恢复序号显示。
+
+        :return: 落库后的分支名
+        :raises SessionNotFoundError: 会话不存在
+        :raises TreeError: 节点不存在
+        """
+        cleaned = " ".join(label.split())[:LABEL_LIMIT]
+        async with self._lock:
+            connection = self._connection_or_raise()
+            await connection.execute("BEGIN IMMEDIATE")
+            try:
+                meta = await self._meta_locked(session_id)
+                if meta is None:
+                    raise SessionNotFoundError(f"会话不存在：{session_id}")
+                tree = await self._tree_locked(connection, meta)
+                tree.require(node_id)
+                await connection.execute(
+                    "UPDATE messages SET label = ? WHERE session_id = ? AND id = ?",
+                    (cleaned, session_id, node_id),
+                )
+                await connection.commit()
+            except Exception:
+                await connection.rollback()
+                raise
+        return cleaned
+
     async def delete_node(self, session_id: str, node_id: int, *, now: float) -> int:
         """删除一条分支：该节点与其全部后代一起消失。
 
@@ -574,6 +622,9 @@ class SessionDatabase:
                     """,
                     (now, len(doomed), session_id),
                 )
+                # 分支独有的附件随消息一起回收：message_attachments 有级联删除，
+                # 这里把不再被任何消息引用的 blob 一并清掉，不然删了分支图还占着空间
+                await self._collect_orphan_attachments_locked(connection)
                 await connection.commit()
             except Exception:
                 await connection.rollback()
@@ -737,10 +788,23 @@ class SessionDatabase:
             await connection.execute(
                 "UPDATE session_outbox SET position = created_at WHERE position = 0"
             )
+        await self._add_message_label_column(connection)
         if await self._add_tree_columns(connection):
             # 老库只有线性顺序：按「前一条是父、后一条是选中分支」补成一条单链
             await self._backfill_linear_tree(connection)
         await connection.execute(f"PRAGMA user_version = {_SCHEMA_VERSION}")
+
+    async def _add_message_label_column(self, connection: aiosqlite.Connection) -> None:
+        """给老库补「分支名」列。
+
+        **不参与** ``_add_tree_columns`` 的返回值判断：那条分支会触发线性历史回填，
+        给已经有树结构的老库补列时绝不能重跑回填。
+        """
+        columns = await _table_columns(connection, "messages")
+        if "label" not in columns:
+            await connection.execute(
+                "ALTER TABLE messages ADD COLUMN label TEXT NOT NULL DEFAULT ''"
+            )
 
     async def _add_outbox_columns(self, connection: aiosqlite.Connection) -> bool:
         """给老库的待发送队列补状态列；返回是否真的补了。"""
@@ -899,7 +963,7 @@ class SessionDatabase:
         """按 id 升序读出该会话的全部节点。"""
         cursor = await connection.execute(
             """
-            SELECT id, parent_id, current_id, payload, created_at
+            SELECT id, parent_id, current_id, payload, created_at, label
               FROM messages
              WHERE session_id = ?
              ORDER BY id
@@ -915,6 +979,7 @@ class SessionDatabase:
                 current=None if row["current_id"] is None else int(row["current_id"]),
                 message=str(row["payload"]),
                 created_at=float(row["created_at"]),
+                label=str(row["label"] or ""),
             )
             for row in rows
         ]

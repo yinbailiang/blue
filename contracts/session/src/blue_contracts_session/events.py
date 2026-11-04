@@ -46,6 +46,10 @@ __all__ = [
     "SessionNodeDeleteReplyEvent",
     "SessionNodeDeleteRequest",
     "SessionNodeDeleteResponse",
+    "SessionNodeLabelEvent",
+    "SessionNodeLabelReplyEvent",
+    "SessionNodeLabelRequest",
+    "SessionNodeLabelResponse",
     "SessionPromptEvent",
     "SessionPromptRequest",
     "SessionReplyEvent",
@@ -184,6 +188,7 @@ class SessionNode(BaseModel):
     )
     message: str = Field(description="Message JSON 文本")
     created_at: float = Field(default=0.0, description="创建时间（epoch 秒）")
+    label: str = Field(default="", description="分支名（空 = 用序号显示，如 2/3）")
 
 
 class SessionSnapshot(BaseModel):
@@ -451,6 +456,33 @@ class SessionBranchActivateReplyEvent(EventDeclaration):
 
     name = "session.branch.activate.reply"
     payload_type = SessionBranchActivateResponse
+
+
+class SessionNodeLabelRequest(RequestProtocol):
+    """给某个节点所在的分支起名；``label`` 为空表示恢复成序号显示。"""
+
+    node: int = Field(description="分支起始节点的 id")
+    label: str = Field(default="", description="分支名，最长 24 字；空 = 清除")
+
+
+class SessionNodeLabelResponse(ResponseProtocol):
+    """分支改名结果。"""
+
+    label: str = Field(default="", description="落库后的分支名")
+
+
+class SessionNodeLabelEvent(EventDeclaration):
+    """分支改名请求事件。"""
+
+    name = "session.node.label"
+    payload_type = SessionNodeLabelRequest
+
+
+class SessionNodeLabelReplyEvent(EventDeclaration):
+    """分支改名响应事件。"""
+
+    name = "session.node.label.reply"
+    payload_type = SessionNodeLabelResponse
 
 
 class SessionNodeDeleteRequest(RequestProtocol):
@@ -898,6 +930,8 @@ EVENTS: tuple[type[EventDeclaration], ...] = (
     SessionBranchActivateEvent,
     SessionBranchActivateReplyEvent,
     SessionNodeDeleteEvent,
+    SessionNodeLabelEvent,
+    SessionNodeLabelReplyEvent,
     SessionNodeDeleteReplyEvent,
     SessionUpdateEvent,
     SessionUpdateReplyEvent,

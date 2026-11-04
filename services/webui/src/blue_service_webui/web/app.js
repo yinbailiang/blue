@@ -146,12 +146,16 @@
     const siblings = siblingsOf(node);
     if (siblings.length > 1) {
       const index = siblings.indexOf(node.id);
+      const name = String(node.label || "").trim();
       const bar = document.createElement("div");
       bar.className = "branch-bar";
       bar.innerHTML =
         '<button type="button" data-act="branch-prev" title="上一个分支">‹</button>' +
-        `<span class="branch-count">${index + 1} / ${siblings.length}</span>` +
-        '<button type="button" data-act="branch-next" title="下一个分支">›</button>';
+        `<span class="branch-count" title="第 ${index + 1} / ${siblings.length} 条分支">${
+          name ? escapeHtml(name) : `${index + 1} / ${siblings.length}`
+        }</span>` +
+        '<button type="button" data-act="branch-next" title="下一个分支">›</button>' +
+        '<button type="button" data-act="branch-rename" title="给这条分支起名">✎</button>';
       foot.appendChild(bar);
     }
     const acts = document.createElement("div");
@@ -1913,6 +1917,59 @@
     }
   }
 
+  /** 给分支起名：把序号换成输入框，回车保存、Esc 取消、留空恢复序号。 */
+  function beginBranchRename(host, node) {
+    const bar = host?.querySelector(".branch-bar");
+    const label = bar?.querySelector(".branch-count");
+    if (!bar || !label || bar.querySelector("input")) return;
+    const input = document.createElement("input");
+    input.className = "branch-rename";
+    input.type = "text";
+    input.maxLength = 24;
+    input.placeholder = "分支名（留空恢复序号）";
+    input.value = String(node.label || "");
+    let done = false;
+    const finish = async (save) => {
+      if (done) return;
+      done = true;
+      const value = input.value.trim();
+      input.replaceWith(label);
+      if (!save) return;
+      await renameBranch(node.id, value);
+    };
+    input.addEventListener("click", (event) => event.stopPropagation());
+    input.addEventListener("keydown", (event) => {
+      if (event.key === "Enter") {
+        event.preventDefault();
+        void finish(true);
+      } else if (event.key === "Escape") {
+        event.preventDefault();
+        void finish(false);
+      }
+    });
+    input.addEventListener("blur", () => void finish(true));
+    label.replaceWith(input);
+    input.focus();
+    input.select();
+  }
+
+  /** 落库分支名：成功后就地更新本地树，回来重画脚注。 */
+  async function renameBranch(nodeId, label) {
+    const sessionId = state.sessionId;
+    if (!sessionId) return;
+    try {
+      const view = await api(
+        `/api/sessions/${encodeURIComponent(sessionId)}/branches/${nodeId}`,
+        { method: "PATCH", body: JSON.stringify({ label }) },
+      );
+      applySnapshot(view, { force: false });
+      refreshMessageFeet();
+      toast(label ? `分支已命名为「${label}」` : "已恢复序号显示", "success");
+    } catch (error) {
+      toast(`改名失败：${error.message}`, "error");
+    }
+  }
+
   function endEdit(host) {
     const editor = host?.querySelector(".editor");
     if (!editor) return;
@@ -2793,6 +2850,7 @@
         else if (act === "edit") void beginEdit(host, node);
         else if (act === "retry") retryNode(node);
         else if (act === "delete") await deleteBranch(node);
+        else if (act === "branch-rename") beginBranchRename(host, node);
         else if (act === "cancel-edit") endEdit(host);
         else if (act === "save-edit") {
           const editor = host.querySelector(".editor");

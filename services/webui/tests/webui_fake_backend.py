@@ -59,6 +59,7 @@ class FakeBackend:
         self.root_current: int | None = 1
         self.activation_calls: list[tuple[str, int]] = []
         self.delete_calls: list[tuple[str, int]] = []
+        self.label_calls: list[tuple[int, str]] = []
         self.last_prompt: dict[str, Any] = {}
         self.title = "自动标题"
         self.preview = "最后一条用户消息"
@@ -201,6 +202,15 @@ class FakeBackend:
             return
         parent = next(item for item in self.nodes if item.id == target.parent)
         parent.current = node
+
+    async def set_label(self, session_id: str, node: int, label: str) -> str:
+        """改分支名：记下调用并写回内存节点。"""
+        self.label_calls.append((node, label))
+        cleaned = " ".join(label.split())[:24]
+        for item in self.nodes:
+            if item.id == node:
+                item.label = cleaned
+        return cleaned
 
     async def delete_node(self, session_id: str, node: int) -> int:
         """测试替身：删掉节点与全部后代。"""

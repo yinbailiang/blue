@@ -85,6 +85,12 @@ class RenameRequest(BaseModel):
     title: str = Field(default="", max_length=80, description="新标题；空 = 自动")
 
 
+class BranchLabel(BaseModel):
+    """分支改名请求体。"""
+
+    label: str = Field(default="", max_length=24, description="分支名；空 = 恢复序号")
+
+
 class QueueText(BaseModel):
     """改排队消息正文。"""
 
@@ -277,6 +283,17 @@ def create_app(*, backend: WebBackend, config: WebUIConfig) -> FastAPI:
         except BlueError as error:
             raise HTTPException(status_code=503, detail=str(error)) from error
         return {"session_id": session_id, "title": title}
+
+    @app.patch("/api/sessions/{session_id}/branches/{node}")
+    async def rename_branch(
+        session_id: str, node: int, request: BranchLabel
+    ) -> SessionView:
+        """给分支起名（空串恢复序号显示），返回最新视图。"""
+        try:
+            await backend.set_label(session_id, node, request.label)
+        except BlueError as error:
+            raise HTTPException(status_code=503, detail=str(error)) from error
+        return await _view(backend, session_id)
 
     @app.post("/api/sessions/{session_id}/branches/{node}/activate")
     async def activate_branch(session_id: str, node: int) -> SessionView:

@@ -37,6 +37,10 @@ from blue_contracts_session import (
     SessionNodeDeleteReplyEvent,
     SessionNodeDeleteRequest,
     SessionNodeDeleteResponse,
+    SessionNodeLabelEvent,
+    SessionNodeLabelReplyEvent,
+    SessionNodeLabelRequest,
+    SessionNodeLabelResponse,
     SessionOutboxClaimEvent,
     SessionOutboxClaimReplyEvent,
     SessionOutboxClaimRequest,
@@ -230,6 +234,10 @@ class SessionBackend(Protocol):
         """删除节点及其后代，返回删除条数。"""
         ...
 
+    async def set_label(self, session_id: str, node_id: int, label: str) -> str:
+        """给分支起名；空串恢复序号显示。"""
+        ...
+
     async def state(self) -> list[SessionInfo]:
         """列出会话。"""
         ...
@@ -368,6 +376,10 @@ class SessionService:
         """删除一条分支（节点 + 后代）。"""
         return await self._db.delete_node(session_id, node_id, now=time.time())
 
+    async def set_label(self, session_id: str, node_id: int, label: str) -> str:
+        """给分支起名；空串恢复序号显示。"""
+        return await self._db.set_label(session_id, node_id, label)
+
     async def state(self) -> list[SessionInfo]:
         """列出会话。"""
         return await self._db.state()
@@ -484,6 +496,7 @@ class SessionRpcHandler(EventHandler):
                 SessionAppendEvent.name,
                 SessionBranchActivateEvent.name,
                 SessionNodeDeleteEvent.name,
+                SessionNodeLabelEvent.name,
                 SessionUpdateEvent.name,
                 SessionResetEvent.name,
                 SessionStateEvent.name,
@@ -520,6 +533,8 @@ class SessionRpcHandler(EventHandler):
             await self._handle_rename(payload, bus_proxy)
         elif isinstance(payload, SessionBranchActivateRequest):
             await self._handle_branch_activate(payload, bus_proxy)
+        elif isinstance(payload, SessionNodeLabelRequest):
+            await self._handle_node_label(payload, bus_proxy)
         elif isinstance(payload, SessionNodeDeleteRequest):
             await self._handle_node_delete(payload, bus_proxy)
         elif isinstance(payload, SessionUpdateRequest):
@@ -846,6 +861,30 @@ class SessionRpcHandler(EventHandler):
                 error_msg=str(error),
             )
         await bus_proxy.publish(SessionAppendReplyEvent.name, reply)
+
+    async def _handle_node_label(
+        self, payload: SessionNodeLabelRequest, bus_proxy: EventBus.Proxy
+    ) -> None:
+        try:
+            label = await self._backend.set_label(
+                payload.session_id, payload.node, payload.label
+            )
+            reply: SessionNodeLabelResponse = SessionNodeLabelResponse(
+                session_id=payload.session_id,
+                request_id=payload.request_id,
+                success=True,
+                label=label,
+            )
+        except BlueError as error:
+            reply = SessionNodeLabelResponse(
+                session_id=payload.session_id,
+                request_id=payload.request_id,
+                success=False,
+                error_msg=str(error),
+            )
+        await bus_proxy.publish(SessionNodeLabelReplyEvent.name, reply)
+        if reply.success:
+            await self._publish_outbox(payload.session_id, bus_proxy)
 
     async def _handle_rename(
         self, payload: SessionRenameRequest, bus_proxy: EventBus.Proxy

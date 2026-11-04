@@ -34,6 +34,9 @@ from blue_contracts_session import (
     SessionNodeDeleteEvent,
     SessionNodeDeleteReplyEvent,
     SessionNodeDeleteResponse,
+    SessionNodeLabelEvent,
+    SessionNodeLabelReplyEvent,
+    SessionNodeLabelResponse,
     SessionOutboxClearEvent,
     SessionOutboxClearReplyEvent,
     SessionOutboxClearResponse,
@@ -241,6 +244,7 @@ class SessionNodeView(BaseModel):
     parent: int = Field(description="父节点 id；0 表示会话根")
     current: int | None = Field(default=None, description="当前选中的子节点")
     created_at: float = 0.0
+    label: str = Field(default="", description="分支名；空 = 用序号显示")
     message: MessageView
 
 
@@ -380,6 +384,10 @@ class WebBackend(Protocol):
 
     async def delete_node(self, session_id: str, node: int) -> int:
         """删除一条分支（节点 + 后代）；返回删除条数。"""
+        ...
+
+    async def set_label(self, session_id: str, node: int, label: str) -> str:
+        """给分支起名；空串恢复序号显示。"""
         ...
 
     async def get_attachment(self, digest: str) -> tuple[str, bytes] | None:
@@ -729,6 +737,20 @@ class BusBackend:
         if not response.success:
             raise WebUIError(response.error_msg or "分支切换失败")
 
+    async def set_label(self, session_id: str, node: int, label: str) -> str:
+        """给分支起名；空串恢复序号显示。"""
+        response = await self._request(
+            SessionNodeLabelEvent.name,
+            {"node": node, "label": label},
+            SessionNodeLabelReplyEvent.name,
+            session_id=session_id,
+        )
+        if not isinstance(response, SessionNodeLabelResponse):
+            raise WebUIError("收到非预期的分支改名响应")
+        if not response.success:
+            raise WebUIError(response.error_msg or "分支改名失败")
+        return response.label
+
     async def delete_node(self, session_id: str, node: int) -> int:
         """删除一条分支（节点与其后代）。"""
         response = await self._request(
@@ -929,6 +951,7 @@ def serialize_snapshot(snapshot: SessionSnapshot) -> SessionView:
             parent=node.parent,
             current=node.current,
             created_at=node.created_at,
+            label=node.label,
             message=serialize_message(decode_message(node.message), node_id=node.id),
         )
         for node in snapshot.nodes

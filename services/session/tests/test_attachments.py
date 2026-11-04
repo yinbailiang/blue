@@ -203,7 +203,7 @@ async def _schema_version(tmp_path: Path) -> None:
         cursor = await connection.execute("PRAGMA user_version")
         row = await cursor.fetchone()
         await cursor.close()
-        assert row is not None and row[0] == 6
+        assert row is not None and row[0] == 7
 
         digest, mime, data = _blob()
         await db.put_attachments([(digest, mime, data)], now=100.0)

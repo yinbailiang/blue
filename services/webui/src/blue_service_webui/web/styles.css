@@ -1138,6 +1138,16 @@ input.rename::placeholder {
 }
 
 .branch-bar,
+.branch-rename {
+  width: 132px;
+  padding: 0 6px;
+  border: 1px solid var(--border-strong);
+  border-radius: 6px;
+  background: var(--panel-solid);
+  color: var(--text);
+  font-family: inherit;
+  font-size: 10.5px;
+}
 .message-acts {
   display: flex;
   align-items: center;
