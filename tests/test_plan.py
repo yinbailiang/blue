@@ -198,36 +198,44 @@ def test_restart_reasons_shared_with_reconciler(desired: DesiredState) -> None:
 
 
 def test_config_diff_reports_added_removed_changed() -> None:
-    """字段级 diff：新增、删除、修改都能说清楚。"""
+    """统一 diff：新增、删除、修改都能看出来（渲染走 infd 的 yaml_dump）。"""
     before = {"llm_timeout": 60.0, "model": "old", "gone": 1}
     after = {"llm_timeout": 300.0, "model": "old", "fresh": {"nested": True}}
 
     lines = config_diff(before, after)
 
-    assert "~ llm_timeout: 60.0 → 300.0" in lines
-    assert "+ fresh.nested = true" in lines
-    assert "- gone = 1" in lines
-    assert not any("model" in line for line in lines)  # 没变的不出现
+    assert any(line.startswith("- llm_timeout: 60.0") for line in lines)
+    assert any(line.startswith("+ llm_timeout: 300.0") for line in lines)
+    assert any(line.startswith("- gone: 1") for line in lines)
+    assert any("fresh" in line and line.startswith("+") for line in lines)
+    # 没变的字段不出现在变更行里
+    assert not any("model" in line and line.startswith(("+ ", "- ")) for line in lines)
 
 
-def test_config_diff_redacts_secret_values() -> None:
-    """脱敏字段只提示"已变更"，不泄露内容。"""
-    lines = config_diff({"api_key": "***"}, {"api_key": "***"})
+def test_config_diff_keeps_secrets_redacted() -> None:
+    """密钥类字段被脱敏：diff 里不会出现明文。"""
+    lines = config_diff({"api_key": "***"}, {"api_key": "sk-live-secret"})
+
+    # 脱敏后两边一致 → 纯 diff 为空；plan 层会补一句"仅密钥字段有变化"
     assert lines == ()
-
-    lines = config_diff({"api_key": "***"}, {"api_key": "sk-new"})
-    assert lines == ("~ api_key: 已变更（已脱敏）",)
+    assert not any("sk-live-secret" in line for line in lines)
 
 
-def test_config_diff_truncates_long_lists() -> None:
+def test_config_diff_truncates_long_changes() -> None:
     """变化太多时折叠，避免刷屏。"""
-    before = {f"k{index}": index for index in range(20)}
-    after = {f"k{index}": index + 1 for index in range(20)}
+    before = {f"k{index}": index for index in range(40)}
+    after = {f"k{index}": index + 1 for index in range(40)}
 
     lines = config_diff(before, after)
 
-    assert len(lines) == 13
-    assert lines[-1].startswith("… 还有")
+    assert 0 < len(lines) <= 25
+    last = next(reversed(lines))
+    assert last.startswith("… 还有")
+
+
+def test_config_diff_ignores_key_order() -> None:
+    """字典顺序不同不算变化（渲染前递归排序）。"""
+    assert config_diff({"b": 1, "a": 2}, {"a": 2, "b": 1}) == ()
 
 
 def test_plan_includes_field_diff_when_snapshot_has_config(

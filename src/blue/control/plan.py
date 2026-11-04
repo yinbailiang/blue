@@ -15,10 +15,11 @@
 
 from __future__ import annotations
 
-import json
 from dataclasses import dataclass
-from decimal import Decimal
+from difflib import unified_diff
 from typing import Any, Literal, cast
+
+from infinity_data.emit import yaml_dump
 
 from blue.control.desired import redact_config
 from blue.control.model import (
@@ -106,67 +107,47 @@ class PlanResult:
         )
 
 
-DIFF_LIMIT = 12
-"""一条 diff 最多展示多少行（其余折叠成一行提示）。"""
+DIFF_LIMIT = 24
+"""一份 diff 最多展示多少行（其余折叠成一行提示）。"""
 
 
 def config_diff(
     previous: dict[str, Any], current: dict[str, Any], *, limit: int = DIFF_LIMIT
 ) -> tuple[str, ...]:
-    """对比两份（已脱敏的）配置，返回人类可读的字段级变化。
+    """对比两份配置，返回统一 diff（``-`` 旧值 / ``+`` 新值 / ``@@`` 区块头）。
 
-    嵌套字典按 ``a.b.c`` 路径展开；列表整体作为一个值比较（避免索引噪声）。
-    脱敏字段只会提示"已变更"，不会显示新旧值。
+    渲染交给 ``infinity_data.emit.yaml_dump``：infd 编译出来的浮点是
+    ``Decimal``，它按 infd 的写法输出（``300.0``），嵌套结构与列表也是原生
+    格式——比手写序列化可靠，也省得自己处理各种边界值。
+
+    ``current`` 在比较前会先脱敏：密钥类字段两边都是 ``***``，因此"只有密钥
+    变了"的情况会退化成一行说明，而不是把新密钥打印出来。
     """
-    before = _flatten(previous)
-    after = _flatten(current)
+    redacted = redact_config(current)
+    before = yaml_dump(_sorted(previous)).splitlines()
+    after = yaml_dump(_sorted(redacted)).splitlines()
+    if before == after:
+        return ()
     lines: list[str] = []
-    for key in sorted(set(before) | set(after)):
-        old = before.get(key)
-        new = after.get(key)
-        if old == new:
+    for line in unified_diff(before, after, lineterm="", n=1):
+        if line.startswith(("---", "+++")):
             continue
-        if old is None:
-            lines.append(f"+ {key} = {new}")
-        elif new is None:
-            lines.append(f"- {key} = {old}")
-        elif old == "***" or new == "***":
-            lines.append(f"~ {key}: 已变更（已脱敏）")
-        else:
-            lines.append(f"~ {key}: {old} → {new}")
+        # unified_diff 的标记紧贴内容（"-foo"），补一个空格更像 kubectl diff
+        lines.append(f"{line[0]} {line[1:]}" if line[:1] in "+-" else line)
     if len(lines) > limit:
         extra = len(lines) - limit
-        lines = [*lines[:limit], f"… 还有 {extra} 处变化"]
+        lines = [*lines[:limit], f"… 还有 {extra} 行变化"]
     return tuple(lines)
 
 
-def _flatten(value: object, prefix: str = "") -> dict[str, str]:
-    """把配置摊平成 ``路径 → 值文本``。
-
-    infd 编译出来的数字是 ``Decimal``，不能直接 ``json.dumps``；标量统一走
-    ``str()``，复杂值才退回复用 JSON（``default=str`` 兜底）。
-    """
-    items: dict[str, str] = {}
+def _sorted(value: object) -> Any:
+    """递归按键名排序，消除字典顺序带来的假差异。"""
     if isinstance(value, dict):
-        for key, item in cast(dict[object, object], value).items():
-            path = f"{prefix}.{key}" if prefix else str(key)
-            items.update(_flatten(item, path))
-    elif isinstance(value, list):
-        items[prefix] = json.dumps(
-            value, ensure_ascii=False, sort_keys=True, default=str
-        )
-    elif prefix:
-        if isinstance(value, str):
-            items[prefix] = value
-        elif isinstance(value, bool):
-            items[prefix] = "true" if value else "false"
-        elif isinstance(value, int | float | Decimal):
-            items[prefix] = str(value)
-        elif value is None:
-            items[prefix] = "null"
-        else:
-            items[prefix] = json.dumps(value, ensure_ascii=False, default=str)
-    return items
+        mapping = cast(dict[object, object], value)
+        return {str(key): _sorted(mapping[key]) for key in sorted(mapping, key=str)}
+    if isinstance(value, list):
+        return [_sorted(item) for item in cast(list[object], value)]
+    return value
 
 
 def restart_reasons(
