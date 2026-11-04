@@ -219,25 +219,44 @@ class RabbitMQManager:
         await self.ensure_queue_policy(ctl, env)
 
     async def ensure_queue_policy(self, ctl: str, env: dict[str, str]) -> None:
-        """给 fanout 队列下发「空闲即过期」策略。
+        """给 fanout 队列下发「空闲即过期 + 体积上限」策略。
 
-        成员队列是 durable + 非 auto-delete（``restart`` 策略要留积压），所以杀掉
-        进程后队列会留在 broker 上继续接收广播。加 ``expires`` 之后，最后一个消费
-        者断开 30 分钟（可配）内没有新消费者，队列自动删除——孤儿不会累积。
+        成员队列是 durable + 非 auto-delete（``restart`` 策略要留积压），两种最坏
+        情况都要兜住：
+
+        - **孤儿**：进程被 kill 没人解绑，队列仍收广播 → ``expires`` 让它在最后一个
+          消费者断开 N 分钟后自动消失（实测 172 个孤儿攒了 5639 万条 / 49 GB）；
+        - **卡死**：有消费者但不读 → ``max-length-bytes`` 给单队列封顶，超限按
+          ``drop-head`` 丢最旧，避免把磁盘写满（不阻塞发布方，否则整个总线会被一个
+          堵住的消费者拖死）。
         """
+        definition: dict[str, object] = {}
         expires = self._config.queue_expires_ms
-        if expires <= 0:
+        if expires > 0:
+            definition["expires"] = expires
+        limit = self._config.queue_max_bytes
+        if limit > 0:
+            definition["max-length-bytes"] = limit
+            # 明确写死 drop-head：默认值将来变了也不会悄悄改成 reject-publish
+            definition["overflow"] = "drop-head"
+        if not definition:
             return
-        definition = json.dumps({"expires": expires}, separators=(",", ":"))
+        # 早期版本用过的策略名，顺手清掉，避免两条策略叠加
+        await self._run_ctl(
+            ctl,
+            ["clear_policy", "-p", self._config.vhost, "blue-fanout-expiry"],
+            env,
+            ignore_failure=True,
+        )
         await self._run_ctl(
             ctl,
             [
                 "set_policy",
                 "-p",
                 self._config.vhost,
-                "blue-fanout-expiry",
+                "blue-fanout-guard",
                 "^infinity_bus\\.fanout\\.",
-                definition,
+                json.dumps(definition, separators=(",", ":")),
                 "--apply-to",
                 "queues",
             ],

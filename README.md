@@ -465,23 +465,32 @@ BLUE_BUS_URL=amqp://guest:guest@127.0.0.1:5672/blue \
 > **网络提示**：`weather` 会向 `wttr.in` 发起 HTTPS 请求；如需换源或镜像，
 > 在 `blue.infd` 里传 `WeatherService(base_url = ..., timeout = ...)`。
 
-## 队列过期（bus 自带兜底）
+## 队列守卫（bus 自带兜底）
 
 fanout 成员队列是 **durable + 非 auto-delete**（`restart` 策略要能补投积压），
 所以进程被 kill 时没人解绑，队列会留在 broker 上**继续接收广播**——孤儿队列会
-一直涨。bus 服务启动时会下发一条策略兜底：
+一直涨。bus 服务启动时下发一条策略，同时兜住两种最坏情况：
 
 ```
-blue-fanout-expiry: ^infinity_bus\.fanout\.   {"expires": 1800000}   (apply-to queues)
+blue-fanout-guard:  ^infinity_bus\.fanout\.   (apply-to queues)
+  {"expires": 1800000, "max-length-bytes": 1073741824, "overflow": "drop-head"}
 ```
 
-即「最后一个消费者断开后 30 分钟没有新消费者 → 队列自动删除」。可配
-`queue_expires_ms`（默认 1800000，`0` 表示不下发）。
+| 键 | 兜住什么 | 配置项 |
+|---|---|---|
+| `expires` | **孤儿**：最后一个消费者断开后 N 分钟没有新消费者 → 队列自动删除 | `queue_expires_ms`（默认 1800000 = 30 分钟） |
+| `max-length-bytes` | **卡死**：有消费者但不读 → 单队列封顶，超限丢最旧的 | `queue_max_bytes`（默认 1073741824 = 1 GiB） |
+| `overflow: drop-head` | 显式固定为「丢最旧」，**不阻塞发布方**（`reject-publish` 会让一个堵住的消费者拖死整个总线） | 固定 |
+
+两个配置填 `0` 都可以关掉；都为 0 时不下发策略（自建 broker 自管策略的场景）。
+
+> 实测：给一条队列设 2 MB 上限后灌 5 MB 进去，队列只留在 2.06 MB —— 上限生效，
+> 发布方没有被阻塞。
 
 排查磁盘暴涨：
 
 ```bash
-rabbitmqctl -n blue@<host> -p blue list_queues name consumers messages
+rabbitmqctl -n blue@<host> -p blue list_queues name consumers messages message_bytes
 ```
 
 **0 消费者 + 大量消息**的 durable 队列就是血栓，`delete_queue` 即可回收。实测一次

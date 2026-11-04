@@ -25,6 +25,14 @@ class BusConfig(BaseModel):
     user: str = "guest"
     password: str | None = None
     configure: bool = True
+    queue_max_bytes: int = Field(default=1_073_741_824, ge=0)
+    """单条 fanout 队列的体积上限（字节），0 = 不限。
+
+    超限时 RabbitMQ 按 ``drop-head`` 丢最旧的消息（不阻塞发布方）——这是磁盘的
+    最后一道闸：真正该拦住孤儿队列的是上面的 ``queue_expires_ms``，这里只兜底
+    「有消费者但不读」的卡死场景。
+    """
+
     queue_expires_ms: int = Field(default=1_800_000, ge=0)
     """fanout 队列的空闲过期时间（毫秒），0 = 不过期。
 

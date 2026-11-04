@@ -10,6 +10,7 @@
   vhost: str = "blue"
   user: str = "guest"
   queue_expires_ms: <int, range(0, 604800000)> = 1800000
+  queue_max_bytes: <int, range(0, 107374182400)> = 1073741824
   password: <str?> = null
   configure: bool = true
   proxy: bool = false

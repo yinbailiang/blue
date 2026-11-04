@@ -155,7 +155,7 @@ def test_queue_expiry_policy_is_applied_on_configure() -> None:
     没人解绑 —— 没有 expires 兜底，孤儿队列会一直挂在 fanout 上收广播，把磁盘吃满
     （2026-11-05 实测：172 个孤儿队列攒了 5639 万条消息 / 49 GB）。
     """
-    config = BusConfig(queue_expires_ms=600_000, configure=True)
+    config = BusConfig(queue_expires_ms=600_000, queue_max_bytes=1_073_741_824)
     manager = RabbitMQManager(config=config)
     recorded: list[list[str]] = []
 
@@ -174,14 +174,17 @@ def test_queue_expiry_policy_is_applied_on_configure() -> None:
     policies = [item for item in recorded if item and item[0] == "set_policy"]
     assert len(policies) == 1
     command = policies[0]
-    assert "blue-fanout-expiry" in command
-    assert '{"expires":600000}' in command
+    assert "blue-fanout-guard" in command
+    assert (
+        '{"expires":600000,"max-length-bytes":1073741824,"overflow":"drop-head"}'
+        in command
+    )
     assert "--apply-to" in command and "queues" in command
 
 
-def test_queue_expiry_policy_can_be_disabled() -> None:
-    """``queue_expires_ms=0`` 表示不下发策略（例如自建 broker 已有自己的策略）。"""
-    config = BusConfig(queue_expires_ms=0)
+def test_queue_policy_can_be_disabled() -> None:
+    """过期与体积上限都为 0 时不下发策略（例如自建 broker 自管策略）。"""
+    config = BusConfig(queue_expires_ms=0, queue_max_bytes=0)
     manager = RabbitMQManager(config=config)
     recorded: list[list[str]] = []
 
@@ -198,3 +201,27 @@ def test_queue_expiry_policy_can_be_disabled() -> None:
     manager._run_ctl = fake_run_ctl  # type: ignore[method-assign]
     asyncio.run(manager.ensure_queue_policy("rabbitmqctl", {}))
     assert recorded == []
+
+
+def test_queue_policy_caps_bytes_only() -> None:
+    """只配体积上限时，定义里只有 max-length-bytes（不塞 expires）。"""
+    config = BusConfig(queue_expires_ms=0, queue_max_bytes=64 * 1024 * 1024)
+    manager = RabbitMQManager(config=config)
+    recorded: list[list[str]] = []
+
+    async def fake_run_ctl(
+        ctl: str,
+        arguments: list[str],
+        env: dict[str, str],
+        *,
+        ignore_failure: bool,
+    ) -> None:  # pragma: no cover
+        del ctl, env, ignore_failure
+        recorded.append(arguments)
+
+    manager._run_ctl = fake_run_ctl  # type: ignore[method-assign]
+    asyncio.run(manager.ensure_queue_policy("rabbitmqctl", {}))
+    policies = [item for item in recorded if item and item[0] == "set_policy"]
+    assert len(policies) == 1
+    definition = policies[0][-3]
+    assert definition == '{"max-length-bytes":67108864,"overflow":"drop-head"}'
