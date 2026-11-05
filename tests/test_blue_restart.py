@@ -283,3 +283,15 @@ def test_failure_reason_falls_back_to_tail(tmp_path: Path) -> None:
     reason = blue_restart._failure_reason(log)  # pyright: ignore[reportPrivateUsage]
 
     assert "第三行" in reason
+
+
+def test_own_notification_detection() -> None:
+    """只把自己发的重启通知当成可去重的旧通知。
+
+    outbox 是 at-least-once：通知被领走后赶上 execv，就没 complete，会重投。
+    入队前清掉同类旧的，才能保证"只留最新一条"，不然会一直重复提醒同一件事。
+    """
+    assert blue_restart._is_own_notification("🔄 重启完成（apply），世代 0018 stable")  # pyright: ignore[reportPrivateUsage]
+    assert blue_restart._is_own_notification("❌ 重启未收敛（apply），世代 0015 stable")  # pyright: ignore[reportPrivateUsage]
+    assert not blue_restart._is_own_notification("用户自己打的消息")  # pyright: ignore[reportPrivateUsage]
+    assert not blue_restart._is_own_notification("")  # pyright: ignore[reportPrivateUsage]

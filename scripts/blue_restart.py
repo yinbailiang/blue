@@ -52,6 +52,21 @@ _INHERITED_ENV = (
     "BLUE_ARTIFACT_HASH",
 )
 
+_NOTIFICATION_MARKERS = ("🔄 重启完成", "❌ 重启未收敛")
+"""本脚本通知的开头；用来给队列做幂等（同类旧通知先清掉）。"""
+
+
+def _is_own_notification(text: str) -> bool:
+    """是不是本脚本发过的重启通知。
+
+    为什么要去重：outbox 是 at-least-once。agent 领走通知后如果正好赶上 execv
+    被打断，就没有 ``session.outbox.complete``，队列会把它退回 ``pending`` 重投
+    （实测 attempts 一路涨，同一件事反复提醒）。入队前清掉同类旧通知，队列里就
+    最多留最新的一条，语义也更对：只关心最近一次重启结果。
+    """
+    return text.lstrip().startswith(_NOTIFICATION_MARKERS)
+
+
 _COMMANDS: dict[str, list[str]] = {
     "apply": ["apply"],
     "down-up": ["down", "up"],
@@ -258,11 +273,16 @@ def _fmt_generation(generation_id: object) -> str:
 async def _enqueue(
     *, bus_url: str | None, session_id: str, text: str, timeout: float = 10.0
 ) -> bool:
-    """通过 `session.outbox.enqueue` 往会话里排一条消息。"""
+    """往会话里排一条通知；入队前先清掉同类旧通知（幂等）。"""
     from blue_contracts_session import (
         SessionOutboxEnqueueEvent,
         SessionOutboxEnqueueReplyEvent,
         SessionOutboxEnqueueResponse,
+        SessionOutboxListEvent,
+        SessionOutboxListReplyEvent,
+        SessionOutboxListResponse,
+        SessionOutboxRemoveEvent,
+        SessionOutboxRemoveReplyEvent,
     )
     from infinity_bus.templates.request import request
 
@@ -272,12 +292,39 @@ async def _enqueue(
     os.environ["BLUE_SERVICE_NAME"] = NOTIFY_ROLE
     runtime = build_runtime(
         NOTIFY_ROLE,
-        events=[SessionOutboxEnqueueEvent, SessionOutboxEnqueueReplyEvent],
+        events=[
+            SessionOutboxEnqueueEvent,
+            SessionOutboxEnqueueReplyEvent,
+            SessionOutboxListEvent,
+            SessionOutboxListReplyEvent,
+            SessionOutboxRemoveEvent,
+            SessionOutboxRemoveReplyEvent,
+        ],
         url=bus_url,
     )
     try:
         await runtime.start()
         proxy = runtime.proxy(NOTIFY_ROLE)
+        listed = await request(
+            proxy,
+            SessionOutboxListEvent.name,
+            {},
+            SessionOutboxListReplyEvent.name,
+            session_id=session_id,
+            timeout=timeout,
+        )
+        if isinstance(listed, SessionOutboxListResponse):
+            for queued in listed.messages:
+                if not _is_own_notification(queued.text):
+                    continue
+                await request(
+                    proxy,
+                    SessionOutboxRemoveEvent.name,
+                    {"message_id": queued.id},
+                    SessionOutboxRemoveReplyEvent.name,
+                    session_id=session_id,
+                    timeout=timeout,
+                )
         response = await request(
             proxy,
             SessionOutboxEnqueueEvent.name,
