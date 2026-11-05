@@ -342,3 +342,41 @@ def test_missing_sdk_snapshot_counts_as_changed(desired: DesiredState) -> None:
     snapshot.sdk = None
     result = plan(desired, snapshot)
     assert result.counts()["restart"] == len(desired.services)
+
+
+def test_restart_reasons_detects_artifact_change(desired: DesiredState) -> None:
+    """产物指纹变了（依赖锁/解释器）就必须重启，哪怕源码与配置都没动。
+
+    这是兜底判据：``uv.lock`` 或解释器版本变化时，清单/配置/源码/版本/契约/SDK
+    六项全都不变，但进程跑的是旧产物——不重启的话新世代声明的 artifact_hash
+    与实际运行的永远对不上。
+    """
+    service = next(iter(desired.services.values()))
+    tuned = service.model_copy(update={"artifact_hash": "artifact-new"})
+    previous = service.model_copy(update={"artifact_hash": "artifact-old"})
+
+    reasons = restart_reasons(
+        current=tuned,
+        previous_meta=service.meta,
+        previous_config_hash=service.config_hash,
+        previous_source_hash=service.source_hash,
+        previous_version=service.package_version,
+        changed_contracts=set(),
+        previous_artifact_hash=previous.artifact_hash,
+    )
+
+    assert any("产物变化" in reason for reason in reasons)
+
+    # 老快照没有 artifact_hash（空串）时不做这个判断，避免升级即全量重启
+    assert (
+        restart_reasons(
+            current=tuned,
+            previous_meta=service.meta,
+            previous_config_hash=service.config_hash,
+            previous_source_hash=service.source_hash,
+            previous_version=service.package_version,
+            changed_contracts=set(),
+            previous_artifact_hash="",
+        )
+        == ()
+    )

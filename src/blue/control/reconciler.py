@@ -559,6 +559,7 @@ class Supervisor:
                 changed_contracts=changed_contracts,
                 sdk_changed=sdk_touched,
                 changed_packages=packages_touched,
+                previous_artifact_hash=runtime.desired.artifact_hash,
             )
             if reasons:
                 logger.info("将重启 %s：%s", name, "、".join(reasons))
@@ -807,6 +808,7 @@ class Supervisor:
                 package_version=runtime.desired.package_version,
                 source_hash=runtime.desired.source_hash,
                 artifact_hash=runtime.desired.artifact_hash,
+                generation_id=runtime.desired.generation_id,
                 log_path=self._logs.path_for(name),
             )
         current = self._generations.current()

@@ -134,6 +134,12 @@ class DesiredService(BaseModel):
     """产物（artifact）指纹；空串表示还没构建产物，退回 ``uv run`` 启动。"""
     artifact_python: Path | None = None
     """产物 venv 里的解释器；给了就用它直接 ``-m`` 启动，不再经过 uv。"""
+    generation_id: int = 0
+    """这份期望来自哪个世代（0 = 尚未世代化）。
+
+    用来回答"这个进程现在用的是哪一代的配置"——``gc`` 必须据此保住**运行中
+    进程仍在引用**的世代，否则会把活着的服务脚下的配置文件删掉。
+    """
 
 
 class ContractMeta(BaseModel):
@@ -250,6 +256,8 @@ class ActualService(BaseModel):
     source_hash: str = ""
     artifact_hash: str = ""
     """当前进程是从哪个产物启动的（空串 = 未经世代化，用工作区 `uv run` 启动）。"""
+    generation_id: int = 0
+    """当前进程用的配置来自哪个世代（0 = 未经世代化）。"""
     config: dict[str, Any] = Field(default_factory=dict)
     """脱敏后的配置快照，供 ``blue plan --diff`` 做字段级对比。
 

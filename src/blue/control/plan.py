@@ -178,12 +178,18 @@ def restart_reasons(
     changed_contracts: set[str],
     sdk_changed: bool = False,
     changed_packages: set[str] | None = None,
+    previous_artifact_hash: str = "",
 ) -> tuple[str, ...]:
     """判断一个服务为什么需要（重新）启动；返回空元组表示不用动。
 
     调和器与 :func:`plan` 共用本函数：前者用内存里的上一份期望配置，
     后者用 ``.blue/state.json`` 的快照；``previous_meta`` 为 ``None`` 时
     （快照里没有服务清单）跳过清单比较。
+
+    ``previous_artifact_hash`` 是**兜底判据**：产物指纹里有 ``uv.lock`` 与解释器
+    版本这两个维度，它们变化时上面六项（清单/配置/源码/版本/契约/SDK）全都不变，
+    但服务必须重启——否则进程继续跑旧产物，新世代声明的 ``artifact_hash`` 与实际
+    运行的对不上，依赖升级永远不生效。
     """
     reasons: list[str] = []
     if previous_meta is not None and previous_meta != current.meta:
@@ -205,6 +211,12 @@ def restart_reasons(
     )
     if affected_packages:
         reasons.append(f"依赖 SDK 变化：{', '.join(affected_packages)}")
+    if (
+        previous_artifact_hash
+        and current.artifact_hash
+        and previous_artifact_hash != current.artifact_hash
+    ):
+        reasons.append("产物变化（依赖锁/解释器等）")
     return tuple(reasons)
 
 
@@ -351,6 +363,7 @@ def plan(desired: DesiredState, actual: ActualState | None) -> PlanResult:
                 changed_contracts=touched,
                 sdk_changed=sdk_touched,
                 changed_packages=packages_touched,
+                previous_artifact_hash=previous.artifact_hash,
             )
         )
         if previous.status in _UNHEALTHY:

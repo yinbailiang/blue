@@ -481,3 +481,33 @@ def test_gc_keeps_two_stable_generations(tmp_path: Path) -> None:
     rollback_target = store.latest_stable(exclude=head.id)
     assert rollback_target is not None, "gc 之后仍要能回滚"
     assert rollback_target.id == 3
+
+
+def test_gc_protects_generations_in_use(tmp_path: Path) -> None:
+    """运行中进程仍在用的世代必须保留。
+
+    只重启变了服务 → 进程跨世代共存，老进程的 BLUE_CONFIG_FILE 还指向它启动时
+    那一代。删掉那一代，服务只是靠内存缓存还活着，一旦重读配置就崩（实测踩过）。
+    """
+    store = _store(tmp_path)
+    for index in range(1, 5):
+        generation = store.create(
+            _desired(tmp_path, generation=f"gen-{index}"),
+            _artifacts(tmp_path),
+            reason="apply",
+        )
+        store.mark_stable(generation)
+        store.activate(generation)
+    head = store.create(
+        _desired(tmp_path, generation="gen-5"), _artifacts(tmp_path), reason="apply"
+    )
+    store.activate(head)
+
+    # 不传 in_use 时 1、2 都会被删（既不在最近 1 个里，也不是最近两个 stable）
+    assert store.gc(keep=1, dry_run=True) == [1, 2]
+
+    removed = store.gc(keep=1, in_use={2})
+
+    assert 2 not in removed, "在用的世代不能被回收"
+    assert removed == [1]
+    assert store.load(2).complete is True

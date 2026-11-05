@@ -635,12 +635,17 @@ verify → 等全部服务 Ready；超时/失败 → 自动翻回上一个 stabl
 
 三条容易踩的规则：
 
-1. **控制面设置随世代冻结**。`activation_timeout`、`generation_auto_rollback`
+1. **切换世代 ≠ 全量重启**。只有真正变了的服务会重启，判据是服务清单 / 配置 /
+   源码 / 版本 / 依赖契约 / SDK 核心 / 依赖的 `sdk/*` 包，外加**产物指纹兜底**
+   （`uv.lock`、解释器版本变了而上面七项都没变时，也必须重启，否则进程继续跑旧产物）。
+   实测：只改 `weather` 的 `timeout`，18 个产物全部复用、只有 `weather` 重启，
+   其余 17 个 PID 一个没动，5.2 s 完成。
+2. **控制面设置随世代冻结**。`activation_timeout`、`generation_auto_rollback`
    这些属于"这一代怎么跑"，存进 `generation.json`；所以 `apply --config other.infd`
    改这些值会生效（早期版本没存，实测就是这里翻的车：设 12s 却在跑 120s）。
-2. **gc 至少保留两个 stable**。自动回滚的目标是"上一个 stable"，只留一个等于
+3. **gc 至少保留两个 stable**。自动回滚的目标是"上一个 stable"，只留一个等于
    把机制刚需的东西回收掉。
-3. **execv 自重启 ≠ 崩溃**。两者都表现为"`current` 指向的世代还没 stable"，
+4. **execv 自重启 ≠ 崩溃**。两者都表现为"`current` 指向的世代还没 stable"，
    区别在 PID：execv 保留 PID，崩溃后重新拉起的一定是新 PID。用状态快照里的
    `supervisor_pid` 判定，自重启要继续验证，不能误回滚。
 

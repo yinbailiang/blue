@@ -19,6 +19,7 @@ import json
 import os
 import shutil
 import time
+from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal, cast
@@ -240,6 +241,7 @@ class Generation:
                 cwd=base_dir,
                 artifact_hash=entry.artifact_hash,
                 artifact_python=python,
+                generation_id=self.id,
             )
         return DesiredState(
             generation=self.data.generation,
@@ -531,13 +533,17 @@ class GenerationStore:
         staging.rename(final)
         return self.load(generation_id)
 
-    def protected_ids(self, *, keep: int) -> set[int]:
+    def protected_ids(self, *, keep: int, in_use: Iterable[int] = ()) -> set[int]:
         """``gc`` 会保留的世代号。
 
-        规则：最近 ``keep`` 个 + 当前 + **最新两个 stable**。
+        规则：最近 ``keep`` 个 + 当前 + **最新两个 stable** + **运行中进程仍在用的**。
 
         为什么要保两个 stable：自动回滚的目标是"上一个 stable"，只留一个的话
         ``gc`` 之后就没有回滚目标了——那等于把机制刚需的东西回收掉。
+
+        为什么要保 ``in_use``：只重启变了服务意味着**进程会跨世代共存**，
+        老进程的 ``BLUE_CONFIG_FILE`` 还指向它启动时那一代的目录。删掉那一代，
+        服务只是靠内存里缓存的配置还活着，一旦重读配置就崩（实测踩过）。
         """
         generations = self.list()
         protected = {generation.id for generation in generations[-keep:]}
@@ -546,19 +552,23 @@ class GenerationStore:
             protected.add(current.id)
         stables = [generation.id for generation in generations if generation.stable]
         protected.update(stables[-2:])
+        protected.update(in_use)
         return protected
 
-    def gc(self, *, keep: int, dry_run: bool = False) -> list[int]:
+    def gc(
+        self, *, keep: int, dry_run: bool = False, in_use: Iterable[int] = ()
+    ) -> list[int]:
         """回收老世代：保留 :meth:`protected_ids` 算出来的那些。
 
         数据面永远不在这里被碰。
 
+        :param in_use: 仍有存活进程在用的世代号（``gc`` 一律保留）
         :return: 命中的世代号列表
         """
         generations = self.list()
         if not generations:
             return []
-        protected = self.protected_ids(keep=keep)
+        protected = self.protected_ids(keep=keep, in_use=in_use)
         removed: list[int] = []
         for generation in generations:
             if generation.id in protected:
@@ -568,10 +578,12 @@ class GenerationStore:
             removed.append(generation.id)
         return removed
 
-    def keep_hashes(self, *, keep: int) -> dict[str, set[str]]:
+    def keep_hashes(
+        self, *, keep: int, in_use: Iterable[int] = ()
+    ) -> dict[str, set[str]]:
         """``gc`` 之后仍被引用的产物指纹：``{服务名: {artifact_hash}}``。"""
         generations = self.list()
-        protected = self.protected_ids(keep=keep)
+        protected = self.protected_ids(keep=keep, in_use=in_use)
         keep_map: dict[str, set[str]] = {}
         for generation in generations:
             if generation.id not in protected:

@@ -210,6 +210,32 @@ blue apply [--wait] [--timeout S] [--staged] [--no-build] [--no-auto-rollback]
 
 ## 7. 健康闸门与自动回滚
 
+**切换世代 ≠ 全量重启**。只有"这一项变了"的服务会被重启，判据是
+`plan.py::restart_reasons`（调和器与 `blue plan` 共用）：
+
+| 判据 | 触发条件 |
+|---|---|
+| 服务清单变化 | `service.infd` 的元数据（name/kind/package/module/command/depends_*/restart/…）变了 |
+| 配置变化 | `config_hash` 变了 |
+| 源码变化 | 服务包 `source_hash` 变了（`src/**` 全部文件） |
+| 版本变化 | `pyproject.toml` 的 version 变了 |
+| 依赖契约变化 | 自己 `depends_contracts` 里的契约指纹变了 |
+| SDK 变化 | blue 核心（`src/blue/**`）变了 → **全部服务** |
+| 依赖 SDK 变化 | 自己 `depends_sdk` 里的运行时包指纹变了 |
+| **产物变化（兜底）** | `artifact_hash` 变了——`uv.lock`、解释器版本这类"六项都不变但产物变了"的情况 |
+
+最后一行是必须的：`artifact_hash` 里含 `deps_hash` 与解释器版本，它们变化时上面
+七项全都不变，但进程跑的是**旧产物**。少了这条兜底，新世代声明的 `artifact_hash`
+与实际运行的永远对不上，依赖升级也不生效。老快照没有 `artifact_hash`（空串）时
+跳过该判断，避免升级即全量重启。
+
+实测（真机）：只改 `weather` 的 `timeout`（15.0 → 16.0）后 `apply --wait`——
+18 个产物全部复用（未重建），日志只有一行 `将重启 weather：配置变化`，
+其余 17 个服务的 PID 一个没动，全程 5.2 s。
+
+因此激活期是**新旧世代进程共存**的：闸门只等"受影响的那几个"就绪，本来就 READY
+的旧进程也算数。这与 NixOS `switch` 只重启受影响 unit 是同一个取舍。
+
 调谐器（`reconciler.py`）负责验证，因为只有它看得到进程与就绪探针：
 
 1. 重载到新世代 → `state.activation = {phase: "pending", generation_id: N, deadline: now + activation_timeout}`

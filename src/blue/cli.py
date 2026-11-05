@@ -588,14 +588,17 @@ def _gc(config_path: str, *, keep: int | None, dry_run: bool) -> int:
     store = _generation_store(desired)
     artifacts = _artifact_store(desired)
 
-    keep_hashes = store.keep_hashes(keep=keep_count)
+    # 仍有存活进程在用的世代：只重启变了服务 → 进程会跨世代共存，
+    # 老进程的 BLUE_CONFIG_FILE 还指着它启动时那一代，删了就崩（实测踩过）。
+    in_use = _generations_in_use(desired)
+    keep_hashes = store.keep_hashes(keep=keep_count, in_use=in_use)
     # 上一轮 apply 的世代（回滚目标）也得留着，否则 gc 完就没有回滚目标了
     bases = {
         generation.data.deps_hash or "nolock"
         for generation in store.list()
-        if generation.id in store.protected_ids(keep=keep_count)
+        if generation.id in store.protected_ids(keep=keep_count, in_use=in_use)
     }
-    removed_generations = store.gc(keep=keep_count, dry_run=dry_run)
+    removed_generations = store.gc(keep=keep_count, dry_run=dry_run, in_use=in_use)
     removed_artifacts = artifacts.gc(keep_hashes, dry_run=dry_run)
     removed_bases = artifacts.gc_bases(bases, dry_run=dry_run)
 
@@ -604,6 +607,11 @@ def _gc(config_path: str, *, keep: int | None, dry_run: bool) -> int:
         f"{verb}世代 {len(removed_generations)} 个："
         + (", ".join(f"{gid:04d}" for gid in removed_generations) or "无")
     )
+    if in_use:
+        print(
+            "保留运行中进程仍在用的世代："
+            + ", ".join(f"{gid:04d}" for gid in sorted(in_use))
+        )
     print(
         f"{verb}产物 {len(removed_artifacts)} 个："
         + (", ".join(removed_artifacts[:6]) or "无")
@@ -613,6 +621,18 @@ def _gc(config_path: str, *, keep: int | None, dry_run: bool) -> int:
         f"{verb}依赖基座 {len(removed_bases)} 个：" + (", ".join(removed_bases) or "无")
     )
     return 0
+
+
+def _generations_in_use(desired: DesiredState) -> set[int]:
+    """从状态快照里捞出"还有存活进程在用"的世代号。"""
+    snapshot = StateStore(desired.supervisor.state_dir).read_state()
+    if snapshot is None:
+        return set()
+    return {
+        service.generation_id
+        for service in snapshot.services.values()
+        if service.generation_id
+    }
 
 
 def _current_generation_id(state_dir: Path) -> int | None:
