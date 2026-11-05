@@ -494,6 +494,45 @@ supervisor 已启动（pid=12345）
 > 所以升级后需要 `blue down && blue up` 一次；此后 `apply` 即可自理，不用再手动
 > 停起。
 
+### 自重启的已知限制与兜底
+
+`execv` 是"进程用自己替换自己"：PID 不变、锁不丢、服务随后重新拉起。代价是
+**execv 之后没有外部看护**——如果新镜像启动就崩（语法错误、坏配置、缺依赖），
+整棵树会停在原地，只能人工 `blue down && blue up` 救回。
+
+现有的三道缓冲：
+
+1. `apply` 发出信号前会先 `load_desired()` 编译校验，坏配置直接报错、不会触发 execv；
+2. 调谐器收到信号后**再校验一次**配置能否编译，不行就退化成"重载"（保留当前进程）；
+3. 新镜像启动失败会立刻退出，原因写在 `.blue/logs/supervisor.log`。
+
+生产环境建议再包一层进程管理器（execv 失败也能被拉起）：
+
+```ini
+# /etc/systemd/system/blue.service
+[Unit]
+Description=blue supervisor
+After=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/path/to/blue
+# 用 --foreground：交给 systemd 管生命周期，而不是自己 detach
+ExecStart=/path/to/blue/.venv/bin/python -m blue up --foreground
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=default.target
+```
+
+判断一次 apply 走的是哪条路，看 `blue status` 的 supervisor PID：
+
+| PID | 含义 |
+|---|---|
+| **不变** | 走了 `execv` 自重启（只换代码，不换进程） |
+| **变了** | 走了人工 `down`/`up`，或进程管理器重新拉起 |
+
 ## 变更追踪：契约、服务包、SDK 三件都算
 
 `blue plan` / 调谐器判断「要不要重启」时比对三样东西：
