@@ -120,15 +120,14 @@ def test_terminal_failure_on_rolled_back(tmp_path: Path) -> None:
     assert "rolled_back" in failure and "b" in failure
 
 
-def test_terminal_failure_on_config_error(tmp_path: Path) -> None:
-    """配置错误也算终态失败。"""
+def test_config_error_is_not_terminal_failure(tmp_path: Path) -> None:
+    """配置错误不算终态失败：旧世代仍在跑，命令退出码才是真相。"""
     _write_state(tmp_path, config_error="blue.infd 编译失败")
 
     _, snapshot = blue_restart.read_state(tmp_path)
 
-    failure = snapshot.terminal_failure
-    assert failure is not None
-    assert "配置错误" in failure
+    assert snapshot.config_error == "blue.infd 编译失败"
+    assert snapshot.terminal_failure is None
 
 
 def test_wait_converged_returns_immediately_when_stable(tmp_path: Path) -> None:
@@ -254,3 +253,33 @@ def test_render_message_failure_lists_reason(tmp_path: Path) -> None:
     assert "rolled_back" in text
     assert "weather" in text
     assert "已到等待上限" in text
+
+
+def test_failure_reason_prefers_real_error_line(tmp_path: Path) -> None:
+    """失败原因要摘"冒烟失败"那行，而不是盲取尾部。
+
+    实测踩过：冒烟失败的回执里，最后几行是回滚重载的"已稳定"，读起来像成功。
+    """
+    log = tmp_path / "apply.log"
+    log.write_text(
+        "已切换 current → 世代 0016\n"
+        "❌ 冒烟失败：12/13 通过，失败：weather.smoke_tools（缺少工具：x）\n"
+        "   已回滚到世代 0015\n"
+        "世代 0015 已稳定：全部服务就绪\n",
+        encoding="utf-8",
+    )
+
+    reason = blue_restart._failure_reason(log)  # pyright: ignore[reportPrivateUsage]
+
+    assert "冒烟失败" in reason
+    assert "已稳定" not in reason
+
+
+def test_failure_reason_falls_back_to_tail(tmp_path: Path) -> None:
+    """没有明确的失败行时退回尾部（至少给点上下文）。"""
+    log = tmp_path / "apply.log"
+    log.write_text("第一行\n第二行\n第三行\n", encoding="utf-8")
+
+    reason = blue_restart._failure_reason(log)  # pyright: ignore[reportPrivateUsage]
+
+    assert "第三行" in reason

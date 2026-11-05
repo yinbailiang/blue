@@ -13,8 +13,10 @@ from pathlib import Path
 import pytest
 
 from blue.cli import main
+from blue.config import DesiredState
 from blue.control.artifacts import ArtifactStore
-from blue.control.generations import GenerationStore
+from blue.control.desired import load_desired
+from blue.control.generations import Generation, GenerationStore
 from blue.control.model import (
     ActivationState,
     ActualContract,
@@ -25,6 +27,7 @@ from blue.control.model import (
     SdkMeta,
     ServiceStatus,
 )
+from blue.control.smoke import Check, SmokeReport
 from blue.control.state import StateStore
 from blue.runtime import RUNTIME_CONFIG_VERSION
 
@@ -340,6 +343,8 @@ def test_apply_asks_self_restart_when_config_format_is_old(
         config_version=RUNTIME_CONFIG_VERSION - 1,
     )
     signals: list[int] = []
+    # 只关心发哪种信号：验证过程打桩（否则会真等闸门 150s）
+    monkeypatch.setattr("blue.cli._verify_activation", _no_verify)
 
     def fake_kill(pid: int, sig: int) -> None:
         if sig != 0:
@@ -368,6 +373,8 @@ def test_apply_asks_self_restart_on_blue_version_mismatch(
         generation="gen-1", blue_version="0.0.0", config_version=RUNTIME_CONFIG_VERSION
     )
     signals: list[int] = []
+    # 只关心发哪种信号：验证过程打桩（否则会真等闸门 150s）
+    monkeypatch.setattr("blue.cli._verify_activation", _no_verify)
 
     def fake_kill(pid: int, sig: int) -> None:
         if sig != 0:
@@ -810,3 +817,164 @@ def test_wait_for_activation_returns_zero_when_stable(
 
     assert _wait_for_activation(desired, generation, timeout=5.0) == 0
     assert "已稳定" in capsys.readouterr().out
+
+
+# ---------------------------------------------------------------------------
+# 激活验证：控制面变化自动等待 + 冒烟失败自动回滚
+# ---------------------------------------------------------------------------
+
+
+def _no_notify(desired: DesiredState, state: object) -> bool:
+    """不打信号（测试里没有真的 supervisor）。"""
+    return False
+
+
+def _restart_notify(desired: DesiredState, state: object) -> bool:
+    """模拟"控制面代码变了，要 execv"。"""
+    return True
+
+
+def _no_verify(
+    desired: DesiredState, generation: Generation, *, timeout: float | None, smoke: bool
+) -> int:
+    """跳过等待与冒烟（对应 _verify_activation 的关键字调用）。"""
+    return 0
+
+
+def _wait_ok(
+    desired: DesiredState, generation: Generation, timeout: float | None
+) -> int:
+    """假装闸门立刻通过（对应 _wait_for_activation 的位置参数调用）。"""
+    return 0
+
+
+def test_apply_waits_automatically_after_control_plane_change(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """控制面代码变化会 execv，apply 没带 --wait 也要等验证结果。
+
+    否则"命令返回 0 但其实没起来"——自改进最怕的正是这个。
+    """
+    config = _config(tmp_path)
+    _stub_artifacts(monkeypatch)
+    lock = _lock(tmp_path, monkeypatch)
+    verified: list[int] = []
+
+    def fake_verify(
+        desired: DesiredState,
+        generation: Generation,
+        *,
+        timeout: float | None,
+        smoke: bool,
+    ) -> int:
+        verified.append(generation.id)
+        return 0
+
+    monkeypatch.setattr("blue.cli._notify_supervisor", _restart_notify)
+    monkeypatch.setattr("blue.cli._verify_activation", fake_verify)
+    try:
+        assert main(["--config", str(config), "apply"]) == 0
+    finally:
+        lock.release()
+
+    assert verified, "控制面变化时必须自动走验证"
+    assert "自动等待验证结果" in capsys.readouterr().out
+
+
+def test_apply_does_not_wait_when_only_service_changed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """只有服务改动时不强制等待（默认行为保持不变）。"""
+    config = _config(tmp_path)
+    _stub_artifacts(monkeypatch)
+    lock = _lock(tmp_path, monkeypatch)
+    verified: list[int] = []
+
+    def fake_verify(
+        desired: DesiredState,
+        generation: Generation,
+        *,
+        timeout: float | None,
+        smoke: bool,
+    ) -> int:
+        verified.append(generation.id)
+        return 0
+
+    monkeypatch.setattr("blue.cli._notify_supervisor", _no_notify)
+    monkeypatch.setattr("blue.cli._verify_activation", fake_verify)
+    try:
+        assert main(["--config", str(config), "apply"]) == 0
+    finally:
+        lock.release()
+
+    assert verified == []
+
+
+def test_apply_rolls_back_when_smoke_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """冒烟失败按激活失败处理：标记 failed、回滚到上一个 stable、返回非 0。"""
+    config = _config(tmp_path)
+    _stub_artifacts(monkeypatch)
+    lock = _lock(tmp_path, monkeypatch)
+    desired = load_desired(config)
+    store = GenerationStore(desired.supervisor.state_dir)
+    artifacts = ArtifactStore(
+        desired.supervisor.state_dir, project_root=desired.base_dir
+    )
+    first = store.create(desired, artifacts, reason="apply")
+    store.mark_stable(first)
+    store.activate(first)
+    _rewrite_value(config, "changed")
+
+    bad = SmokeReport(
+        checks=(
+            Check(service="demo", name="smoke_tools", ok=False, detail="缺少 demo"),
+        )
+    )
+    monkeypatch.setattr("blue.cli._notify_supervisor", _no_notify)
+    monkeypatch.setattr("blue.cli._wait_for_activation", _wait_ok)
+
+    def fake_smoke(desired: DesiredState, generation: Generation) -> SmokeReport:
+        return bad
+
+    monkeypatch.setattr("blue.cli._run_smoke", fake_smoke)
+    try:
+        code = main(["--config", str(config), "apply", "--wait"])
+        active = store.current()
+    finally:
+        lock.release()
+
+    assert code == 1
+    assert active is not None and active.id == first.id, "必须回到上一个 stable"
+    assert "冒烟失败" in capsys.readouterr().err
+
+
+def test_apply_passes_smoke_and_records_tool_count(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """冒烟通过时把观测到的工具数记进 .stable（诊断用），并返回 0。"""
+    config = _config(tmp_path)
+    _stub_artifacts(monkeypatch)
+    lock = _lock(tmp_path, monkeypatch)
+    good = SmokeReport(
+        checks=(Check(service="demo", name="smoke_tools", ok=True),),
+        tools=("now", "get_weather"),
+    )
+    monkeypatch.setattr("blue.cli._notify_supervisor", _no_notify)
+    monkeypatch.setattr("blue.cli._wait_for_activation", _wait_ok)
+
+    def fake_smoke(desired: DesiredState, generation: Generation) -> SmokeReport:
+        return good
+
+    monkeypatch.setattr("blue.cli._run_smoke", fake_smoke)
+    try:
+        assert main(["--config", str(config), "apply", "--wait"]) == 0
+        store = GenerationStore(tmp_path / ".blue")
+        active = store.current()
+        assert active is not None
+        marker_text = (active.path / ".stable").read_text(encoding="utf-8")
+    finally:
+        lock.release()
+
+    assert '"tools": 2' in marker_text

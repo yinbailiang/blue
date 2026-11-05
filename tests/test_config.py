@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import stat
 import time
@@ -752,3 +753,33 @@ demo = DemoService()
     assert desired.services["demo"].service_dir.is_absolute()
     assert desired.services["demo"].config_path.is_absolute()
     assert os.sep in str(desired.services["demo"].config_path)
+
+
+def test_unknown_supervisor_key_warns_but_does_not_fail(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """未知 supervisor 键：放行 + 告警。
+
+    这是升级路径的硬需求：`blue.infd` 由**正在跑的那个**调谐器解析。若一律拒绝
+    未知键，加一个新配置项就会死锁——旧代码热重载失败、又因"配置编译失败"放弃
+    execv 自重启，只能人工 `blue down && blue up`（实测卡过）。
+    """
+    from blue.control.desired import _load_supervisor  # pyright: ignore[reportPrivateUsage]
+
+    with caplog.at_level(logging.WARNING):
+        settings = _load_supervisor(
+            {"state_dir": ".blue", "future_knob": 1, "smoke_enabled": False}, tmp_path
+        )
+
+    assert settings.smoke_enabled is False
+    assert settings.model_extra == {"future_knob": 1}
+    assert "future_knob" in caplog.text
+
+
+def test_bad_supervisor_value_still_fails(tmp_path: Path) -> None:
+    """值本身非法仍然要报错——放行未知键不等于放行错值。"""
+    from blue.control.desired import _load_supervisor  # pyright: ignore[reportPrivateUsage]
+    from blue.errors import ConfigError
+
+    with pytest.raises(ConfigError):
+        _load_supervisor({"activation_timeout": -1}, tmp_path)

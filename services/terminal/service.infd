@@ -22,4 +22,7 @@ service {
   stop_timeout = 10.0
   startup_timeout = 30.0
   readiness = "process"
+
+  # 冒烟：本服务注册多个终端工具，只要求至少注册上 1 个
+  smoke_min_tools = 1
 }

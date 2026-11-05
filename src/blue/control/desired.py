@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import os
 import tomllib
 from collections.abc import Iterable
@@ -39,6 +40,8 @@ from blue.control.model import (
 )
 from blue.errors import ConfigError
 from blue.runtime import CONFIG_SECTION, INFRA_SECTION
+
+logger = logging.getLogger(__name__)
 
 __all__ = [
     "DEFAULT_BUS_URL",
@@ -383,6 +386,16 @@ def redact_state(desired: DesiredState) -> dict[str, Any]:
 
 
 def _load_supervisor(raw: object, base_dir: Path) -> SupervisorSettings:
+    """解析 ``supervisor`` 块；未知键只告警、不报错。
+
+    ``blue.infd`` 是由**已经在跑的那个**调谐器解析的。如果新增配置项一律拒绝
+    （``extra="forbid"``），升级路径就会死锁：旧代码认不出新键 → 热重载失败；
+    又因为"配置编译失败"放弃 execv 自重启 → 永远停在 old generation 上，只能
+    `blue down && blue up` 人工救。实测就是这么卡住的。
+
+    所以未知键放行（``extra="allow"``）并**告警点名**——代价是拼错的键不会报错，
+    用告警兜住。
+    """
     if raw is None:
         settings = SupervisorSettings()
     elif isinstance(raw, dict):
@@ -390,6 +403,12 @@ def _load_supervisor(raw: object, base_dir: Path) -> SupervisorSettings:
             settings = SupervisorSettings.model_validate(raw)
         except ValidationError as error:
             raise ConfigError(f"supervisor 配置校验失败：{error}") from error
+        unknown = sorted(settings.model_extra or {})
+        if unknown:
+            logger.warning(
+                "supervisor 块里有本版本不认识的键（拼错了？还是配置比代码新？）：%s",
+                ", ".join(unknown),
+            )
     else:
         raise ConfigError("supervisor 必须是对象")
 

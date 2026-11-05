@@ -23,4 +23,7 @@ service {
   stop_timeout = 10.0
   startup_timeout = 15.0
   readiness = "process"
+
+  # 冒烟：真写一条消息再读回来（走自己包里的 blue_service_session.smoke）
+  smoke_command = ["python", "-m", "blue_service_session.smoke"]
 }

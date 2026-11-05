@@ -14,4 +14,7 @@ service {
   stop_timeout = 5.0
   startup_timeout = 30.0
   readiness = "process"
+
+  # 冒烟：激活后确认自己的工具真的注册上了（否则 apply 判失败并回滚）
+  smoke_tools = ["run_shell"]
 }

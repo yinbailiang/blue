@@ -57,6 +57,16 @@ supervisor {
   artifact_link_mode: str = "hardlink"
   # 产物目录与 .venv 跨分区时硬链接会退化成拷贝，是否告警。
   artifact_warn_cross_device: bool = true
+
+  # —— 激活验证 ——
+  # 控制面代码变化会触发 execv 自重启；这种 apply 默认也等验证结果，
+  # 免得"命令返回 0 但其实没起来"。
+  await_control_change: bool = true
+  # 闸门通过后跑服务自己声明的冒烟检查（service.infd 的 smoke_tools /
+  # smoke_min_tools / smoke_command），失败按激活失败处理并回滚。
+  smoke_enabled: bool = true
+  # 冒烟里总线请求的超时；命令超时由各服务自己的 smoke_timeout 决定。
+  smoke_timeout: <float, positive> = 20.0
 }
 
 bus = BusService(

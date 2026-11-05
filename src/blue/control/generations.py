@@ -462,10 +462,24 @@ class GenerationStore:
             tmp.unlink(missing_ok=True)
             raise BlueError(f"切换 current 失败：{error}") from error
 
-    def mark_stable(self, generation: Generation) -> None:
-        """标记世代已验证通过。"""
-        (generation.path / STABLE_MARKER).write_text("ok\n", encoding="utf-8")
+    def mark_stable(self, generation: Generation, *, tools: int | None = None) -> None:
+        """标记世代已验证通过。
+
+        ``.stable`` 有**两个写者**：调谐器的健康闸门（不带观测值）和 CLI 的冒烟
+        （带工具登记数）。后来者不能抹掉已有内容，否则观测值会被闸门那次覆盖掉。
+
+        :param tools: 冒烟观测到的工具数；``None`` 表示"只标通过，别动已有内容"
+        """
+        marker = generation.path / STABLE_MARKER
         (generation.path / FAILED_MARKER).unlink(missing_ok=True)
+        if tools is None and marker.is_file():
+            return
+        payload = (
+            json.dumps({"tools": tools, "checked_at": time.time()}, ensure_ascii=False)
+            if tools is not None
+            else "ok"
+        )
+        marker.write_text(payload + "\n", encoding="utf-8")
 
     def mark_failed(self, generation: Generation, message: str = "") -> None:
         """标记世代激活失败（已回滚），原因写进同目录的 ``.failed``。"""

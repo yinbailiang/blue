@@ -511,3 +511,36 @@ def test_gc_protects_generations_in_use(tmp_path: Path) -> None:
     assert 2 not in removed, "在用的世代不能被回收"
     assert removed == [1]
     assert store.load(2).complete is True
+
+
+def test_mark_stable_keeps_tool_observation(tmp_path: Path) -> None:
+    """`.stable` 有两个写者：CLI 冒烟（带观测值）与调谐器闸门（不带）。
+
+    后写的不许抹掉观测值——实测踩过：CLI 写完 {"tools": 20}，闸门重标一次变成
+    "ok"，工具登记数就丢了。
+    """
+    store = _store(tmp_path)
+    generation = store.create(
+        _desired(tmp_path, generation="gen-1"), _artifacts(tmp_path), reason="apply"
+    )
+
+    store.mark_stable(generation, tools=20)
+    store.mark_stable(generation)  # 调谐器闸门通过，不带观测值
+
+    marker = (generation.path / ".stable").read_text(encoding="utf-8")
+    assert '"tools": 20' in marker
+    assert generation.state == "stable"
+
+
+def test_mark_failed_clears_stable_marker(tmp_path: Path) -> None:
+    """冒烟失败后必须从 stable 变成 failed（回滚的可观测依据）。"""
+    store = _store(tmp_path)
+    generation = store.create(
+        _desired(tmp_path, generation="gen-1"), _artifacts(tmp_path), reason="apply"
+    )
+    store.mark_stable(generation, tools=20)
+
+    store.mark_failed(generation, "冒烟失败：缺少工具")
+
+    assert generation.state == "failed"
+    assert "冒烟失败" in (generation.path / ".failed").read_text(encoding="utf-8")

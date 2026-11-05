@@ -238,6 +238,51 @@ blue apply [--wait] [--timeout S] [--staged] [--no-build] [--no-auto-rollback]
 
 调谐器（`reconciler.py`）负责验证，因为只有它看得到进程与就绪探针：
 
+### 7.1 冒烟：验证「行为对」，不只是「起来了」
+
+健康闸门只看就绪探针。一个能启动、探针通过、但工具全没注册成功的世代照样会被标成
+`stable`——而自改进最容易造出的就是这种「半对不对」的错（本项目实测过：改前端资源
+不生效、服务一直 Ready）。所以闸门通过后还会跑一遍**每个服务自己声明的**冒烟检查，
+失败就按激活失败处理（标记 `failed` + 自动回滚到上一个 stable）。
+
+声明写在服务自己的 `service.infd` 里，控制面只负责执行，**不含任何业务知识**：
+
+```infd
+service {
+  name = "weather"
+  smoke_tools = ["get_weather"]     # 这个工具必须出现在注册表里
+}
+
+service {
+  name = "terminal"
+  smoke_min_tools = 1               # 注册多个工具时：至少注册上 1 个
+}
+
+service {
+  name = "session"
+  smoke_command = ["python", "-m", "blue_service_session.smoke"]   # 自定义检查
+}
+```
+
+| 声明 | 语义 |
+| --- | --- |
+| `smoke_tools` | 这些工具名必须出现在工具注册表里（最精确：服务自己最清楚） |
+| `smoke_min_tools` | 本服务至少要注册几个工具（零维护，抓「一个都没注册」） |
+| `smoke_command` | 检查命令，退出码 0 通过；首元素 `python` 换成**该服务产物的解释器**，cwd 是项目根，环境带本世代的 `BLUE_CONFIG_FILE` |
+| `smoke_timeout` | 该命令的超时（默认 20s） |
+
+没声明的服务直接跳过（显式优于默认拦截）。`supervisor.smoke_enabled = false` 整体关闭，
+`apply --no-smoke` 单次跳过。
+
+为什么不在控制面里硬编码探针（比如"数工具个数""给 session 写读一条"）：那等于把业务
+知识塞进控制面——加一个服务就要改控制面，且判据永远是二手的。现在 session 的写读检查
+（往 `blue-smoke` 探针会话写一条再读回、最后 `session.reset` 删掉，零残留）写在 session
+自己的包里，weather 只需一行 `smoke_tools`。
+
+实测（真机）：正常世代 `冒烟通过：13/13 通过（smoke_command×1、smoke_min_tools×1、
+smoke_tools×11，13 个服务）`；把 `weather` 的 `smoke_tools` 改成不存在的名字后
+`12/13` 失败 → 自动回滚到上一世代、该世代标 `failed`、命令退出码 1。
+
 1. 重载到新世代 → `state.activation = {phase: "pending", generation_id: N, deadline: now + activation_timeout}`
 2. 每轮 `_tick` 检查：所有服务 `READY` → 落 `.stable`，`phase = "stable"`
 3. 超过 deadline 仍未全绿 → 若 `auto_rollback` 开且存在上一个 stable：

@@ -633,19 +633,26 @@ verify → 等全部服务 Ready；超时/失败 → 自动翻回上一个 stabl
 | `blue generations` | 列出全部世代、当前指针与状态（`*` 为当前） |
 | `blue gc --keep N` | 回收老世代与无人引用的产物；`--dry-run` 先看要删什么 |
 
-三条容易踩的规则：
+六条容易踩的规则：
 
 1. **切换世代 ≠ 全量重启**。只有真正变了的服务会重启，判据是服务清单 / 配置 /
    源码 / 版本 / 依赖契约 / SDK 核心 / 依赖的 `sdk/*` 包，外加**产物指纹兜底**
    （`uv.lock`、解释器版本变了而上面七项都没变时，也必须重启，否则进程继续跑旧产物）。
    实测：只改 `weather` 的 `timeout`，18 个产物全部复用、只有 `weather` 重启，
    其余 17 个 PID 一个没动，5.2 s 完成。
-2. **控制面设置随世代冻结**。`activation_timeout`、`generation_auto_rollback`
+2. **闸门之后还有冒烟**：每个服务在自己的 `service.infd` 里声明怎么检查自己
+   （`smoke_tools` / `smoke_min_tools` / `smoke_command`），失败就回滚。控制面只执行、
+   不含业务知识——session 的写读检查写在 session 包里，weather 只需一行
+   `smoke_tools = ["get_weather"]`。实测：正常 13/13 通过；故意写错一个工具名 →
+   自动回滚 + 退出码 1。
+3. **控制面变化会自动等结果**：`src/blue/**` 变了会 execv，这种 apply 即使没带
+   `--wait` 也会等验证（`supervisor.await_control_change`），免得"命令返回 0 但其实没起来"。
+4. **控制面设置随世代冻结**。`activation_timeout`、`generation_auto_rollback`
    这些属于"这一代怎么跑"，存进 `generation.json`；所以 `apply --config other.infd`
    改这些值会生效（早期版本没存，实测就是这里翻的车：设 12s 却在跑 120s）。
-3. **gc 至少保留两个 stable**。自动回滚的目标是"上一个 stable"，只留一个等于
+5. **gc 至少保留两个 stable**。自动回滚的目标是"上一个 stable"，只留一个等于
    把机制刚需的东西回收掉。
-4. **execv 自重启 ≠ 崩溃**。两者都表现为"`current` 指向的世代还没 stable"，
+6. **execv 自重启 ≠ 崩溃**。两者都表现为"`current` 指向的世代还没 stable"，
    区别在 PID：execv 保留 PID，崩溃后重新拉起的一定是新 PID。用状态快照里的
    `supervisor_pid` 判定，自重启要继续验证，不能误回滚。
 

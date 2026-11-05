@@ -36,6 +36,7 @@ from blue.control.logs import LogManager
 from blue.control.model import ActualState, ServiceStatus
 from blue.control.reconciler import Supervisor
 from blue.control.runner import ProcessRunner
+from blue.control.smoke import SmokeReport, run_smoke
 from blue.control.state import LockInfo, StateStore
 from blue.errors import BlueError
 from blue.runtime import RUNTIME_CONFIG_VERSION
@@ -61,6 +62,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     timeout=args.timeout,
                     staged=bool(args.staged),
                     build=not bool(args.no_build),
+                    smoke=not bool(args.no_smoke),
                 )
             case "activate":
                 return _activate(
@@ -68,6 +70,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     generation_id=int(args.generation),
                     wait=bool(args.wait),
                     timeout=args.timeout,
+                    smoke=not bool(args.no_smoke),
                 )
             case "rollback":
                 return _rollback(
@@ -354,8 +357,12 @@ def _prepare_generation(
     return desired, generation
 
 
-def _notify_supervisor(desired: DesiredState, state: StateStore) -> None:
-    """让调谐器按 ``current`` 重新加载（必要时先 execv 换掉自己的代码）。"""
+def _notify_supervisor(desired: DesiredState, state: StateStore) -> bool:
+    """让调谐器按 ``current`` 重新加载（必要时先 execv 换掉自己的代码）。
+
+    :return: 是否要求调谐器**自重启**（控制面代码变了）。调用方据此决定要不要
+        等待验证结果——自重启最容易"命令返回了但其实没起来"
+    """
     running, info = state.supervisor_running()
     if not running or info is None:
         raise BlueError("supervisor 未运行；请先执行 blue up")
@@ -368,6 +375,7 @@ def _notify_supervisor(desired: DesiredState, state: StateStore) -> None:
         print(f"blue 代码已变化：已通知 supervisor 重启自己（pid={info.pid}）")
     else:
         print(f"已通知 supervisor 重新加载（pid={info.pid}）")
+    return restart
 
 
 def _wait_for_activation(
@@ -406,6 +414,51 @@ def _wait_for_activation(
     raise BlueError(f"等待世代 {generation.id:04d} 验证超时（{limit:.0f}s）")
 
 
+def _run_smoke(desired: DesiredState, generation: Generation) -> SmokeReport:
+    """跑服务自己声明的冒烟检查。"""
+    artifacts = _artifact_store(desired)
+    return asyncio.run(
+        run_smoke(
+            desired, artifacts=artifacts, timeout=desired.supervisor.smoke_timeout
+        )
+    )
+
+
+def _verify_activation(
+    desired: DesiredState,
+    generation: Generation,
+    *,
+    timeout: float | None,
+    smoke: bool,
+) -> int:
+    """等健康闸门 → 跑冒烟；冒烟失败就当作激活失败处理（标记 + 回滚）。"""
+    code = _wait_for_activation(desired, generation, timeout)
+    if code != 0 or not smoke:
+        return code
+    report = _run_smoke(desired, generation)
+    if report.ok:
+        print(f"冒烟通过：{report.summary()}")
+        _generation_store(desired).mark_stable(generation, tools=len(report.tools))
+        return 0
+
+    store = _generation_store(desired)
+    print(f"❌ 冒烟失败：{report.summary()}", file=sys.stderr)
+    store.mark_failed(generation, f"冒烟失败：{report.summary()}")
+    fallback = store.latest_stable(exclude=generation.id)
+    if fallback is None:
+        print("   没有更早的稳定世代可回滚，请人工处理", file=sys.stderr)
+        return 1
+    store.activate(fallback)
+    print(f"   已回滚到世代 {fallback.id:04d}", file=sys.stderr)
+    try:
+        _notify_supervisor(desired, StateStore(desired.supervisor.state_dir))
+    except BlueError as error:
+        print(f"   回滚后通知调谐器失败：{error}", file=sys.stderr)
+        return 1
+    _wait_for_activation(desired, fallback, timeout)
+    return 1
+
+
 def _apply(
     config_path: str,
     *,
@@ -413,16 +466,21 @@ def _apply(
     timeout: float | None,
     staged: bool = False,
     build: bool = True,
+    smoke: bool = True,
 ) -> int:
-    """三阶段 apply：构建 → 原子切换 → 健康验证。
+    """三阶段 apply：构建 → 原子切换 → 健康验证（+ 冒烟）。
 
     ``--staged`` 只到"世代目录已就绪"为止（等价 NixOS 的 ``nixos-rebuild boot``），
     用 ``blue activate <N>`` 才真正切换。
+
+    控制面代码变化会触发 execv 自重启：那种情况下**默认也要等验证结果**
+    （``supervisor.await_control_change``），否则"命令返回 0 但其实没起来"。
     """
     desired, generation = _prepare_generation(config_path, reason="apply", build=build)
     store = _generation_store(desired)
     state = StateStore(desired.supervisor.state_dir)
     current = store.current()
+    smoke = smoke and desired.supervisor.smoke_enabled
 
     if staged:
         print(
@@ -435,8 +493,8 @@ def _apply(
         print(
             f"配置未变化：沿用世代 {generation.id:04d}（{generation.generation[:12]}）"
         )
-        _notify_supervisor(desired, state)
-        return _wait_for_activation(desired, generation, timeout) if wait else 0
+        restart = _notify_supervisor(desired, state)
+        return _await_result(desired, generation, wait, timeout, smoke, restart=restart)
 
     store.activate(generation)
     parent = generation.parent_id
@@ -444,12 +502,37 @@ def _apply(
         f"已切换 current → 世代 {generation.id:04d}"
         f"（父世代 {parent if parent is not None else '无'}）"
     )
-    _notify_supervisor(desired, state)
-    return _wait_for_activation(desired, generation, timeout) if wait else 0
+    restart = _notify_supervisor(desired, state)
+    return _await_result(desired, generation, wait, timeout, smoke, restart=restart)
+
+
+def _await_result(
+    desired: DesiredState,
+    generation: Generation,
+    wait: bool,
+    timeout: float | None,
+    smoke: bool,
+    *,
+    restart: bool,
+) -> int:
+    """按"要不要等"的规则收尾：``--wait``、或控制面自重启时自动等。"""
+    should_wait = wait or (
+        restart and desired.supervisor.await_control_change and not wait
+    )
+    if not should_wait:
+        return 0
+    if restart and not wait:
+        print("检测到控制面代码变化（会 execv 自重启），自动等待验证结果")
+    return _verify_activation(desired, generation, timeout=timeout, smoke=smoke)
 
 
 def _activate(
-    config_path: str, *, generation_id: int, wait: bool, timeout: float | None
+    config_path: str,
+    *,
+    generation_id: int,
+    wait: bool,
+    timeout: float | None,
+    smoke: bool = True,
 ) -> int:
     """激活一个已存在的世代（配合 ``apply --staged``）。"""
     desired = load_desired(config_path)
@@ -457,8 +540,15 @@ def _activate(
     generation = store.load(generation_id)
     store.activate(generation)
     print(f"已切换 current → 世代 {generation.id:04d}（{generation.generation[:12]}）")
-    _notify_supervisor(desired, StateStore(desired.supervisor.state_dir))
-    return _wait_for_activation(desired, generation, timeout) if wait else 0
+    restart = _notify_supervisor(desired, StateStore(desired.supervisor.state_dir))
+    return _await_result(
+        desired,
+        generation,
+        wait,
+        timeout,
+        smoke and desired.supervisor.smoke_enabled,
+        restart=restart,
+    )
 
 
 def _rollback(
@@ -1327,11 +1417,17 @@ def _parser() -> argparse.ArgumentParser:
     apply_parser.add_argument(
         "--no-build", action="store_true", help="不构建产物，只切换世代"
     )
+    apply_parser.add_argument(
+        "--no-smoke", action="store_true", help="跳过冒烟检查（不推荐）"
+    )
 
     activate_parser = subparsers.add_parser("activate", help="激活一个已存在的世代")
     activate_parser.add_argument("generation", type=int, help="世代号")
     activate_parser.add_argument("--wait", action="store_true", help="等待健康验证")
     activate_parser.add_argument("--timeout", type=float, default=None)
+    activate_parser.add_argument(
+        "--no-smoke", action="store_true", help="跳过冒烟检查（不推荐）"
+    )
 
     rollback_parser = subparsers.add_parser(
         "rollback", help="回滚：整机或单个服务回到旧世代"

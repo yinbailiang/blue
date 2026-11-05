@@ -83,9 +83,12 @@ class Snapshot:
 
     @property
     def terminal_failure(self) -> str | None:
-        """终态失败（不必再等）：返回原因，否则 None。"""
-        if self.config_error:
-            return f"配置错误：{self.config_error}"
+        """终态失败（不必再等）：返回原因，否则 None。
+
+        只看**激活相位**。``config_error`` 不算终态失败：配置坏掉时系统通常仍在
+        旧世代上正常跑（这正是世代机制要的效果），把它当失败会误报——命令的退出码
+        已经能说明 apply 本身是否失败。
+        """
         if self.phase in ("failed", "rolled_back"):
             detail = "、".join(self.failures) or self.message or "未知"
             return f"激活{self.phase}：{detail}"
@@ -234,6 +237,9 @@ def render_message(result: dict[str, Any]) -> str:
     detail = result.get("detail")
     if detail:
         line += f"\n原因：{detail}"
+    warning = result.get("config_error")
+    if warning:
+        line += f"\n提示：blue.infd 有错（旧世代仍在跑）：{warning}"
     not_ready = result.get("not_ready") or []
     if not_ready:
         line += f"\n未就绪：{'、'.join(str(item) for item in not_ready[:6])}"
@@ -306,6 +312,27 @@ def notify(result: dict[str, Any], *, state_dir: Path, session_id: str | None) -
         return False
 
 
+_FAILURE_MARKERS = ("冒烟失败", "激活失败", "配置编译失败", "错误：", "❌")
+"""日志里表示"真的失败了"的行首标记；比盲取尾部靠谱得多。"""
+
+
+def _failure_reason(log_path: Path) -> str:
+    """从日志里挑出真正的失败原因。
+
+    直接取尾部会把回滚之后的"已稳定"当成结论——实测踩过：冒烟失败的回执里
+    最后几行是回滚重载的成功日志，读起来像是成功了。
+    """
+    try:
+        text = log_path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return ""
+    for line in text.splitlines():
+        stripped = line.strip()
+        if any(marker in stripped for marker in _FAILURE_MARKERS):
+            return stripped[:400]
+    return _log_tail(log_path, 4)
+
+
 def _log_tail(path: Path, lines: int = 12) -> str:
     try:
         text = path.read_text(encoding="utf-8", errors="replace")
@@ -349,7 +376,7 @@ def run_worker(
     ok = exit_code == 0 and converged
     detail = ""
     if exit_code != 0:
-        detail = f"blue {commands[0]} 退出码 {exit_code}：{_log_tail(log_path, 6)}"
+        detail = f"blue {commands[0]} 退出码 {exit_code}：{_failure_reason(log_path)}"
     elif failure is not None:
         detail = failure
 
@@ -369,6 +396,7 @@ def run_worker(
         "total": snapshot.total,
         "not_ready": snapshot.not_ready,
         "detail": detail,
+        "config_error": snapshot.config_error or "",
         "log": str(log_path),
         "session_id": session_id or pick_session(state_dir),
         "notified": False,

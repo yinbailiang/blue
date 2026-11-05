@@ -59,12 +59,34 @@ class ServiceMeta(BaseModel):
         default=None, description="TCP 就绪目标（host:port）；缺省时 bus 自动推导"
     )
     env: dict[str, str] = Field(default_factory=dict, description="附加环境变量")
+    smoke_tools: tuple[str, ...] = Field(
+        default=(),
+        description="冒烟：这些工具名必须出现在注册表里（服务自己声明，控制面只核对）",
+    )
+    smoke_min_tools: int = Field(
+        default=0,
+        ge=0,
+        description="冒烟：本服务至少要注册几个工具（0 = 不检查；抓「一个都没注册」）",
+    )
+    smoke_command: tuple[str, ...] = Field(
+        default=(),
+        description=(
+            "冒烟：自定义检查命令，退出码 0 视为通过。首元素为 python 时替换成"
+            "该服务产物的解释器；cwd 为项目根；环境里带本世代的 BLUE_CONFIG_FILE"
+        ),
+    )
+    smoke_timeout: float = Field(default=20.0, gt=0, description="冒烟命令超时（秒）")
 
 
 class SupervisorSettings(BaseModel):
-    """`blue.infd` 中 `supervisor` 块的配置。"""
+    """`blue.infd` 中 `supervisor` 块的配置。
 
-    model_config = ConfigDict(extra="forbid", frozen=True)
+    ``extra="allow"`` 是**升级路径**的必需品：这份配置由当前正在跑的调谐器解析，
+    拒绝未知键会让"加了新配置项"变成既不能热重载、又不能自重启的死锁。
+    未知键由 :func:`blue.control.desired.load_desired` 告警点名。
+    """
+
+    model_config = ConfigDict(extra="allow", frozen=True)
 
     state_dir: Path = Field(default=Path(".blue"), description="状态/日志/锁目录")
     reconcile_interval: float = Field(
@@ -107,6 +129,17 @@ class SupervisorSettings(BaseModel):
     )
     artifact_warn_cross_device: bool = Field(
         default=True, description="硬链接跨分区（会退化成拷贝）时是否告警"
+    )
+    await_control_change: bool = Field(
+        default=True,
+        description="检测到控制面代码变化（会 execv 自重启）时，apply 自动等待验证结果",
+    )
+    smoke_enabled: bool = Field(
+        default=True,
+        description="闸门通过后是否跑冒烟探针（验证「行为对」，不只是「起来了」）",
+    )
+    smoke_timeout: float = Field(
+        default=20.0, gt=0, description="冒烟里总线请求的超时（命令超时由服务自己声明）"
     )
 
 
