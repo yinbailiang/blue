@@ -288,6 +288,15 @@ def test_real_config_check(capsys: pytest.CaptureFixture[str]) -> None:
     assert "bus" in output
 
 
+def test_real_render_outputs_json(capsys: pytest.CaptureFixture[str]) -> None:
+    """仓库自带的 blue.infd 渲染成 JSON 不崩（模板里有 Decimal 数值字段）。"""
+    code = main(["--config", str(ROOT / "blue.infd"), "render"])
+    payload = json.loads(capsys.readouterr().out)
+    assert code == 0
+    assert payload["services"]["agent"]["config"]["tool_timeout"] == 1800.0
+    assert payload["services"]["agent"]["config"]["api_key"] == "***"
+
+
 def test_apply_asks_self_restart_only_when_sdk_hash_differs(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

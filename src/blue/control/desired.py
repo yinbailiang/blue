@@ -296,13 +296,22 @@ def digest_package(
 
 
 def render_state(desired: DesiredState, *, redact: bool = True) -> dict[str, Any]:
-    """把期望状态渲染成可打印的 JSON 结构；默认脱敏。"""
+    """把期望状态渲染成可打印的 JSON 结构；默认脱敏。
+
+    模板引擎用 ``Decimal`` 表示 infd 里的浮点字面量、用 ``Path`` 表示路径，它们
+    都不是 JSON 原生类型。这里统一就地转换，返回的结构可以直接交给
+    ``json.dumps``——否则 ``blue render`` 会在序列化那一刻抛 ``TypeError``。
+
+    :param desired: 编译好的期望状态。
+    :param redact: 是否把疑似密钥的字段换成 ``***``。
+    :return: 可被 ``json.dumps`` 直接序列化的嵌套结构。
+    """
     services: dict[str, Any] = {}
     for name, service in desired.services.items():
         config = _redact(service.config) if redact else service.config
         services[name] = {
             "meta": service.meta.model_dump(mode="json"),
-            "config": config,
+            "config": _json_safe(config),
             "config_hash": service.config_hash,
             "package_version": service.package_version,
             "source_hash": service.source_hash,
@@ -658,6 +667,26 @@ def redact_config(config: dict[str, Any]) -> dict[str, Any]:
     """
     redacted = _redact(config)
     return cast(dict[str, Any], redacted) if isinstance(redacted, dict) else {}
+
+
+def _json_safe(value: object) -> object:
+    """把配置值里的非 JSON 原生对象换成 JSON 原生类型。
+
+    规则与 :func:`_json_default` 保持一致：``Decimal`` → ``float``（保留数值语义，
+    而不是变成字符串 ``"30.0"``）、``Path`` → ``str``、元组 → 列表。
+    """
+    if isinstance(value, dict):
+        mapping = cast(dict[object, object], value)
+        return {str(key): _json_safe(item) for key, item in mapping.items()}
+    if isinstance(value, list):
+        return [_json_safe(item) for item in cast(list[object], value)]
+    if isinstance(value, tuple):
+        return [_json_safe(item) for item in cast(tuple[object, ...], value)]
+    if isinstance(value, Decimal):
+        return float(value)
+    if isinstance(value, Path):
+        return str(value)
+    return value
 
 
 def _redact(value: object) -> object:
