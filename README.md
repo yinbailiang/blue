@@ -465,6 +465,30 @@ BLUE_BUS_URL=amqp://guest:guest@127.0.0.1:5672/blue \
 > **网络提示**：`weather` 会向 `wttr.in` 发起 HTTPS 请求；如需换源或镜像，
 > 在 `blue.infd` 里传 `WeatherService(base_url = ..., timeout = ...)`。
 
+## 思考内容（reasoning）会进上下文——注意前提
+
+DeepSeek 官方文档「思考模式」写的是：`reasoning_content` 是否拼进上下文，**取决于
+请求是否携带 `tools`**：
+
+| 请求 | 历史 reasoning_content |
+|---|---|
+| **不带 `tools`** | 不拼接；传了也被忽略 |
+| **带 `tools`** | **应回传，且会被拼接进上下文** |
+
+blue 是 agent，每个请求都带工具目录（当前 36 个），所以走的是第二行：历史轮的
+思考内容会一直留在上下文里。实测这条长会话：**prompt 709,570 token 里 235,451
+token（33%）是历史 reasoning**（用官方分词器算 703,471，与账单差 0.9%）。
+
+官方给的调节旋钮是 `reasoning_effort`（默认 `high`，思考最长）：
+
+```infd
+reasoning_effort = "low"   # low / medium / high；null = 用服务端默认（high）
+```
+
+调低会让每轮的思考更短，从而**从源头**压住上下文增长（历史 reasoning 也随之变小）。
+不要用"自己截断历史 reasoning"来省 token——文档明确说带 tools 时应回传，砍掉属于
+偏离官方行为，可能影响工具调用的连贯性。
+
 ## 调谐器是独立进程，能重启自己
 
 `blue up` 默认**后台拉起独立的调谐器进程**（`start_new_session`，日志落

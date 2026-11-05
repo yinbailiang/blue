@@ -65,6 +65,14 @@ class AgentConfig(BaseModel):
         gt=0,
         description="同一会话并发请求的排队上限（秒），超时返回「会话繁忙」",
     )
+    reasoning_effort: Literal["low", "medium", "high"] | None = Field(
+        default=None,
+        description=(
+            "思考强度（DeepSeek：low/medium/high，默认 high）。"
+            "带 tools 的请求里，历史 reasoning_content 会被拼接进上下文——"
+            "调低强度能显著缩小每轮的思考长度，从而压住上下文增长"
+        ),
+    )
     compact_history: bool = Field(
         default=True, description="发送前压缩历史里的工具往返（不改持久化数据）"
     )

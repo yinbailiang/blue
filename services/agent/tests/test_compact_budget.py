@@ -119,3 +119,19 @@ def test_boundary_is_quantised_so_the_prefix_stays_stable() -> None:
     )
     assert first[:50] == second[:50]
     assert len(second) == len(history) + 1
+
+
+def _assistant_with_reasoning(reasoning: str) -> Message:
+    """造一条带思维链的助手消息。"""
+    return Message.assistant(content="好", reasoning_content=reasoning)
+
+
+def test_estimate_counts_reasoning() -> None:
+    """思维链必须计入预算：带 tools 时它会被拼进上下文（DeepSeek 文档）。
+
+    漏算过一次：这条会话"正文 468k tok + 思维链 235k tok"，但按字符估算只看到
+    正文，预算等于虚高了 33%。
+    """
+    without = Message.assistant(content="好")
+    with_reasoning = _assistant_with_reasoning("x" * 500)
+    assert estimate_chars([with_reasoning]) == estimate_chars([without]) + 500

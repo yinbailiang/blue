@@ -12,6 +12,7 @@
   llm_http_retries: <int, range(0, 10)> = 3
   queue_timeout: <float, positive> = 60.0
   outbox_max_attempts: <int, range(1, )> = 3
+  reasoning_effort: <literal("low", "medium", "high")?> = null
   compact_history: bool = true
   compact_keep_messages: <int, range(0, 1000)> = 300
   compact_text_chars: <int, range(20, 20000)> = 200

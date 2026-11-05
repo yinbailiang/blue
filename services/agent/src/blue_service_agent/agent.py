@@ -1024,7 +1024,10 @@ class AgentCore:
     def _request_config(self, tools: list[ToolDefinition]) -> OpenAIRequestConfig:
         """按 provider 构造请求级配置（DeepSeek 客户端要求其专属类型）。"""
         if self._settings.provider == "deepseek":
-            return DeepSeekRequestConfig(tools=tools or None)
+            return DeepSeekRequestConfig(
+                tools=tools or None,
+                reasoning_effort=self._settings.reasoning_effort,
+            )
         return OpenAIRequestConfig(tools=tools or None)
 
     async def _tools_for(self, bus_proxy: EventBus.Proxy) -> list[ToolDefinition]:

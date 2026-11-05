@@ -141,10 +141,18 @@ class _Limits:
 
 
 def estimate_chars(messages: Iterable[Message]) -> int:
-    """粗略估算一批消息的文本体量（用于日志对比）。"""
+    """估算一批消息的**上下文体量**（字符），用于预算与日志。
+
+    必须把 ``reasoning_content`` 算进来：DeepSeek 文档明确——
+    **请求携带 ``tools`` 时，历史轮次的思维链要回传并拼接进上下文**
+    （我们每轮都带工具，所以它实实在在占窗口）。
+    漏算会让预算虚高：实测这条会话"正文 468k tok + 思维链 235k tok"，
+    而按字符估算时只看到前者。
+    """
     total = 0
     for message in messages:
         total += len(_message_text(message))
+        total += len(message.reasoning_content or "")
         for call in message.tool_calls or []:
             total += len(json.dumps(call.function.arguments, ensure_ascii=False))
     return total
