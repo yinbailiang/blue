@@ -39,6 +39,7 @@ __all__ = [
     "SessionManager",
     "SessionNotFoundError",
     "TerminalSession",
+    "decode_escapes",
     "supports_line_editing",
 ]
 
@@ -56,6 +57,77 @@ MOUSE_MOTION_FLAG = 32
 
 _MOUSE_MODE = re.compile(rb"\x1b\[\?(1000|1002|1003)(h|l)")
 """程序对鼠标跟踪的开关（DECSET/DECRST）。"""
+
+ESCAPE_ALIASES: Final[dict[str, str]] = {
+    "\\": "\\",
+    "0": "\0",
+    "a": "\a",
+    "b": "\b",
+    "e": "\x1b",
+    "f": "\f",
+    "n": "\n",
+    "r": "\r",
+    "t": "\t",
+    "v": "\v",
+}
+"""单字母转义序列（``\\e`` 即 ESC，``\\r`` 即回车）。"""
+
+_HEX_WIDTH: Final[dict[str, int]] = {"x": 2, "u": 4, "U": 8}
+"""``\\xHH`` / ``\\uXXXX`` / ``\\UXXXXXXXX`` 各自的十六进制位数。"""
+
+_HEX_DIGITS: Final = frozenset("0123456789abcdefABCDEF")
+
+
+def decode_escapes(text: str) -> str:
+    r"""把转义写法还原成真实字符（``\u0003`` → Ctrl-C，``\e`` → ESC）。
+
+    这样调用方不必构造真正的控制字符就能驱动 TUI：``\u001b`` 回普通模式、
+    ``\u0003`` 中断前台进程、``\u001b[A`` 方向键。
+
+    支持 ``\\``、``\e``、``\a``、``\b``、``\f``、``\n``、``\r``、``\t``、
+    ``\v``、``\0``、``\xHH``、``\uXXXX``、``\UXXXXXXXX``；**无法识别或位数
+    不足的序列原样保留**，所以 ``C:\Users`` 这类路径不会被吃掉。要输入字面
+    反斜杠请写 ``\\``。
+
+    :param text: 可能含转义写法的文本
+    :return: 转义已展开的文本
+    """
+    if "\\" not in text:
+        return text
+    out: list[str] = []
+    index = 0
+    length = len(text)
+    while index < length:
+        char = text[index]
+        if char != "\\" or index + 1 >= length:
+            out.append(char)
+            index += 1
+            continue
+        nxt = text[index + 1]
+        alias = ESCAPE_ALIASES.get(nxt)
+        if alias is not None:
+            out.append(alias)
+            index += 2
+            continue
+        width = _HEX_WIDTH.get(nxt)
+        if width is None:
+            out.append(char)
+            index += 1
+            continue
+        digits = text[index + 2 : index + 2 + width]
+        if len(digits) != width or any(d not in _HEX_DIGITS for d in digits):
+            out.append(char)
+            index += 1
+            continue
+        code = int(digits, 16)
+        if 0xD800 <= code <= 0xDFFF:
+            # 孤立代理项编码不成 UTF-8，当成普通文本留着
+            out.append(text[index : index + 2 + width])
+            index += 2 + width
+            continue
+        out.append(chr(code))
+        index += 2 + width
+    return "".join(out)
 
 
 class SessionNotFoundError(Exception):
@@ -247,9 +319,20 @@ class TerminalSession:
     # ------------------------------------------------------------------
 
     def write(self, text: str, *, newline: bool = True) -> None:
-        """把文本写进 PTY（``newline`` 表示补一个回车）。"""
-        payload = text + ("\r" if newline else "")
-        data = payload.encode("utf-8")
+        """把文本写进 PTY（``newline`` 表示补一个回车）。
+
+        文本里的转义写法先由 :func:`decode_escapes` 展开，因此
+        ``write("\\u0003")`` 送出的是一个真正的 Ctrl-C 字节，而不是 6 个字符。
+        """
+        payload = decode_escapes(text) + ("\r" if newline else "")
+        self._write_bytes(payload.encode("utf-8"))
+
+    def send(self, data: bytes) -> None:
+        """直接写原始字节（转义序列、控制字符），不做转义展开。"""
+        self._write_bytes(data)
+
+    def _write_bytes(self, data: bytes) -> None:
+        """把字节写进 PTY（非阻塞 + 超时）。"""
         deadline = time.monotonic() + 2.0
         while data:
             try:
@@ -262,10 +345,6 @@ class TerminalSession:
             except OSError as error:
                 raise SessionNotFoundError(f"终端已关闭：{self.session_id}") from error
         self.touch()
-
-    def send(self, data: bytes) -> None:
-        """直接写原始字节（转义序列、控制字符）。"""
-        self.write(data.decode("latin-1"), newline=False)
 
     # ------------------------------------------------------------------
     # 鼠标

@@ -227,10 +227,19 @@ def terminal_open(
 
 def terminal_write(
     session_id: Annotated[str, "会话 ID"],
-    text: Annotated[str, "要输入的文本（支持转义序列，如 \\u0003 表示 Ctrl-C）"],
+    text: Annotated[
+        str,
+        "要输入的文本；支持转义序列：\\u001b=ESC、\\u0003=Ctrl-C、"
+        "\\u001b[A=方向键，另有 \\r \\n \\t \\e \\\\ \\xHH \\uXXXX",
+    ],
     newline: Annotated[bool, "是否自动补回车"] = True,
 ) -> TerminalView:
-    """往终端输入一行文本（像人打字后按回车）。"""
+    """往终端输入一行文本（像人打字后按回车）。
+
+    文本中的转义写法会先还原成真实字符，因此可以驱动交互式程序——
+    ``\\u001b`` 退出插入模式、``\\u0003`` 中断前台进程、``\\u001b[A`` 调用历史。
+    无法识别的序列原样保留，要输入字面反斜杠写 ``\\\\``。
+    """
     session = _require_manager().get(session_id)
     session.write(text, newline=newline)
     return _view(session)

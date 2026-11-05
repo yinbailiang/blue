@@ -18,6 +18,7 @@ from blue_service_terminal.session import (
     SessionLimitError,
     SessionManager,
     SessionNotFoundError,
+    decode_escapes,
     supports_line_editing,
 )
 
@@ -203,3 +204,97 @@ def test_render_produces_png_of_expected_size() -> None:
 
     assert png[:8] == b"\x89PNG\r\n\x1a\n"
     assert len(png) > 1000
+
+
+def test_decode_escapes_expands_supported_sequences() -> None:
+    r"""``\uXXXX`` / ``\xHH`` / 单字母别名都还原成真实字符。"""
+    assert decode_escapes(r"\u0003") == "\x03"
+    assert decode_escapes(r"\u001b") == "\x1b"
+    assert decode_escapes(r"\e") == "\x1b"
+    assert decode_escapes(r"\x41") == "A"
+    assert decode_escapes(r"\U0001F600") == "\U0001f600"
+    assert decode_escapes(r"\r\n\t") == "\r\n\t"
+    assert decode_escapes(r"\\") == "\\"
+    assert decode_escapes(r"\u001b[A") == "\x1b[A"
+    assert decode_escapes("a" + r"\u0003" + "b") == "a\x03b"
+
+
+def test_decode_escapes_keeps_unrecognized_text() -> None:
+    r"""认不出的序列原样保留：路径、位数不足、非十六进制都不动。"""
+    assert decode_escapes(r"C:\Users\Public") == r"C:\Users\Public"
+    assert decode_escapes(r"\q") == r"\q"
+    assert decode_escapes(r"\u12") == r"\u12"
+    assert decode_escapes(r"\xZZ") == r"\xZZ"
+    assert decode_escapes(r"\ud800") == r"\ud800"  # 孤立代理项无法编码
+    assert decode_escapes("plain 中文\t") == "plain 中文\t"  # 已是真实控制字符
+    assert decode_escapes("") == ""
+
+
+def test_write_sends_real_escape_byte() -> None:
+    r"""``\u001b`` 进 PTY 的是单个 ESC 字节，不是字面 6 个字符。"""
+    asyncio.run(_write_escape())
+
+
+async def _write_escape() -> None:
+    manager = SessionManager(max_sessions=2, idle_ttl=60.0)
+    await manager.start()
+    try:
+        session = await _open(manager)
+        await asyncio.sleep(1.0)
+        session.write("cat -v")  # cat -v 把控制字符显示成 ^[ 这样的形式
+        await asyncio.sleep(0.5)
+        session.write(r"\u001b", newline=False)
+        await asyncio.sleep(0.5)
+        text = session.text(20)
+        assert "^[" in text
+        assert "\\u001b" not in text
+    finally:
+        await manager.stop()
+
+
+def test_write_control_c_interrupts_foreground_process() -> None:
+    r"""``\u0003`` 真的送出 SIGINT：前台 sleep 被打断，shell 还能接着用。"""
+    asyncio.run(_write_ctrl_c())
+
+
+async def _write_ctrl_c() -> None:
+    manager = SessionManager(max_sessions=2, idle_ttl=60.0)
+    await manager.start()
+    try:
+        session = await _open(manager)
+        await asyncio.sleep(1.0)
+        session.write("sleep 30; echo AFTER-SLEEP")
+        await asyncio.sleep(0.5)
+        session.write(r"\u0003", newline=False)
+        await asyncio.sleep(0.8)
+        session.write("echo AFTER-CTRL-C")
+        await asyncio.sleep(0.8)
+        text = session.text(20)
+        # 打断成功：出现 ^C，后续命令立即执行；sleep 之后那句只剩命令回显里的一次
+        assert "^C" in text
+        assert "AFTER-CTRL-C" in text
+        assert text.count("AFTER-SLEEP") == 1
+    finally:
+        await manager.stop()
+
+
+def test_send_bypasses_escape_decoding_and_preserves_bytes() -> None:
+    """``send()`` 写原始字节：不做转义展开，高位字节不被二次 UTF-8 编码。"""
+    asyncio.run(_send_raw_bytes())
+
+
+async def _send_raw_bytes() -> None:
+    manager = SessionManager(max_sessions=2, idle_ttl=60.0)
+    await manager.start()
+    try:
+        session = await _open(manager)
+        await asyncio.sleep(1.0)
+        session.write("head -c 3 | od -An -tx1")
+        await asyncio.sleep(0.5)
+        # é = c3 a9，加 A 凑够 3 字节；换行让 canonical 模式交付输入
+        session.send(b"\xc3\xa9A\n")
+        await asyncio.sleep(0.8)
+        text = session.text(20)
+        assert "c3 a9 41" in text
+    finally:
+        await manager.stop()
