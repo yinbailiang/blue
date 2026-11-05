@@ -15,6 +15,11 @@ from pathlib import Path
 import wcwidth
 from PIL import Image, ImageDraw, ImageFont
 
+from blue_service_terminal.colors import (
+    DEFAULT_BACKGROUND,
+    DEFAULT_FOREGROUND,
+    ansi_palette,
+)
 from blue_service_terminal.session import CellStyle
 
 __all__ = [
@@ -24,24 +29,10 @@ __all__ = [
     "resolve_fonts",
 ]
 
-DEFAULT_FG = "#e5e7eb"
-DEFAULT_BG = "#0b1020"
+DEFAULT_FG = DEFAULT_FOREGROUND
+DEFAULT_BG = DEFAULT_BACKGROUND
 CURSOR_BG = "#93c5fd"
-CURSOR_FG = "#0b1020"
-
-_ANSI_BASE: dict[str, str] = {
-    "black": "#1f2430",
-    "red": "#f07178",
-    "green": "#a5d6a7",
-    "brown": "#d7ba7d",
-    "yellow": "#e5c07b",
-    "blue": "#82aaff",
-    "magenta": "#c792ea",
-    "cyan": "#89ddff",
-    "white": "#d7dae0",
-    "default": DEFAULT_FG,
-}
-"""ANSI 基本色（暗色主题下取了较柔和的色值）。"""
+CURSOR_FG = DEFAULT_BACKGROUND
 
 _BRIGHT_SUFFIX = "bright"
 
@@ -201,11 +192,23 @@ def render_screen(
     geometry: FrameGeometry,
     *,
     fonts: FontSet,
+    background: str = DEFAULT_BACKGROUND,
+    foreground: str = DEFAULT_FOREGROUND,
+    palette: dict[str, str] | None = None,
 ) -> bytes:
-    """把字符格画成 PNG，返回字节（宽字符用 CJK 字体，避免画成方块）。"""
+    """把字符格画成 PNG，返回字节（宽字符用 CJK 字体，避免画成方块）。
+
+    :param cells: 屏幕字符格
+    :param geometry: 像素几何
+    :param fonts: 字体组合
+    :param background: 背景色（``#rrggbb``），同时决定未着色格的底色
+    :param foreground: 默认前景色（``#rrggbb``）
+    :param palette: 覆盖 ANSI 基本色的映射，缺省用内置调色板
+    """
     font = fonts.main()
     cjk = fonts.cjk()
-    image = Image.new("RGB", (geometry.width, geometry.height), DEFAULT_BG)
+    colors = ansi_palette(palette)
+    image = Image.new("RGB", (geometry.width, geometry.height), background)
     draw = ImageDraw.Draw(image)
 
     for row_index, row in enumerate(cells):
@@ -213,12 +216,12 @@ def render_screen(
         col_index = 0
         while col_index < len(row):
             cell = row[col_index]
-            background = _resolve(cell.bg, default=DEFAULT_BG)
+            cell_bg = _resolve(cell.bg, default=background, palette=colors)
             # 合并连续的同底色格，减少绘制次数
             span = 1
             while col_index + span < len(row) and _same_bg(row[col_index + span], cell):
                 span += 1
-            if background != DEFAULT_BG:
+            if cell_bg != background:
                 draw.rectangle(
                     [
                         geometry.padding + col_index * geometry.cell_width,
@@ -226,7 +229,7 @@ def render_screen(
                         geometry.padding + (col_index + span) * geometry.cell_width - 1,
                         top + geometry.cell_height - 1,
                     ],
-                    fill=background,
+                    fill=cell_bg,
                 )
             col_index += span
 
@@ -236,8 +239,10 @@ def render_screen(
             if not cell.char:
                 continue
             left = geometry.padding + col_index * geometry.cell_width
-            foreground = _resolve(cell.fg, default=DEFAULT_FG, bold=cell.bold)
-            background = _resolve(cell.bg, default=DEFAULT_BG)
+            foreground_color = _resolve(
+                cell.fg, default=foreground, palette=colors, bold=cell.bold
+            )
+            background_color = _resolve(cell.bg, default=background, palette=colors)
             if cell.reverse:
                 draw.rectangle(
                     [
@@ -246,9 +251,9 @@ def render_screen(
                         left + geometry.cell_width - 1,
                         top + geometry.cell_height - 1,
                     ],
-                    fill=foreground,
+                    fill=foreground_color,
                 )
-                foreground = background
+                foreground_color = background_color
             if cell.cursor:
                 draw.rectangle(
                     [
@@ -259,10 +264,10 @@ def render_screen(
                     ],
                     fill=CURSOR_BG,
                 )
-                foreground = CURSOR_FG
+                foreground_color = CURSOR_FG
             wide = len(cell.char) == 1 and wcwidth.wcwidth(cell.char) == 2
             chosen = cjk if (wide and cjk is not None) else font
-            draw.text((left, top), cell.char, font=chosen, fill=foreground)
+            draw.text((left, top), cell.char, font=chosen, fill=foreground_color)
 
     buffer = io.BytesIO()
     image.save(buffer, format="PNG", optimize=True)
@@ -274,7 +279,9 @@ def _same_bg(left: CellStyle, right: CellStyle) -> bool:
     return not left.cursor and not right.cursor and left.bg == right.bg
 
 
-def _resolve(color: str, *, default: str, bold: bool = False) -> str:
+def _resolve(
+    color: str, *, default: str, palette: dict[str, str], bold: bool = False
+) -> str:
     """把 pyte 的颜色值映射成 ``#rrggbb``。"""
     text = color.strip().lower()
     if not text or text == "default":
@@ -283,7 +290,7 @@ def _resolve(color: str, *, default: str, bold: bool = False) -> str:
         return text
     bright = text.startswith(_BRIGHT_SUFFIX)
     base = text[len(_BRIGHT_SUFFIX) :] if bright else text
-    value = _ANSI_BASE.get(base)
+    value = palette.get(base)
     if value is None:
         return default
     if bright or bold:

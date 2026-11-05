@@ -6,9 +6,25 @@ import os
 import shutil
 from pathlib import Path
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, ValidationInfo, field_validator
 
-__all__ = ["TerminalConfig"]
+from blue_service_terminal.colors import (
+    DEFAULT_BACKGROUND,
+    DEFAULT_FOREGROUND,
+    ansi_palette,
+    normalise_color,
+)
+
+__all__ = ["PaletteColor", "TerminalConfig"]
+
+
+class PaletteColor(BaseModel):
+    """覆盖 ANSI 基本色的一项（``name`` 取 ``colors.ANSI_BASE`` 里的键）。"""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    name: str = Field(description="颜色名，如 red / green / brightblue 的前缀部分")
+    color: str = Field(description="色值：#rgb、#rrggbb 或 rgb:rrrr/gggg/bbbb")
 
 
 class TerminalConfig(BaseModel):
@@ -44,6 +60,45 @@ class TerminalConfig(BaseModel):
     idle_ttl: float = Field(
         default=1800.0, gt=0, description="空闲会话的存活时长（秒）"
     )
+    background: str = Field(
+        default=DEFAULT_BACKGROUND,
+        description="终端背景色：截图底色，同时用于应答程序的 OSC 11 查询",
+    )
+    foreground: str = Field(
+        default=DEFAULT_FOREGROUND,
+        description="默认前景色：截图默认字色，同时用于应答 OSC 10 查询",
+    )
+    palette: list[PaletteColor] = Field(
+        default_factory=list[PaletteColor],
+        description="覆盖 ANSI 基本色的一项或多项；name 取 colors.ANSI_BASE 的键",
+    )
+    respond_to_queries: bool = Field(
+        default=True,
+        description="是否应答程序的终端查询（DSR 5/6、DA1、OSC 10/11）；"
+        "关掉则 nvim 之类会报 E1568",
+    )
+
+    @field_validator("background", "foreground")
+    @classmethod
+    def _validate_color(cls, value: str, info: ValidationInfo) -> str:
+        return normalise_color(value, field=str(info.field_name))
+
+    @field_validator("palette")
+    @classmethod
+    def _validate_palette(cls, value: list[PaletteColor]) -> list[PaletteColor]:
+        overrides = {entry.name: entry.color for entry in value}
+        ansi_palette(overrides)  # 键名与色值都由它校验，非法直接抛 ValueError
+        return [
+            PaletteColor(
+                name=entry.name.strip().lower(),
+                color=normalise_color(entry.color, field=f"palette.{entry.name}"),
+            )
+            for entry in value
+        ]
+
+    def palette_map(self) -> dict[str, str]:
+        """调色板覆盖项转成渲染层要的映射。"""
+        return {entry.name: entry.color for entry in self.palette}
 
     def resolve_shell(self) -> str:
         """选一个**带行编辑**的 shell。

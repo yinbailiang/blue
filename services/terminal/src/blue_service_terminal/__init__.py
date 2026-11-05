@@ -211,6 +211,9 @@ def terminal_open(
         scrollback=_config.scrollback,
         prompt=_config.prompt,
         isolate_rc=_config.isolate_rc,
+        background=_config.background,
+        foreground=_config.foreground,
+        respond_to_queries=_config.respond_to_queries,
     )
     logger.info(
         "已打开终端会话 %s（%s @ %s）", session.session_id, session.shell, workdir
@@ -271,7 +274,14 @@ def terminal_snapshot(
         font_path=fonts.main_path,
         font_size=fonts.size,
     )
-    png = render_screen(session.cells(), geometry, fonts=fonts)
+    png = render_screen(
+        session.cells(),
+        geometry,
+        fonts=fonts,
+        background=_config.background,
+        foreground=_config.foreground,
+        palette=_config.palette_map(),
+    )
     png, width, height = _shrink(png, max_edge)
     view = _view(session)
     return TerminalFrame(

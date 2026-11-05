@@ -30,6 +30,12 @@ from typing import Final
 import pyte
 import wcwidth
 
+from blue_service_terminal.colors import (
+    DEFAULT_BACKGROUND,
+    DEFAULT_FOREGROUND,
+    to_osc_rgb,
+)
+
 logger = logging.getLogger(__name__)
 
 __all__ = [
@@ -40,6 +46,7 @@ __all__ = [
     "SessionNotFoundError",
     "TerminalSession",
     "decode_escapes",
+    "rewrite_colon_sgr",
     "supports_line_editing",
 ]
 
@@ -57,6 +64,51 @@ MOUSE_MOTION_FLAG = 32
 
 _MOUSE_MODE = re.compile(rb"\x1b\[\?(1000|1002|1003)(h|l)")
 """程序对鼠标跟踪的开关（DECSET/DECRST）。"""
+
+_QUERY = re.compile(
+    rb"\x1b\[(5|6)n"  # DSR 5（状态就绪）/ CPR 6（光标位置）
+    rb"|\x1b\[(\??)0?c"  # DA1；\x1b[>c 是 DA2，不接管
+    rb"|\x1b\]1([01]);\?(?:\x07|\x1b\\)"  # OSC 10 前景 / OSC 11 背景
+)
+"""程序发来的终端查询。终端必须应答，否则程序会等到超时（nvim 的 E1568）。"""
+
+_SGR_COLON = re.compile(rb"\x1b\[([0-9;:]*:[0-9;:]*)m")
+"""含冒号的 SGR（ISO-8613-6 的 ``38:2::r:g:b`` 写法）。"""
+
+
+def rewrite_colon_sgr(data: bytes) -> bytes:
+    """把冒号式 SGR 改成分号式。
+
+    ``COLORTERM=truecolor`` 下 nvim 等程序用 ISO-8613-6 的冒号写法——颜色
+    ``\\e[38:2::r:g:b``、下划线样式 ``\\e[4:3``——而 pyte 只认分号式，认不出就把
+    剩余字符当正文，屏幕上出现 ``2::255:199:119m`` / ``3m`` 这种脏文本。
+    这里统一改写；原始字节另存于 ``raw_tail``。
+    """
+    if b":" not in data:
+        return data
+
+    def replace(match: re.Match[bytes]) -> bytes:
+        groups: list[bytes] = []
+        for group in match.group(1).split(b";"):
+            parts = group.split(b":")
+            head = parts[0]
+            if head in (b"38", b"48", b"58") and len(parts) >= 3:
+                if parts[1] == b"2" and len(parts) >= 5:
+                    # 丢弃色彩空间 ID，只留 r/g/b
+                    groups.append(b";".join([head, b"2", *parts[-3:]]))
+                    continue
+                if parts[1] == b"5":
+                    groups.append(b";".join([head, b"5", parts[-1]]))
+                    continue
+            if head == b"4" and len(parts) == 2:
+                # 下划线样式 4:N → 分号式只有「开/关」两档
+                groups.append(b"24" if parts[1] == b"0" else b"4")
+                continue
+            groups.append(group)
+        return b"\x1b[" + b";".join(groups) + b"m"
+
+    return _SGR_COLON.sub(replace, data)
+
 
 ESCAPE_ALIASES: Final[dict[str, str]] = {
     "\\": "\\",
@@ -171,6 +223,9 @@ class TerminalSession:
         env: dict[str, str] | None = None,
         prompt: str = "",
         isolate_rc: bool = True,
+        background: str = DEFAULT_BACKGROUND,
+        foreground: str = DEFAULT_FOREGROUND,
+        respond_to_queries: bool = True,
     ) -> None:
         self.session_id = session_id
         self.shell = shell
@@ -182,6 +237,9 @@ class TerminalSession:
         self.closed = False
         self.exit_code: int | None = None
         self.mouse_modes: set[str] = set()
+        self.background = background
+        self.foreground = foreground
+        self.respond_to_queries = respond_to_queries
         self._raw: deque[int] = deque(maxlen=RAW_TAIL_BYTES)
         self._screen = pyte.HistoryScreen(cols, rows, history=scrollback)
         self._stream = pyte.ByteStream(self._screen)
@@ -263,13 +321,46 @@ class TerminalSession:
                 else:
                     self.mouse_modes.discard(mode)
             try:
-                self._stream.feed(chunk)
+                self._stream.feed(rewrite_colon_sgr(chunk))
             except Exception:
                 logger.warning(
                     "终端 %s 的 VT 解析失败（已跳过该块）",
                     self.session_id,
                     exc_info=True,
                 )
+            # 放在 feed 之后：CPR 要回的是「程序发问那一刻」的光标位置
+            self._answer_queries(chunk)
+
+    def _answer_queries(self, chunk: bytes) -> None:
+        """应答程序发出的终端查询；不应答会让 nvim 之类等到超时报 E1568。"""
+        if not self.respond_to_queries:
+            return
+        replies = [
+            reply
+            for match in _QUERY.finditer(chunk)
+            if (reply := self._query_reply(match))
+        ]
+        if not replies:
+            return
+        try:
+            self._write_bytes(b"".join(replies))
+        except TimeoutError, SessionNotFoundError:
+            logger.debug("终端 %s 的查询应答写入失败（已忽略）", self.session_id)
+
+    def _query_reply(self, match: re.Match[bytes]) -> bytes:
+        """按查询类型给出应答；不认识的返回空字节。"""
+        kind = match.group(1)
+        if kind == b"5":
+            return b"\x1b[0n"  # 「我还在，一切正常」
+        if kind == b"6":
+            col, row = self.cursor
+            return f"\x1b[{row + 1};{col + 1}R".encode()
+        if match.group(2) is not None:
+            return b"\x1b[?1;2c"  # DA1：VT100 with Advanced Video
+        is_foreground = match.group(3) == b"0"
+        color = self.foreground if is_foreground else self.background
+        code = 10 if is_foreground else 11
+        return f"\x1b]{code};{to_osc_rgb(color)}\x1b\\".encode()
 
     def _mark_closed(self) -> None:
         """对端结束：摘掉 reader、回收子进程、记下退出码。"""
@@ -519,6 +610,9 @@ class SessionManager:
         env: dict[str, str] | None = None,
         prompt: str = "",
         isolate_rc: bool = True,
+        background: str = DEFAULT_BACKGROUND,
+        foreground: str = DEFAULT_FOREGROUND,
+        respond_to_queries: bool = True,
     ) -> TerminalSession:
         """新建一个会话。
 
@@ -541,6 +635,9 @@ class SessionManager:
             env=env,
             prompt=prompt,
             isolate_rc=isolate_rc,
+            background=background,
+            foreground=foreground,
+            respond_to_queries=respond_to_queries,
         )
         self._sessions[session_id] = session
         return session

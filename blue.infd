@@ -131,6 +131,9 @@ shell = ShellService()
 # 交互式终端（PTY）：多会话、不同 shell、终端截图与坐标点击。
 # shell 留空=自动挑选带 readline 的 shell（NixOS 的 bash 有两个构建，
 # 不带 readline 的那个会让方向键失效、提示符里的 \[ \] 原样打印）。
+# 配色：background / foreground 同时决定截图底色和「程序查询终端颜色」的应答
+# （OSC 10/11），配成真实终端色 nvim 才会判断出正确的明暗主题。palette 可覆盖
+# ANSI 基本色：palette = [ { name = "red", color = "#ff5555" } ]
 terminal = TerminalService()
 
 # 天气查询：默认走 wttr.in，可改 base_url / timeout
