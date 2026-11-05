@@ -203,21 +203,22 @@ async def _run_supervisor(desired: DesiredState) -> None:
 
 
 async def _maybe_self_restart(desired: DesiredState, supervisor: Supervisor) -> bool:
-    """代码真的变了才 execv；没变（比如误发信号）就只是重载配置。
+    """收到 SIGUSR1 就照做——**判断权在发信号的一方**（新代码的 CLI）。
 
-    判据用**磁盘上重新编译**的 SDK 指纹，而不是锁文件里的——锁文件是上一个镜像写的。
+    这里曾经自己再算一遍 SDK 指纹来"确认"，那是**循环论证**：进程只能用自己的
+    （旧的）代码算指纹。旧的 `_load_sdk` 有 bug（只覆盖 pyproject.toml）时，
+    它算出的指纹永远等于自己启动时的那个，于是永远得出"代码没变"——真事故。
+
+    唯一要守的是：配置能编译。execv 进一个坏配置会让新镜像直接退出，而此时没有
+    外部看护进程，等于把系统弄挂；这种情况退化成重载，保留当前进程。
     """
     try:
-        fresh = load_desired(desired.config_path)
+        load_desired(desired.config_path)
     except BlueError as error:
-        logger.error("自重启检查失败（配置有问题），改为重载：%s", error)
+        logger.error("配置编译失败，放弃自重启、改为重载：%s", error)
         supervisor.request_reload()
         return False
-    if fresh.sdk.source_hash == supervisor.desired.sdk.source_hash:
-        logger.info("收到自重启信号，但 blue 代码未变化——按重载处理")
-        supervisor.request_reload()
-        return False
-    logger.info("blue 代码已变化，准备重启自己（全部服务会重新拉起）")
+    logger.info("收到自重启指令：停全部服务 → execv 自己（新代码会重新拉起）")
     return True
 
 
@@ -256,11 +257,30 @@ def _apply(config_path: str, *, wait: bool, timeout: float) -> int:
                 if current.config_error:
                     raise BlueError(f"配置重载失败：{current.config_error}")
                 if current.generation == desired.generation:
+                    _warn_if_stale_reconciler(state, desired)
                     print("配置已生效")
                     return 0
             time.sleep(0.1)
         raise BlueError(f"等待配置生效超时（{timeout}s）")
     return 0
+
+
+def _warn_if_stale_reconciler(store: StateStore, desired: DesiredState) -> None:
+    """自重启信号发了但锁里的 SDK 指纹没更新 → 对方是旧代码，得手动重启一次。
+
+    旧版调谐器不认识 SIGUSR1（或它自己判断"代码没变"），会静默按重载处理，
+    结果是"apply 说成功了，但跑的还是旧代码"。必须显式告警，否则很难发现。
+    """
+    running, info = store.supervisor_running()
+    if not running or info is None or not info.sdk_hash:
+        return
+    if info.sdk_hash == desired.sdk.source_hash:
+        return
+    print(
+        "⚠️ 运行中的调谐器仍是旧代码（锁里的 SDK 指纹未更新）：\n"
+        "   它不认识自重启信号，请执行一次 blue down && blue up 完成迁移。",
+        file=sys.stderr,
+    )
 
 
 def _needs_self_restart(info: LockInfo, *, desired: DesiredState) -> bool:
