@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from collections.abc import Iterable
 
 from blue_contracts_tool import (
     CatalogQueryEvent,
@@ -23,7 +24,21 @@ from blue_service_agent.subscribers.catalog import CatalogChangedHandler
 
 logger = logging.getLogger(__name__)
 
-__all__ = ["ToolCatalogClient"]
+__all__ = ["ToolCatalogClient", "schema_chars"]
+
+
+def schema_chars(tools: Iterable[ToolDefinition]) -> int:
+    """工具目录**随请求真正发送**的字符数。
+
+    必须按客户端口径序列化（``exclude_none``）：``ParameterProperty`` 有十几个
+    可选字段，全量 dump 会把它们写成 ``"anyOf": null, "enum": null, …``——实测
+    比真实请求体大 **2.4 倍**（38 个工具：50,600 vs 20,911 字符）。拿全量数字
+    评估每步开销会高估一倍多，进而误判预算。
+
+    :param tools: 工具定义列表。
+    :return: 这些定义序列化后的字符总数。
+    """
+    return sum(len(tool.model_dump_json(exclude_none=True)) for tool in tools)
 
 
 class ToolCatalogClient:

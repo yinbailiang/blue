@@ -71,7 +71,12 @@ from blue_service_agent.attachments import (
     build_user_message,
     tool_attachment_parts,
 )
-from blue_service_agent.catalog import ToolCatalogClient
+from blue_service_agent.catalog import (
+    ToolCatalogClient,
+)
+from blue_service_agent.catalog import (
+    schema_chars as tool_schema_chars,
+)
 from blue_service_agent.compact import (
     compact_history,
     count_attachments,
@@ -794,7 +799,7 @@ class AgentCore:
         attachment_chars = self._settings.compact_attachment_chars
         chars = estimate_chars(messages, attachment_chars=attachment_chars)
         ratio = chars / usage.prompt_tokens if usage.prompt_tokens else 0.0
-        schema_chars = sum(len(tool.model_dump_json()) for tool in tools)
+        schema_length = tool_schema_chars(tools)
         logger.info(
             "本步用量：prompt %s tok（%.1f 字符/token）"
             "· completion %s tok · 提示 %s 字符 · 工具 schema %s 字符 · 附件 %s 个",
@@ -802,7 +807,7 @@ class AgentCore:
             ratio,
             usage.completion_tokens,
             chars,
-            schema_chars,
+            schema_length,
             count_attachments(messages),
         )
 
