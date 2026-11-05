@@ -274,3 +274,74 @@ def test_tool_attachment_parts_skips_bad_base64() -> None:
     parts, blobs = tool_attachment_parts([ToolAttachment(mime=PNG_MIME, data="!!!")])
     assert parts == []
     assert blobs == []
+
+
+def test_materializer_caches_a_working_set_bigger_than_64() -> None:
+    """工作集超过旧上限 64 时也只取一遍（上限已提到 256）。"""
+    asyncio.run(_big_working_set())
+
+
+async def _big_working_set() -> None:
+    calls: list[str] = []
+
+    async def fetch(digest: str) -> str:
+        calls.append(digest)
+        return "data:image/png;base64,AAAA"
+
+    materializer = AttachmentMaterializer(fetch=fetch)
+    messages = [
+        Message.user(
+            [MultiModalContent.image_part(attachment_url(sha256_hex(bytes([i]))))]
+        )
+        for i in range(65)
+    ]
+    for _ in range(3):
+        await materializer.materialize(messages)
+
+    assert len(calls) == 65
+    assert len(set(calls)) == 65
+
+
+def test_materializer_evicts_least_recently_used() -> None:
+    """缓存满时淘汰最久未使用的：刚命中过的条目不会被丢掉。"""
+    asyncio.run(_evict_least_recently_used())
+
+
+async def _evict_least_recently_used() -> None:
+    calls: list[str] = []
+
+    async def fetch(digest: str) -> str:
+        calls.append(digest)
+        return "data:image/png;base64,AAAA"
+
+    digests = {name: sha256_hex(name.encode()) for name in ("a", "b", "c")}
+    materializer = AttachmentMaterializer(fetch=fetch, max_entries=2)
+
+    await materializer.resolve(digests["a"])
+    await materializer.resolve(digests["b"])
+    await materializer.resolve(digests["a"])  # 命中 → 挪到最新
+    await materializer.resolve(digests["c"])  # 容量满 → 淘汰 b
+    await materializer.resolve(digests["a"])  # a 仍应命中
+
+    assert calls == [digests["a"], digests["b"], digests["c"]]
+
+
+def test_materializer_with_unbounded_cache() -> None:
+    """``max_entries=0`` 表示不设上限：重复取同一张图不再发 RPC。"""
+    asyncio.run(_unbounded())
+
+
+async def _unbounded() -> None:
+    calls: list[str] = []
+
+    async def fetch(digest: str) -> str:
+        calls.append(digest)
+        return "data:image/png;base64,AAAA"
+
+    materializer = AttachmentMaterializer(fetch=fetch, max_entries=0)
+    digests = [sha256_hex(name.encode()) for name in ("a", "b", "c")]
+    for _ in range(2):
+        for digest in digests:
+            await materializer.resolve(digest)
+
+    assert calls == digests

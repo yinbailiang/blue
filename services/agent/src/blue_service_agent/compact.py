@@ -46,8 +46,10 @@ __all__ = [
     "COMPACT_TEXT_CHARS",
     "DROPPED_NOTE",
     "NOTES_RESERVE",
+    "RECENT_NOTE",
     "CompactRule",
     "compact_history",
+    "count_attachments",
     "estimate_chars",
     "learn_profiles",
 ]
@@ -65,20 +67,24 @@ COMPACT_LIST_ITEMS = 3
 """列表字段保留的条数。"""
 
 DROPPED_NOTE = (
-    "[早期历史已省略：{steps} 步 / {messages} 条消息；需要细节请重新读取文件或重跑命令]"
+    "[早期历史已省略：{steps} 步 / {messages} 条消息{recent}；"
+    "需要细节请重新读取文件或重跑命令]"
 )
 """超预算时插在原处的省略说明（不逐条截断，见 ``_fit_budget``）。"""
+
+RECENT_NOTE = "（其中最近 {count} 条也一并省略）"
+"""预算小到连「原样保留区」都要动用时，追加在那句说明后面的补充。"""
 
 NOTES_RESERVE = 200
 """给省略说明预留的字符数，避免插进去又超预算。"""
 
 COMPACT_BOUNDARY_STEP = 50
-"""投影分界的量化步长。
+"""投影分界的量化步长默认值（可经 ``compact_boundary_step`` 配置）。
 
 ``keep_messages`` 的分界如果每来一条消息就往前挪一格，等于每次调用都把「第
 len-keep 条」那条消息改写一遍：prompt 前缀从那里开始就和上次不同，上游的前缀
-缓存会整段失效。把分界按 50 条取整，代价是最多少保护 49 条，换来的是缓存能连
-续命中 50 轮。
+缓存会整段失效。把分界按步长取整，代价是最多少保护 ``步长-1`` 条，换来的是
+缓存能连续命中 ``步长`` 轮。``0`` 表示不量化（逐条移动）。
 """
 
 MAX_DEPTH = 4
@@ -140,7 +146,7 @@ class _Limits:
     )
 
 
-def estimate_chars(messages: Iterable[Message]) -> int:
+def estimate_chars(messages: Iterable[Message], *, attachment_chars: int = 0) -> int:
     """估算一批消息的**上下文体量**（字符），用于预算与日志。
 
     必须把 ``reasoning_content`` 算进来：DeepSeek 文档明确——
@@ -148,14 +154,33 @@ def estimate_chars(messages: Iterable[Message]) -> int:
     （我们每轮都带工具，所以它实实在在占窗口）。
     漏算会让预算虚高：实测这条会话"正文 468k tok + 思维链 235k tok"，
     而按字符估算时只看到前者。
+
+    附件内容块（图片/文件）在消息里只是 ``blue+attachment://<hash>`` 伪 URL，
+    真实字节要到发请求时才 materialize 成 ``data:`` URL——按文本估算等于把它们
+    当成零成本。``attachment_chars > 0`` 时给每个附件块记这么多**当量字符**，
+    让预算能感知图片（默认 ``0`` 保持"只算文本"的旧口径）。
+
+    :param messages: 待估算的消息。
+    :param attachment_chars: 每个附件内容块折算的字符数；``0`` 表示不计入。
+    :return: 估算的字符总量。
     """
     total = 0
     for message in messages:
         total += len(_message_text(message))
         total += len(message.reasoning_content or "")
+        total += _attachment_count(message) * attachment_chars
         for call in message.tool_calls or []:
             total += len(json.dumps(call.function.arguments, ensure_ascii=False))
     return total
+
+
+def count_attachments(messages: Iterable[Message]) -> int:
+    """统计这批消息里的附件内容块数量（图片与文件各算一个）。
+
+    :param messages: 待统计的消息。
+    :return: 内容块个数；纯文本消息计 0。
+    """
+    return sum(_attachment_count(message) for message in messages)
 
 
 def compact_history(
@@ -168,22 +193,26 @@ def compact_history(
     rules: Sequence[CompactRule] = (),
     profiles: Mapping[str, Mapping[str, FieldProfile]] | None = None,
     target_chars: int = 0,
+    boundary_step: int = COMPACT_BOUNDARY_STEP,
+    attachment_chars: int = 0,
 ) -> list[Message]:
     """返回压缩后的历史副本；尾部 ``keep_messages`` 条原样保留。
 
     只按「条数」保留是不够的：1700 条历史哪怕每条只剩 200 字，加起来也有几百 KB。
     因此再加一层**预算**：``target_chars > 0`` 时，如果压完仍超预算，
-    就从最旧的消息开始逐条降级成一行摘要（工具结果只留「多少字 + 开头」），
-    直到进入预算或再没有可降级的消息。
+    就从最旧的**整步**（assistant + 它的工具结果）开始丢弃，并在原位留一句省略
+    说明，直到进入预算或再没有可丢的步。
 
     :param rules: 按工具定制的规则（优先生效）。
     :param profiles: ``工具名 → 字段画像``，来自 :class:`SchemaLearner`。
     :param target_chars: 目标提示体量（字符）；``0`` 表示只按条数压缩。
+    :param boundary_step: 投影分界的量化步长；``0`` 表示逐条移动分界。
+    :param attachment_chars: 每个附件内容块折算的字符数；``0`` 表示不计入。
     :return: 新列表；入参不会被修改。
     """
     source = list(messages)
     tools = _tool_names(source)
-    split = _keep_start(source, keep_messages)
+    split = _keep_start(source, keep_messages, boundary_step)
     compacted: list[Message] = []
     for index, message in enumerate(source):
         if index >= split:
@@ -193,7 +222,12 @@ def compact_history(
         limits = _limits_for(tool, rules, profiles, text_chars, error_chars, list_items)
         compacted.append(_compact_message(message, tool=tool, limits=limits))
     if target_chars > 0:
-        return _fit_budget(compacted, target_chars=target_chars)
+        return _fit_budget(
+            compacted,
+            target_chars=target_chars,
+            keep_from=split,
+            attachment_chars=attachment_chars,
+        )
     return compacted
 
 
@@ -215,7 +249,13 @@ def _split_steps(messages: Sequence[Message], start: int) -> list[tuple[int, int
     return steps
 
 
-def _fit_budget(messages: list[Message], *, target_chars: int) -> list[Message]:
+def _fit_budget(
+    messages: list[Message],
+    *,
+    target_chars: int,
+    keep_from: int,
+    attachment_chars: int,
+) -> list[Message]:
     """超预算时从最旧的**整步**开始丢弃，并在原位留一句省略说明。
 
     为什么不是"把每条旧消息截成一行"：工具结果几乎都是 JSON，截前 120 字拿到的
@@ -223,11 +263,13 @@ def _fit_budget(messages: list[Message], *, target_chars: int) -> list[Message]:
     更省、更干净，模型也只需要知道"这段被省略了，要细节可以重读"。
 
     保留：系统提示、最后一步（当前这轮的输入）；预算压到小于最后一步时也不丢它，
-    只是如实承认超预算。
+    只是如实承认超预算。``keep_from`` 之后是「原样保留区」：正常情况下丢弃止步于
+    这里，只有预算小到保留区自己也放不下时才会动用它——此时在省略说明里如实
+    写出"最近 N 条也被省略"，不让模型误以为近期上下文还在。
     """
     if target_chars <= 0 or len(messages) <= 1:
         return messages
-    total = estimate_chars(messages)
+    total = estimate_chars(messages, attachment_chars=attachment_chars)
     if total <= target_chars:
         return messages
 
@@ -235,17 +277,26 @@ def _fit_budget(messages: list[Message], *, target_chars: int) -> list[Message]:
     budget = max(0, target_chars - NOTES_RESERVE)
     dropped = 0
     dropped_steps = 0
+    dropped_recent = 0
     resume = head
     for start, end in _split_steps(messages, head):
         if total <= budget or end >= len(messages):
             break  # 进预算了，或只剩最后一步（当前轮输入，不能丢）
-        total -= estimate_chars(messages[start:end])
+        total -= estimate_chars(messages[start:end], attachment_chars=attachment_chars)
         dropped += end - start
         dropped_steps += 1
+        if start >= keep_from:
+            dropped_recent += end - start
         resume = end
     if not dropped:
         return messages
-    note = Message.user(DROPPED_NOTE.format(steps=dropped_steps, messages=dropped))
+    note = Message.user(
+        DROPPED_NOTE.format(
+            steps=dropped_steps,
+            messages=dropped,
+            recent=RECENT_NOTE.format(count=dropped_recent) if dropped_recent else "",
+        )
+    )
     return [*messages[:head], note, *messages[resume:]]
 
 
@@ -308,11 +359,18 @@ def _tool_names(messages: Sequence[Message]) -> dict[str, str]:
     return names
 
 
-def _keep_start(messages: list[Message], keep_messages: int) -> int:
-    """算出「从哪条开始原样保留」，并对齐 tool 配对边界。"""
+def _keep_start(messages: list[Message], keep_messages: int, boundary_step: int) -> int:
+    """算出「从哪条开始原样保留」：先量化分界，再对齐 tool 配对边界。
+
+    量化只对已经在步长之外的区间生效（``start < boundary_step`` 时原样保留），
+    否则短会话会被整体取消压缩。对齐 tool 配对只会让分界继续**前移**，因此
+    「保留条数不少于 ``keep_messages``」与「分界稳定」两个性质同时成立。
+    """
     if keep_messages <= 0:
         return len(messages)
     start = max(0, len(messages) - keep_messages)
+    if boundary_step > 0 and start >= boundary_step:
+        start -= start % boundary_step
     while start > 0 and messages[start].role == MessageRole.TOOL:
         start -= 1
     return start
@@ -502,3 +560,15 @@ def _message_text(message: Message) -> str:
         if item.text:
             parts.append(item.text)
     return "\n".join(parts)
+
+
+def _attachment_count(message: Message) -> int:
+    """数一条消息里的附件内容块（图片或文件）。"""
+    content = message.content
+    if isinstance(content, str):
+        return 0
+    count = 0
+    for item in content or []:
+        if item.image_url is not None or item.file is not None:
+            count += 1
+    return count

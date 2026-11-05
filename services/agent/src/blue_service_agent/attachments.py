@@ -86,22 +86,24 @@ def build_user_message(
 
 @dataclass
 class AttachmentMaterializer:
-    """把消息里的附件伪 URL 换成 data URL（带进程内缓存）。"""
+    """把消息里的附件伪 URL 换成 data URL（带进程内 LRU 缓存）。"""
 
     fetch: FetchDataUrl
     """按哈希取 data URL。"""
 
-    max_entries: int = 64
-    """缓存上限；超出后按插入顺序淘汰。"""
+    max_entries: int = 256
+    """缓存上限；超出后淘汰最久未使用的条目。"""
 
     _cache: dict[str, str | None] = field(default_factory=dict[str, str | None])
 
     async def resolve(self, digest: str) -> str | None:
-        """取某个哈希对应的 data URL（命中缓存直接返回）。"""
+        """取某个哈希对应的 data URL（命中缓存直接返回，并按 LRU 刷新顺序）。"""
         if digest in self._cache:
-            return self._cache[digest]
+            hit = self._cache.pop(digest)
+            self._cache[digest] = hit
+            return hit
         data_url = await self.fetch(digest)
-        if len(self._cache) >= self.max_entries:
+        if self.max_entries > 0 and len(self._cache) >= self.max_entries:
             self._cache.pop(next(iter(self._cache)))
         self._cache[digest] = data_url
         return data_url

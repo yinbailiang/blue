@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from pathlib import Path
 
+import pytest
 from blue_service_session.db import (
     SessionDatabase,
     SessionNotFoundError,
@@ -311,5 +313,31 @@ async def _outbox_flow(tmp_path: Path) -> None:
         # 取消不存在的项返回 False
         assert await db.remove_message("s1", second.id) is False
         assert await db.outbox_depth("s1") == 1
+    finally:
+        await db.close()
+
+
+def test_prompt_drift_warns_once_and_keeps_stored_prompt(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """配置里的 system 提示变了：告警一次，但绝不改写已存在会话的提示。"""
+    asyncio.run(_prompt_drift(tmp_path, caplog))
+
+
+async def _prompt_drift(tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
+    db = SessionDatabase(tmp_path / "sessions.db")
+    await db.connect()
+    try:
+        await db.ensure("s1", "旧提示", now=100.0)
+
+        with caplog.at_level(logging.WARNING, logger="blue_service_session.db"):
+            await db.ensure("s1", "新提示", now=101.0)
+        assert [r for r in caplog.records if "不一致" in str(r.message)]
+
+        caplog.clear()
+        with caplog.at_level(logging.WARNING, logger="blue_service_session.db"):
+            record = await db.ensure("s1", "新提示", now=102.0)
+        assert not [r for r in caplog.records if "不一致" in str(r.message)]
+        assert _chain(record)[0].content == "旧提示"
     finally:
         await db.close()

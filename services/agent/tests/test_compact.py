@@ -8,10 +8,11 @@ from typing import Any, cast
 from blue_service_agent.compact import (
     CompactRule,
     compact_history,
+    count_attachments,
     estimate_chars,
     learn_profiles,
 )
-from infinity_agent import FunctionCall, Message, ToolCall
+from infinity_agent import FunctionCall, Message, MultiModalContent, ToolCall
 
 
 def _json(message: Message) -> dict[str, Any]:
@@ -186,6 +187,54 @@ def test_estimate_chars_counts_tool_arguments() -> None:
     )
 
     assert estimate_chars([Message.assistant(tool_calls=[call])]) > 500
+
+
+def _image_message(text: str = "看图") -> Message:
+    """一条带图片内容块的用户消息（附件在库里只是伪 URL）。"""
+    return Message.user(
+        [
+            MultiModalContent.text_part(text),
+            MultiModalContent.image_part("blue+attachment://deadbeef"),
+        ]
+    )
+
+
+def test_estimate_chars_can_weight_attachments() -> None:
+    """附件块默认不计入；给了当量权重后每个块按权重折算。
+
+    消息里图片只是 ``blue+attachment://<hash>`` 伪 URL，真实字节要到发请求时才
+    materialize 成 ``data:`` URL——不折算就等于把图片当零成本。
+    """
+    message = _image_message()
+    plain = Message.user("看图")
+
+    assert estimate_chars([message]) == estimate_chars([plain])
+    assert (
+        estimate_chars([message], attachment_chars=2400)
+        == estimate_chars([plain]) + 2400
+    )
+
+
+def test_count_attachments() -> None:
+    """附件块数量统计：图片/文件各算一个，纯文本消息计 0。"""
+    assert count_attachments([_image_message(), Message.user("纯文本")]) == 1
+    assert count_attachments([Message.user("无附件")]) == 0
+
+
+def test_short_history_still_gets_compacted() -> None:
+    """量化只作用于已超过步长的区间：短历史不会被整体取消压缩。
+
+    ``keep_messages`` 接近消息总数时分界本来就很靠前，若无条件向下取整到步长，
+    分界会退化成 0，等于一条都不压。
+    """
+    messages = [*_round("old", 4000), *_round("r1", 4000), *_round("r2", 4000)]
+
+    compacted = compact_history(messages, keep_messages=4, boundary_step=50)
+
+    old_arguments = _calls(compacted[0])[0].function.arguments
+    assert str(old_arguments["content"]).startswith("<omitted")
+    for original, result in zip(messages[2:], compacted[2:], strict=True):
+        assert result is original
 
 
 def _tool_named(tool: str, payload: object, *, call_id: str = "c1") -> list[Message]:

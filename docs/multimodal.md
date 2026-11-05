@@ -10,7 +10,8 @@
 `attachments` 表（主键就是内容哈希）：
 
 - 同一张图在多个会话/多条消息里只存一份（去重由主键保证）；
-- 消息 JSON 保持精简，历史回放不必搬着几 MB 的 base64 走；
+- 消息 JSON 保持精简，历史回放不必搬着几 MB 的 base64 走（发请求前才 materialize，
+  且按 `compact_attachment_chars` 计入上下文预算，见 README「运行时配置投影」）；
 - 会话被 `prune` / `reset` 删除时，映射行随消息级联消失，**附件行保留**（可能被别的会话引用），
   再由 GC 按「无引用 + 超过宽限期」回收；
 - WebUI 的取图地址是内容寻址的，因此可以 `Cache-Control: immutable` 长缓存。

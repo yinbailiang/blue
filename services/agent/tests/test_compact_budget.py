@@ -5,7 +5,13 @@ from __future__ import annotations
 import json
 
 from blue_service_agent.compact import compact_history, estimate_chars
-from infinity_agent import FunctionCall, Message, MessageRole, ToolCall
+from infinity_agent import (
+    FunctionCall,
+    Message,
+    MessageRole,
+    MultiModalContent,
+    ToolCall,
+)
 
 
 def _user(text: str) -> Message:
@@ -110,15 +116,106 @@ def test_last_step_is_never_dropped() -> None:
     assert fitted[-1].content == "现在的问题"
 
 
-def test_boundary_is_quantised_so_the_prefix_stays_stable() -> None:
-    """投影分界按 50 条取整：多来一条消息，压缩结果的前缀不会跟着挪一格。"""
-    history = [_user(f"第 {i} 轮") for i in range(130)]
-    first = compact_history(history, keep_messages=50, text_chars=200)
-    second = compact_history(
-        [*history, _user("再来一条")], keep_messages=50, text_chars=200
+def _with_extras(history: list[Message], extra: int) -> list[Message]:
+    """在原历史后面追加 ``extra`` 条新消息（模拟对话继续增长）。"""
+    return [*history, *[_user(f"追加 {i}") for i in range(extra)]]
+
+
+def _boundary(messages: list[Message], *, step: int, keep: int = 10) -> int:
+    """测出「投影分界」：第一条原样保留的长工具结果的索引。
+
+    长工具结果被投影后内容必然改变，所以「内容仍然相同」= 从这条起原样保留。
+    找不到（分界之后已无工具结果）就返回消息总数。
+    """
+    compacted = compact_history(
+        messages, keep_messages=keep, text_chars=200, boundary_step=step
     )
-    assert first[:50] == second[:50]
-    assert len(second) == len(history) + 1
+    for index, (before, after) in enumerate(zip(messages, compacted, strict=True)):
+        if before.content == after.content and len(str(before.content)) > 1000:
+            return index
+    return len(compacted)
+
+
+def test_boundary_is_quantised_so_the_prefix_stays_stable() -> None:
+    """投影分界按步长取整：整个步长区间内分界不动，前缀缓存才命中得了。
+
+    旧实现里这条测试用全短消息，压缩前后内容一样，断言恒真——分界其实每来一条
+    就挪一格（``COMPACT_BOUNDARY_STEP`` 定义了却没人用）。这里改用长工具结果，
+    让分界真的可观测。
+    """
+    step = 20
+    history = _pairs(30, size=3000)
+    boundaries = {
+        _boundary(_with_extras(history, extra), step=step) for extra in range(step)
+    }
+    assert len(boundaries) == 1, boundaries
+
+
+def test_boundary_step_zero_moves_every_message() -> None:
+    """``boundary_step=0`` 关闭量化：分界逐条移动（回归到旧行为）。"""
+    step = 0
+    history = _pairs(30, size=3000)
+    boundaries = {
+        _boundary(_with_extras(history, extra), step=step) for extra in range(20)
+    }
+    assert len(boundaries) > 3, boundaries
+
+
+def test_boundary_step_is_configurable() -> None:
+    """步长越大，分界跨得越宽：同一份历史在 40 步长下还没跨格，20 步长下已经跨了。"""
+    history = _pairs(30, size=3000)
+
+    assert _boundary(_with_extras(history, 30), step=40) == 80
+    assert _boundary(_with_extras(history, 30), step=20) > 80
+
+
+def test_keep_zone_survives_normal_budget_pressure() -> None:
+    """预算够用时丢弃止步于保留区：最近几轮原样，说明里不提「最近」。"""
+    history = _pairs(20, size=2000)
+    whole = estimate_chars(compact_history(history, keep_messages=4, text_chars=200))
+
+    fitted = compact_history(
+        history, keep_messages=4, text_chars=200, target_chars=whole * 5 // 6
+    )
+
+    assert "已省略" in _note_of(fitted)
+    assert "最近" not in _note_of(fitted)
+    assert fitted[-1].content == history[-1].content
+
+
+def test_note_reports_recent_messages_when_keep_zone_is_eaten() -> None:
+    """预算小到必须动用保留区时，说明里如实写出最近也被省略。"""
+    history = _pairs(20, size=2000)
+    whole = estimate_chars(compact_history(history, keep_messages=4, text_chars=200))
+
+    fitted = compact_history(
+        history, keep_messages=4, text_chars=200, target_chars=whole // 2
+    )
+
+    assert "最近" in _note_of(fitted)
+    assert _pairing_is_intact(fitted)
+
+
+def test_attachment_weight_can_trigger_budget_dropping() -> None:
+    """附件按当量计入估算后，图片多的历史会真的进预算流程。"""
+    images = [
+        Message.user(
+            [
+                MultiModalContent.text_part("看图"),
+                MultiModalContent.image_part(f"blue+attachment://{index:064x}"),
+            ]
+        )
+        for index in range(10)
+    ]
+
+    ignored = compact_history(images, keep_messages=2, target_chars=10_000)
+    counted = compact_history(
+        images, keep_messages=2, target_chars=10_000, attachment_chars=2400
+    )
+
+    assert len(ignored) == len(images)
+    assert len(counted) < len(images)
+    assert "已省略" in _note_of(counted)
 
 
 def _assistant_with_reasoning(reasoning: str) -> Message:

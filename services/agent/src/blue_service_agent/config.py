@@ -77,7 +77,7 @@ class AgentConfig(BaseModel):
         default=True, description="发送前压缩历史里的工具往返（不改持久化数据）"
     )
     compact_keep_messages: int = Field(
-        default=60, ge=0, description="尾部保留原文的消息条数（最近几轮不动）"
+        default=300, ge=0, description="尾部保留原文的消息条数（最近几轮不动）"
     )
     compact_text_chars: int = Field(
         default=200, ge=20, description="成功结果里大文本字段保留的字符数"
@@ -97,6 +97,23 @@ class AgentConfig(BaseModel):
     compact_rules: list[CompactRule] = Field(
         default_factory=list[CompactRule],
         description="按工具定制的压缩规则（字段路径用 a.b 表示嵌套，tool 支持 * 通配）",
+    )
+    compact_boundary_step: int = Field(
+        default=50,
+        ge=0,
+        description=(
+            "投影分界的量化步长（条）；0 = 逐条移动分界。分界每来一条消息就挪一格"
+            "会让 prompt 前缀缓存整段失效，按步长取整后能连续命中。"
+        ),
+    )
+    compact_attachment_chars: int = Field(
+        default=2400,
+        ge=0,
+        description=(
+            "每个附件内容块（图片/文件）折算的估算字符数；0 = 不计入预算。"
+            "估算原本只看文本，图片在消息里只是一个伪 URL，等于按零成本计算。"
+            "2400 ≈ 1500 视觉 token × 1.6 字符/token 的实测比例。"
+        ),
     )
 
     def resolve_api_key(self) -> str:

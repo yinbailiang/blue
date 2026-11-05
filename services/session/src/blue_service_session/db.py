@@ -254,6 +254,7 @@ class SessionDatabase:
         self._enforce_capacity = enforce_capacity
         self._connection: aiosqlite.Connection | None = None
         self._lock = asyncio.Lock()
+        self._prompt_warned: set[str] = set()
 
     @property
     def path(self) -> Path:
@@ -321,6 +322,10 @@ class SessionDatabase:
                         """,
                         (system_id, session_id),
                     )
+                elif not created and system_prompt:
+                    await self._warn_prompt_drift_locked(
+                        connection, session_id, system_prompt
+                    )
                 await self._enforce_capacity_locked(connection, now=now)
                 await connection.commit()
             except Exception:
@@ -330,6 +335,43 @@ class SessionDatabase:
         if record is None:
             raise SessionNotFoundError(f"会话不存在：{session_id}")
         return record
+
+    async def _warn_prompt_drift_locked(
+        self,
+        connection: aiosqlite.Connection,
+        session_id: str,
+        system_prompt: str,
+    ) -> None:
+        """已存在的会话不会回写 system 提示：配置变了就告警一次，别让它静默失效。
+
+        刻意**不改**库里的提示：历史消息都是在那条提示下产生的，悄悄换掉会让
+        旧对话的语义前后矛盾。需要新提示就新建会话。
+        """
+        if session_id in self._prompt_warned:
+            return
+        cursor = await connection.execute(
+            "SELECT payload FROM messages"
+            " WHERE session_id = ? AND parent_id = ? ORDER BY id LIMIT 1",
+            (session_id, ROOT_ID),
+        )
+        try:
+            row = await cursor.fetchone()
+        finally:
+            await cursor.close()
+        if row is None:
+            return
+        stored = decode_message(str(row["payload"]))
+        body = stored.content if isinstance(stored.content, str) else ""
+        if body == system_prompt:
+            return
+        self._prompt_warned.add(session_id)
+        logger.warning(
+            "会话 %s 的 system 提示与当前配置不一致（库内 %s 字符 / 配置 %s 字符）："
+            "已存在的会话沿用建会话时的提示，需要新提示请新建会话",
+            session_id,
+            len(body),
+            len(system_prompt),
+        )
 
     async def get(self, session_id: str) -> SessionRecord | None:
         """读取会话完整记录。"""

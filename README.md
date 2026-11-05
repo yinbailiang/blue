@@ -284,6 +284,8 @@ services/<name>/service_runtime_config.json
   "compact_text_chars": 200,
   "compact_error_chars": 600,
   "compact_target_chars": 1200000,
+  "compact_boundary_step": 50,
+  "compact_attachment_chars": 2400,
   "session_timeout": 10.0,
   "system_prompt": "你是 blue，一个通过工具完成任务的智能体。",
   "tool_timeout": 30.0
@@ -317,7 +319,9 @@ services/<name>/service_runtime_config.json
   `success` 原样保留，`stdout`/`content` 截成「开头 + `…[N chars omitted]`」，
   失败时额外保留结尾（错误通常在尾部），列表只留前几条，`write_file` 的正文
   直接省略（文件已落盘）。**只压较早的消息**，尾部 `compact_keep_messages`
-  （默认 300 条）原样发送——模型正在用的工具结果不能被截断。
+  （默认 300 条）原样发送——模型正在用的工具结果不能被截断。预算极低时这条
+  保护会让位于「不超窗口」，但省略说明里会写明「其中最近 N 条也一并省略」，
+  不让模型误以为近几轮还在。
 - `compact_target_chars`（默认 `1200000`，`0` = 不限）：提示体量的**预算**。
   只按条数保留是不够的：1700 条历史里每条哪怕只剩 200 字，加起来也有 1 MB。
 
@@ -330,16 +334,32 @@ services/<name>/service_runtime_config.json
   - 永远保留：系统提示、最后一步（当前这轮的输入）。预算小到最后一步都放不下时
     不丢它，如实承认超预算。
 
-  数值怎么定：`agent` 每步会打印实测的「字符/token」比例。真实会话里工具结果是
-  JSON，实测 **1.6 字符/token**（不是纯文本的 2.6），所以 100 万 token 只相当于
-  160 万字符。默认 120 万字符 ≈ 74 万 token，给 1M 窗口留出工具 schema 与回复的
-  余量。换个模型/换个内容构成时，看日志里的比例重算一次即可。
+  数值怎么定：`agent` 每步会打印实测的「字符/token」比例，同时打印**工具 schema
+  字符数**与**附件个数**。真实会话里工具结果是 JSON，实测 **1.6 字符/token**
+  （不是纯文本的 2.6），所以 100 万 token 只相当于 160 万字符。默认 120 万字符
+  ≈ 74 万 token，给 1M 窗口留出工具 schema 与回复的余量。换个模型/换个内容构成时，
+  看日志里的比例重算一次即可。
+
+  > **工具 schema 不在预算内**（当前 38 个工具、上万字符，每步都随请求发送）：
+  > 提示很小时它会主导「字符/token」比值（实测出现过 **0.4**），别拿那个比例反推
+  > 预算。附件则相反——按 `compact_attachment_chars` 计入，所以图片多的会话预算
+  > 才是准的。
 
   实测一条 1742 条消息的会话：原始 2967 KB，预算 200 万 → 1009 KB（不丢任何消息）；
   预算 60 万 → 584 KB / 丢 1136 条；预算 20 万 → 195 KB / 丢 1673 条。
 
-  投影分界还按 50 条取整（`COMPACT_BOUNDARY_STEP`）：分界如果每来一条消息就挪一格，
-  等于每次调用都把第 `len-keep` 条改写一遍，上游的 prompt 前缀缓存会从那里整段失效。
+  投影分界由 `compact_boundary_step`（默认 50 条，`0` = 不量化）控制：分界如果
+  每来一条消息就挪一格，等于每次调用都把第 `len-keep` 条改写一遍，上游的 prompt
+  前缀缓存会从那里整段失效。按步长取整后，整个步长区间内分界不动，代价是最少
+  多保护 `步长-1` 条。量化只作用于已经越过步长的区间——短会话（`len-keep < 步长`）
+  不受影响，否则分界会被整成 0、等于一条都不压。
+- `compact_attachment_chars`（默认 `2400`，`0` = 不计入）：每个附件内容块折算的
+  **字符当量**。消息里的图片只是 `blue+attachment://<hash>` 伪 URL，真实字节要到
+  发请求时才 materialize 成 `data:` URL——按文本估算等于把图片当零成本，预算对它
+  完全失去约束力。2400 ≈ 1500 视觉 token × 1.6 字符/token 的实测比例。
+- `system_prompt` 只在**建会话时**写入根节点：已存在的会话沿用建会话时的提示，
+  改配置不会回写（历史消息都是在那条提示下产生的）。配置与库内不一致时 session
+  服务会告警一次（每个会话一次），需要新提示请新建会话。
 - `database_path` 为相对路径时解析到 `BLUE_STATE_DIR`，默认
   `.blue/sessions.db`；
 - **`prune_enabled` 默认 `false`：不会自动删除任何会话或附件**，磁盘占满前

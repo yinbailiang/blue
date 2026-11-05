@@ -72,7 +72,12 @@ from blue_service_agent.attachments import (
     tool_attachment_parts,
 )
 from blue_service_agent.catalog import ToolCatalogClient
-from blue_service_agent.compact import compact_history, estimate_chars, learn_profiles
+from blue_service_agent.compact import (
+    compact_history,
+    count_attachments,
+    estimate_chars,
+    learn_profiles,
+)
 from blue_service_agent.config import AgentConfig
 from blue_service_agent.history import (
     interrupted_reply,
@@ -548,7 +553,10 @@ class AgentCore:
                     decode_messages(node.message for node in base)
                 )
                 if self._settings.compact_history:
-                    before = estimate_chars(messages)
+                    before = estimate_chars(
+                        messages,
+                        attachment_chars=self._settings.compact_attachment_chars,
+                    )
                     messages = compact_history(
                         messages,
                         keep_messages=self._settings.compact_keep_messages,
@@ -557,15 +565,21 @@ class AgentCore:
                         rules=self._settings.compact_rules,
                         profiles=learn_profiles(messages),
                         target_chars=self._settings.compact_target_chars,
+                        boundary_step=self._settings.compact_boundary_step,
+                        attachment_chars=self._settings.compact_attachment_chars,
                     )
-                    after = estimate_chars(messages)
+                    after = estimate_chars(
+                        messages,
+                        attachment_chars=self._settings.compact_attachment_chars,
+                    )
                     if before > after:
                         logger.info(
-                            "历史压缩：%s 条消息，%s → %s 字符（−%s%%）",
+                            "历史压缩：%s 条消息，%s → %s 字符（−%s%%）· 附件 %s 个",
                             len(messages),
                             before,
                             after,
                             round((1 - after / before) * 100),
+                            count_attachments(messages),
                         )
                 head = mount
                 if not payload.regenerate:
@@ -760,25 +774,36 @@ class AgentCore:
         return None
 
     def _log_usage(
-        self, chunks: Sequence[StreamChunk], messages: Sequence[Message]
+        self,
+        chunks: Sequence[StreamChunk],
+        messages: Sequence[Message],
+        tools: Sequence[ToolDefinition],
     ) -> None:
         """记一行「提示字符 / token 用量」，用来看预算调得合不合适。
 
         中英混排 + 大量 JSON 时，字符/token 大约落在 2.2–3.0；这个数字变小时说明
         上下文里 JSON/英文变多了，预算想按 token 折算就得跟着变。
+
+        同时把**不计入预算**的两块固定开销单独打出来：工具 schema（每步都随请求
+        发送）与附件块数。小提示时它们占主导，光看「字符/token」会误以为预算是
+        按 1.6 折算的。
         """
         usage = self._usage_of(chunks)
         if usage is None:
             return
-        chars = estimate_chars(messages)
+        attachment_chars = self._settings.compact_attachment_chars
+        chars = estimate_chars(messages, attachment_chars=attachment_chars)
         ratio = chars / usage.prompt_tokens if usage.prompt_tokens else 0.0
+        schema_chars = sum(len(tool.model_dump_json()) for tool in tools)
         logger.info(
             "本步用量：prompt %s tok（%.1f 字符/token）"
-            "· completion %s tok · 提示 %s 字符",
+            "· completion %s tok · 提示 %s 字符 · 工具 schema %s 字符 · 附件 %s 个",
             usage.prompt_tokens,
             ratio,
             usage.completion_tokens,
             chars,
+            schema_chars,
+            count_attachments(messages),
         )
 
     async def _stream_step(
@@ -813,7 +838,7 @@ class AgentCore:
                     await self._forward_chunk(
                         bus_proxy, session_id, request_id, step, chunk
                     )
-                self._log_usage(chunks, messages)
+                self._log_usage(chunks, messages, tools)
                 return chunks
             except asyncio.CancelledError:
                 await self._commit_interrupted_stream(
