@@ -230,10 +230,37 @@ def read_package_name(pyproject: Path) -> str:
     return name if isinstance(name, str) else ""
 
 
+_JUNK_DIRS = frozenset(
+    {"__pycache__", ".venv", ".pytest_cache", ".ruff_cache", ".mypy_cache"}
+)
+"""与产物无关、不该进指纹的目录名（出现在 ``src/`` 下任意层级）。"""
+
+_JUNK_SUFFIXES = (".pyc", ".pyo")
+"""字节码文件；解释器会在运行时生成它们，与源码无关。"""
+
+_JUNK_NAMES = frozenset({".DS_Store"})
+"""编辑器/系统产生的孤立文件。"""
+
+
+def _is_junk(path: Path, root: Path) -> bool:
+    """判断 ``root`` 下的文件是否与打出来的 wheel 内容无关。
+
+    缓存目录会在正常使用中反复变化：把它们算进指纹，等于每次跑完测试都
+    触发一次无意义的重建/重启。
+    """
+    if path.suffix in _JUNK_SUFFIXES or path.name in _JUNK_NAMES:
+        return True
+    return any(part in _JUNK_DIRS for part in path.relative_to(root).parts[:-1])
+
+
 def scan_package(
     service_dir: Path, *, extra_files: Iterable[str] = ()
 ) -> tuple[tuple[str, int, int], ...]:
-    """列出参与源码指纹的文件：``pyproject.toml``、额外文件与 ``src/**/*.py``。
+    """列出参与源码指纹的文件：``pyproject.toml``、额外文件与 ``src/`` 全部内容。
+
+    ``src/`` 下**不限扩展名**：包里的非 Python 资产（例如 ``webui`` 的
+    ``web/**`` 静态资源）会被打进 wheel，漏掉它们就会出现「改了前端资源、
+    指纹不变、apply 认为无事可做」——资源永远不生效。
 
     只做 ``stat``，供调谐循环低成本判断「可能变了」；确认内容是否真的变化
     交给 :func:`digest_package`。
@@ -259,7 +286,7 @@ def scan_package(
     if not src.is_dir():
         return tuple(entries)
     paths = sorted(
-        (path for path in src.rglob("*.py") if path.is_file()),
+        (path for path in src.rglob("*") if path.is_file() and not _is_junk(path, src)),
         key=lambda item: item.as_posix(),
     )
     for path in paths:
@@ -278,9 +305,10 @@ def digest_package(
 ) -> str:
     """计算服务包内容指纹。
 
-    覆盖 ``pyproject.toml``（含版本声明）与全部 ``src/**/*.py`` 的内容，因此
-    「只改代码、不升版本」同样会改变指纹。``entries`` 可由
-    :func:`scan_package` 预先提供，避免重复遍历目录。
+    覆盖 ``pyproject.toml``（含版本声明）与 ``src/`` 下全部产物文件的内容，
+    因此「只改代码、不升版本」与「只改包内静态资源」同样会改变指纹——指纹
+    必须与打进 wheel 的文件集合一致，否则内容寻址会复用旧产物。
+    ``entries`` 可由 :func:`scan_package` 预先提供，避免重复遍历目录。
     """
     digest = hashlib.sha256()
     items = scan_package(service_dir) if entries is None else entries

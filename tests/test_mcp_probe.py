@@ -17,6 +17,40 @@ ROOT = Path(__file__).resolve().parents[1]
 VSERVER = ROOT / "mcp_servers" / "virtual_screen" / "server.py"
 """仓库自带的 MCP server，探测它的工具列表不需要网络。"""
 
+_PROBE_CONFIG = """\
+!from p"services/bus/service.infd" import ServiceTemplate as BusService
+!from p"services/registry/service.infd" import ServiceTemplate as RegistryService
+!from p"services/mcp_bridge/service.infd" import ServiceTemplate as McpBridgeService
+
+supervisor {}
+
+bus = BusService()
+registry = RegistryService()
+
+mcp_bridge = McpBridgeService(
+  tools = [
+    "vscreen__screen_info",
+    "vscreen__screen_clear",
+    "vscreen__screen_fill",
+    "vscreen__screen_rect",
+    "vscreen__screen_text",
+    "vscreen__screen_snapshot",
+  ],
+  servers = [
+    {
+      name = "vscreen",
+      command = ".venv/bin/python",
+      args = ["mcp_servers/virtual_screen/server.py"],
+    },
+  ],
+)
+"""
+"""只声明 vscreen 的最小期望状态：测试用，与真实 blue.infd 解耦。
+
+infd 的模板导入受沙盒约束（不能指向项目目录之外），所以这份配置必须落在
+项目内，不能塞进 tmp_path。
+"""
+
 
 def test_declared_servers_parses_config() -> None:
     """server 声明被解析成结构化对象，非法条目跳过。"""
@@ -126,21 +160,31 @@ def test_probe_tools_reads_real_server() -> None:
 def test_cli_mcp_tools_reports_declared_coverage(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    """CLI 的 --json 输出里带 declared 标记。"""
+    """CLI 的 --json 输出里带 declared 标记。
+
+    用项目内现写现删的配置，而不是 blue.infd：真实白名单随时会增删 server
+    （比如把 vscreen 换成 kwin），测试不该跟着一起坏。要用真正的 python，
+    所以先按 config_path 的目录解析出 root。
+    """
     from blue import cli
 
-    code = cli.main(
-        [
-            "--config",
-            str(ROOT / "blue.infd"),
-            "mcp-tools",
-            "vscreen",
-            "--json",
-        ]
-    )
+    config_path = ROOT / ".probe-mcp-tools.infd"
+    config_path.write_text(_PROBE_CONFIG, encoding="utf-8")
+    try:
+        code = cli.main(
+            [
+                "--config",
+                str(config_path),
+                "mcp-tools",
+                "vscreen",
+                "--json",
+            ]
+        )
+        captured = capsys.readouterr()
+    finally:
+        config_path.unlink(missing_ok=True)
 
     assert code == 0
-    captured = capsys.readouterr()
     payload = json.loads(captured.out)
     assert payload["vscreen"]["error"] is None
     tools = payload["vscreen"]["tools"]

@@ -106,7 +106,7 @@ contract {
 }
 ```
 
-契约指纹覆盖 `pyproject.toml`、`contract.infd` 与 `src/**/*.py`；因此只改契约
+契约指纹覆盖 `pyproject.toml`、`contract.infd` 与 `src/**` 全部文件；因此只改契约
 源码、不改服务源码，也会触发依赖服务重启。
 
 ## 会话树的协议增量（2026-11-05）

@@ -7,6 +7,7 @@ import json
 import os
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -124,6 +125,25 @@ def stat_mode(path: Path) -> int:
     return path.stat().st_mode & 0o777
 
 
+def _wait_for_instance_id(pid: int, instance_id: str, *, timeout: float = 5.0) -> None:
+    """等子进程的 ``/proc/<pid>/environ`` 里真的出现 ``BLUE_INSTANCE_ID`` 标记。
+
+    ``cleanup_orphans`` 靠这个标记确认进程身份，读不到就静默跳过——于是本用例在
+    全量并发跑时会偶发「cleaned 为空」的假失败。
+    """
+    marker = f"BLUE_INSTANCE_ID={instance_id}".encode()
+    environ = Path(f"/proc/{pid}/environ")
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        try:
+            if marker in environ.read_bytes().split(b"\0"):
+                return
+        except OSError:
+            pass
+        time.sleep(0.02)
+    pytest.fail(f"子进程 {pid} 的 BLUE_INSTANCE_ID 在 {timeout}s 内始终不可读")
+
+
 @pytest.mark.skipif(not Path("/proc/self/environ").exists(), reason="需要 Linux /proc")
 def test_cleanup_orphans_kills_matching_instance(tmp_path: Path) -> None:
     """只终止 BLUE_INSTANCE_ID 匹配的遗留进程组。"""
@@ -135,6 +155,10 @@ def test_cleanup_orphans_kills_matching_instance(tmp_path: Path) -> None:
         start_new_session=True,
     )
     try:
+        # Popen 返回时 exec 已完成，但 /proc/<pid>/environ 在高负载下可能短暂为空：
+        # 全量并发跑时这里会偶发「匹配不到」→ cleaned 为空。先等标记真的可读。
+        _wait_for_instance_id(process.pid, "orphan-test-1")
+
         store = StateStore(tmp_path / ".blue")
         previous = ActualState(
             generation="old",

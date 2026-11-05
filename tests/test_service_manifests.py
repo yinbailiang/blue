@@ -39,9 +39,11 @@ SERVICES = (
     "webui",
     "write_file",
 )
+# blue.infd 里**实际实例化**的服务集合。与上面 SERVICES 的差别只允许是「目录还在、
+# 但配置里被注释掉」的服务：browser 的无头 Firefox 截图能力已由 browser_ops 取代，
+# 它的条目在 blue.infd 中注释掉了（服务目录保留，随时可以开回来）。
 MANAGED = {
     "agent",
-    "browser",
     "browser_ops",
     "bus",
     "clock",

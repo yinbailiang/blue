@@ -211,7 +211,7 @@ contract {
 ```
 
 - 控制面为每个契约包计算 `source_hash`（`pyproject.toml` + `contract.infd` +
-  `src/**/*.py`），并把契约纳入 generation。
+  `src/**` 全部文件），并把契约纳入 generation。
 - 服务用 `depends_contracts` 声明自己依赖的契约。
 - `blue apply` / `reload()` 检测到契约变化时，会重启所有声明了该契约的服务；
   没有声明依赖的服务不受影响。
@@ -586,7 +586,7 @@ WantedBy=default.target
 | 维度 | 覆盖范围 | 变化时的后果 |
 |---|---|---|
 | **契约**（`contracts/*`） | 事件、载荷、代理 | 只重启 `depends_contracts` 里声明了它的服务 |
-| **服务包**（`services/<name>/`） | pyproject + `src/**/*.py` | 只重启该服务 |
+| **服务包**（`services/<name>/`） | pyproject + `src/**`（全部文件，含 `web/**` 静态资源；排除 `__pycache__`/`*.pyc` 等缓存） | 只重启该服务 |
 | **blue SDK**（`src/blue/**` + 根 pyproject） | worker、runtime、transport、tool_context | **重启全部服务** |
 
 第三行是后补的：`ToolWorker`/`BusRuntime` 这些运行时宿主留在 SDK 里，而服务包的

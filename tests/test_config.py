@@ -456,6 +456,90 @@ def test_digest_package_tracks_content_not_mtime(tmp_path: Path) -> None:
     assert digest_package(service_dir) != changed, "新增文件应改变指纹"
 
 
+def test_digest_package_covers_non_python_assets(tmp_path: Path) -> None:
+    """包内静态资源（如 webui 的 web/**）必须进指纹。
+
+    wheel 会带上 ``source-include`` 声明的非 .py 文件；指纹若只覆盖 .py，
+    就会出现「改了前端资源、指纹不变、apply 认为无事可做」，资源永远不生效。
+    """
+    service_dir = tmp_path / "services" / "web"
+    source = service_dir / "src" / "demo_web"
+    source.mkdir(parents=True)
+    (service_dir / "pyproject.toml").write_text(
+        '[project]\nname = "demo-web"\nversion = "0.1.0"\n', encoding="utf-8"
+    )
+    (source / "__init__.py").write_text("VALUE = 1\n", encoding="utf-8")
+    asset = source / "web" / "app.js"
+    asset.parent.mkdir()
+    asset.write_text("console.log(1);\n", encoding="utf-8")
+
+    before = digest_package(service_dir)
+    asset.write_text("console.log(2);\n", encoding="utf-8")
+    assert digest_package(service_dir) != before, "静态资源内容变化应改变指纹"
+
+    removed = digest_package(service_dir)
+    asset.unlink()
+    assert digest_package(service_dir) != removed, "静态资源被删也应改变指纹"
+
+
+def test_digest_package_ignores_caches(tmp_path: Path) -> None:
+    """缓存与字节码不进指纹，否则跑完测试就会触发无意义的重建。"""
+    service_dir = tmp_path / "services" / "demo"
+    source = service_dir / "src" / "demo"
+    source.mkdir(parents=True)
+    (service_dir / "pyproject.toml").write_text(
+        '[project]\nname = "demo-demo"\nversion = "0.1.0"\n', encoding="utf-8"
+    )
+    (source / "__init__.py").write_text("VALUE = 1\n", encoding="utf-8")
+    baseline = digest_package(service_dir)
+
+    (source / "__pycache__").mkdir()
+    (source / "__pycache__" / "__init__.cpython-314.pyc").write_bytes(b"\x00\x01")
+    (source / "stray.pyc").write_bytes(b"\x00\x02")
+    (source / ".pytest_cache").mkdir()
+    (source / ".pytest_cache" / "README.md").write_text("x", encoding="utf-8")
+
+    assert digest_package(service_dir) == baseline, "缓存文件不应改变指纹"
+    assert all(
+        "__pycache__" not in name and not name.endswith(".pyc")
+        for name, _size, _mtime in scan_package(service_dir)
+    )
+
+
+def test_generation_changes_with_static_asset(tmp_path: Path) -> None:
+    """配置、版本、.py 都不变、只有静态资源变化时，generation 也要变。"""
+    _workspace(tmp_path)
+    service_dir = tmp_path / "services" / "demo"
+    (service_dir / "pyproject.toml").write_text(
+        '[project]\nname = "demo-demo"\nversion = "0.1.0"\n', encoding="utf-8"
+    )
+    source = service_dir / "src" / "demo_web"
+    source.mkdir(parents=True)
+    (source / "__init__.py").write_text("VALUE = 1\n", encoding="utf-8")
+    asset = source / "style.css"
+    asset.write_text("body { color: red }\n", encoding="utf-8")
+    config = _config(
+        tmp_path,
+        """
+!from p"services/bus/service.infd" import ServiceTemplate as BusService
+!from p"services/demo/service.infd" import ServiceTemplate as DemoService
+bus = BusService()
+demo = DemoService()
+""",
+    )
+    first = load_desired(config)
+
+    asset.write_text("body { color: blue }\n", encoding="utf-8")
+    second = load_desired(config)
+
+    assert (
+        first.services["demo"].package_version
+        == second.services["demo"].package_version
+    )
+    assert first.services["demo"].source_hash != second.services["demo"].source_hash
+    assert first.generation != second.generation
+
+
 NULLABLE_TEMPLATE = "~ServiceTemplate {\n  value: <str?> = null\n}\n"
 
 
