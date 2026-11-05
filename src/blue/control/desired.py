@@ -407,28 +407,30 @@ def _load_contracts(base_dir: Path) -> dict[str, DesiredContract]:
 
 
 def _load_sdk(base_dir: Path) -> DesiredSdk:
-    """计算 blue SDK 自身的指纹（版本 + ``src/blue/**`` 内容）。
+    """计算 blue SDK 自身的指纹（版本 + ``src/blue/**/*.py`` 内容）。
 
     SDK 是每个服务的**隐式**运行时依赖：worker / runtime / transport / tool_context
     都在里面，但服务包的 ``source_hash`` 只覆盖 ``services/<name>/``，所以 SDK 改了
     调谐器察觉不到——服务会一直跑旧代码。这里把它显式纳入期望状态。
+
+    注意：**不能**用 :func:`scan_package`——那套是"服务包布局"（``pyproject.toml``
+    + 内部 ``src/``），而 SDK 目录本身就在 ``src/blue`` 下，套进去会一个文件都扫不到
+    （曾经就是这样：指纹只覆盖了根 ``pyproject.toml``，改代码全都不算变化）。
     """
     sdk_dir = base_dir / "src" / "blue"
     if not sdk_dir.is_dir():
         return DesiredSdk()
-    entries = scan_package(base_dir / "src" / "blue")
-    # 版本声明在项目根的 pyproject.toml 里，指纹也带上它
     root_pyproject = base_dir / "pyproject.toml"
     digest = hashlib.sha256()
     if root_pyproject.is_file():
         digest.update(b"pyproject.toml\0")
         digest.update(root_pyproject.read_bytes())
         digest.update(b"\0")
-    for name, _size, _mtime in entries:
-        digest.update(name.encode("utf-8"))
+    for path in sorted(sdk_dir.rglob("*.py"), key=lambda item: item.as_posix()):
+        digest.update(path.relative_to(sdk_dir).as_posix().encode("utf-8"))
         digest.update(b"\0")
         try:
-            digest.update((sdk_dir / name).read_bytes())
+            digest.update(path.read_bytes())
         except OSError:
             digest.update(b"<missing>")
         digest.update(b"\0")
