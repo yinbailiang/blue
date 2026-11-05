@@ -8,7 +8,7 @@
 
 .. code-block:: python
 
-    from blue.tool_context import call_service, current_context
+    from blue_tool_sdk import call_service, current_context
 
     async def history_search(query: str) -> SearchResult:
         context = current_context()
@@ -90,8 +90,16 @@ def session_proxy() -> Any:
 
     契约包提供 ``SessionProxy``；这里只是把它绑到工具进程的总线出口上，
     省得每个工具都自己 import 契约 + 取 runtime + 拼 proxy。
+
+    :raises RuntimeError: 服务没有依赖 ``session`` 契约，产物里没装契约包。
     """
-    from blue_contracts_session import SessionProxy
+    try:
+        from blue_contracts_session import SessionProxy
+    except ModuleNotFoundError as error:
+        raise RuntimeError(
+            "当前服务未依赖 session 契约（service.infd 的 depends_contracts）"
+            "，产物里没有 blue_contracts_session"
+        ) from error
 
     return SessionProxy(proxy())
 

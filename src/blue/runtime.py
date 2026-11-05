@@ -9,24 +9,23 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import importlib
+import importlib.metadata
+import importlib.util
 import json
 import logging
 import os
 import sys
-import uuid
-from collections.abc import Callable, Iterable, Sequence
+from collections.abc import Iterable, Mapping
 from pathlib import Path
 from typing import Any, Literal, TypeVar, cast
 
-from blue_contracts_tool import EVENTS as TOOL_EVENTS
 from infinity_bus import EventDeclaration
 from pydantic import BaseModel, ConfigDict, Field
 
 from blue.errors import RuntimeConfigError
 from blue.lifecycle import LifecycleService, serve_forever
-from blue.tool_context import bind_runtime
 from blue.transport import RabbitRuntime
-from blue.worker import ToolWorker
 
 __all__ = [
     "CONFIG_SECTION",
@@ -41,6 +40,8 @@ __all__ = [
     "bus_url",
     "configure_logging",
     "configure_workspace",
+    "contract_modules",
+    "load_contract_events",
     "load_infra_config",
     "load_runtime_config",
     "project_root",
@@ -49,7 +50,6 @@ __all__ = [
     "resolve_workspace",
     "resolve_workspace_path",
     "run_service",
-    "run_tool",
     "runtime_config_path",
     "service_name",
     "state_dir",
@@ -142,6 +142,10 @@ class InfraConfig(BaseModel):
     project_root: Path = Field(description="项目根，即 ``blue.infd`` 所在目录")
     bus_url: str = Field(description="AMQP 连接地址")
     state_dir: Path = Field(description="supervisor 状态与日志目录")
+    contracts: dict[str, str] = Field(
+        default_factory=dict,
+        description="契约名 → 事件模块；由 supervisor 按 depends_contracts 注入",
+    )
     registry_ttl: float = Field(default=15.0, gt=0, description="工具租约时长（秒）")
     registry_sweep_interval: float = Field(
         default=2.0, gt=0, description="工具租约巡检间隔（秒）"
@@ -251,7 +255,8 @@ def tool_attachment(
         return Shot(text="截图如下", attachments=[tool_attachment(png, "image/png")])
     ```
 
-    ``ToolWorker`` 会把这个字段摘出来放进 ``tool.result.attachments``，正文里不会出现
+    ``ToolWorker``（``blue_tool_sdk``）会把这个字段摘出来放进
+    ``tool.result.attachments``，正文里不会出现
     base64；agent 再把它转成内容寻址的会话附件并交给模型。
 
     :param data: 原始字节
@@ -352,8 +357,8 @@ def workspace() -> Workspace:
 
 
 def build_runtime(
-    role: str,
-    events: Iterable[type[EventDeclaration]],
+    role: str | None = None,
+    events: Iterable[type[EventDeclaration]] | None = None,
     url: str | None = None,
     strategy: Literal["restart", "offline"] = "offline",
 ) -> RabbitRuntime:
@@ -367,19 +372,91 @@ def build_runtime(
     ``strategy`` 决定停机时的队列语义，默认 ``offline``：``join()`` 会解绑
     队列，退出后不再接收广播；``restart`` 保留绑定与积压，重启后补投。
 
-    ``events`` 是该成员需要注册的事件声明；每个进程只注册自己生产/消费的事件。
+    ``role`` 缺省取服务名；``events`` 缺省按服务配置里的 ``depends_contracts``
+    自动扫描各契约包的 ``EVENTS``——服务代码不再手写事件列表。传入 ``events``
+    时显式覆盖自动扫描结果（单测、特殊进程用）。
+
+    :raises RuntimeConfigError: 配置里的契约模块缺失或没有导出 ``EVENTS``。
     """
-    member = (
-        os.environ.get("BLUE_SERVICE_NAME")
-        or os.environ.get("BLUE_INSTANCE_ID")
-        or uuid.uuid4().hex[:8]
-    )
+    member = service_name()
+    declarations = tuple(events) if events is not None else load_contract_events()
     return RabbitRuntime(
         url=url or bus_url(),
-        member_id=f"{role}.{member}",
-        events=events,
+        member_id=f"{role or member}.{member}",
+        events=declarations,
         strategy=strategy,
     )
+
+
+def contract_modules() -> dict[str, str]:
+    """当前服务依赖的契约：``{契约名: 事件模块}``。
+
+    唯一真相是 ``service.infd`` 的 ``depends_contracts``；supervisor 把它展开成
+    模块名写进运行时配置的 ``infra.contracts``，服务侧只负责导入。
+    """
+    return dict(load_infra_config().contracts)
+
+
+def load_contract_events(
+    modules: Mapping[str, str] | None = None,
+) -> tuple[type[EventDeclaration], ...]:
+    """导入契约模块并汇总它们的 ``EVENTS``。
+
+    手工运行（没有 supervisor 下发的配置）时退化为扫描已安装的
+    ``blue-contracts-*`` 发行包：开发时 `uv run blue-service-echo` 仍能直接工作。
+    由 supervisor 启动时**不**做这个兜底——多注册事件会掩盖
+    ``depends_contracts`` 漏配。
+
+    :param modules: 显式指定 ``{契约名: 模块名}``；缺省读运行时配置。
+    :raises RuntimeConfigError: 模块缺失、没有导出 ``EVENTS`` 或事件重名冲突。
+    """
+    configured = contract_modules() if modules is None else dict(modules)
+    if not configured and not _running_under_supervisor():
+        configured = _installed_contract_modules()
+
+    events: dict[str, type[EventDeclaration]] = {}
+    for contract, module in sorted(configured.items()):
+        try:
+            imported = importlib.import_module(module)
+        except ModuleNotFoundError as error:
+            raise RuntimeConfigError(
+                f"契约 {contract!r} 的模块 {module!r} 不可用：检查"
+                " service.infd 的 depends_contracts 与产物安装"
+            ) from error
+        declared = getattr(imported, "EVENTS", None)
+        if not isinstance(declared, Iterable) or isinstance(declared, str | bytes):
+            raise RuntimeConfigError(f"契约模块 {module!r} 没有导出 EVENTS")
+        found = False
+        for event in cast(Iterable[object], declared):
+            if not (isinstance(event, type) and issubclass(event, EventDeclaration)):
+                raise RuntimeConfigError(
+                    f"契约模块 {module!r} 的 EVENTS 含非事件声明：{event!r}"
+                )
+            found = True
+            existing = events.get(event.name)
+            if existing is not None and existing is not event:
+                raise RuntimeConfigError(
+                    f"契约事件重名：{event.name!r} 同时来自 "
+                    f"{existing.__module__} 与 {event.__module__}"
+                )
+            events[event.name] = event
+        if not found:
+            raise RuntimeConfigError(f"契约模块 {module!r} 的 EVENTS 为空")
+    return tuple(events.values())
+
+
+def _installed_contract_modules() -> dict[str, str]:
+    """扫描已安装的 ``blue-contracts-*`` 发行包（仅手工运行时的兜底）。"""
+    modules: dict[str, str] = {}
+    for distribution in importlib.metadata.distributions():
+        package = distribution.metadata["Name"] or ""
+        if not package.startswith("blue-contracts-"):
+            continue
+        module = package.replace("-", "_")
+        if importlib.util.find_spec(module) is None:
+            continue
+        modules[package.removeprefix("blue-contracts-")] = module
+    return modules
 
 
 def configure_logging() -> None:
@@ -404,25 +481,3 @@ def run_service(service: LifecycleService) -> int:
     configure_logging()
     asyncio.run(serve_forever(service))
     return 0
-
-
-def run_tool(
-    tool: Callable[..., Any],
-    name: str,
-    *,
-    ttl: float | None = None,
-    events: Sequence[type[EventDeclaration]] = (),
-) -> int:
-    """把工具函数作为独立进程运行。
-
-    :param tool: 带完整类型签名的工具函数。
-    :param name: 工具名（用于成员命名与日志）。
-    :param ttl: 注册租约；缺省读 supervisor 下发的基础设施配置，再缺省 15 秒。
-    :param events: 额外要注册的事件声明——工具需要反向调用别的服务（如
-        ``session.search``）时，把它那个契约包的事件一起传进来。
-    """
-    lease = ttl if ttl is not None else registry_ttl()
-    runtime = build_runtime(f"tool.{name}", (*TOOL_EVENTS, *events))
-    bind_runtime(runtime)
-    worker = ToolWorker(runtime=runtime, tool=tool, ttl=lease)
-    return run_service(worker)

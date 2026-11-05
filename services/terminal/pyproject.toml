@@ -5,6 +5,7 @@ description = "blue 终端工具服务：多会话 PTY、终端截图与坐标�
 requires-python = ">=3.14"
 dependencies = [
     "blue",
+    "blue-tool-sdk",
     "pillow>=11",
     "pydantic>=2",
     "pyte>=0.8",
@@ -13,6 +14,7 @@ dependencies = [
 
 [tool.uv.sources]
 blue = { workspace = true }
+blue-tool-sdk = { workspace = true }
 
 [build-system]
 requires = ["uv_build>=0.9.0,<0.14"]

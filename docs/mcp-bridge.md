@@ -10,13 +10,13 @@
 | --- | --- | --- |
 | 方向 | 客户端（外部 MCP → blue 目录） | 复用度最高，且不把 `shell` / `write_file` 这类无沙箱工具暴露到进程外；「blue → 外部 IDE」是独立课题 |
 | 形态 | 单服务 `services/mcp_bridge/`，`kind = "tool"`，一进程托管全部 server | 配置集中、目录版本统一；server 级故障用进程内退避重连隔离，不必为每个 server 起一个受控进程 |
-| 多工具承载 | 从 `blue.worker.ToolWorker` 抽出 `ToolRegistrar`（租约 / 心跳 / 注销） | `ToolWorker` 有「一进程一工具」的硬断言，但注册中心本身支持多工具；只把「一条租约」放宽成「一组租约」 |
+| 多工具承载 | 从 `blue_tool_sdk.ToolWorker` 抽出 `ToolRegistrar`（租约 / 心跳 / 注销） | `ToolWorker` 有「一进程一工具」的硬断言，但注册中心本身支持多工具；只把「一条租约」放宽成「一组租约」 |
 | 工具名 | `<server>__<tool>` | 注册中心对同名工具是 last-writer-wins：两个 server 提供同名工具会互相驱逐，`catalog.changed` 版本抖动，agent 可能静默路由到错误后端 |
 | 租约标识 | `mcp.<server>.<tool>`，**确定性无随机段** | 进程重启后租约不变，注册中心不会留下「新进程接管旧记录」的噪声 |
 | 工具集 | **声明式白名单** `tools = [...]` | 见 §2 |
 | 运行期目录 | 不跟随 `tools/list_changed` | 见 §2 |
 | 事件协议 | 不新增事件，`depends_contracts = ["tool"]` | 桥产生的仍是 `tool.register` / `tool.heartbeat` / `tool.unregister` / `tool.result` |
-| 依赖 | 零新增运行时依赖 | 见 §3 |
+| 依赖 | 零新增第三方依赖（只加 workspace 内的 `blue-tool-sdk`） | 见 §3 |
 
 ## 2. 为什么工具集必须是声明式的
 
@@ -62,7 +62,7 @@ blue.infd  tools = ["fs__read_file"]        servers = [{name = "fs", command = "
    │
    ▼ supervisor  →  services/mcp_bridge/service_runtime_config.json (0600)
 McpBridge.start()
-   ├─ build_runtime("mcp_bridge", TOOL_EVENTS) → 连总线
+   ├─ build_runtime("mcp_bridge")             → 连总线（事件按 depends_contracts 自动注册）
    ├─ ToolCallHandler(self)                 → 订阅 tool.call（按名字过滤）
    ├─ 每个 server: spawn 子进程 → initialize → tools/list（翻页）
    ├─ 白名单求交 → schema 归一化 → ToolDefinition

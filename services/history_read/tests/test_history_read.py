@@ -23,8 +23,8 @@ from infinity_bus.templates.request import request
 from tests.support import MemoryRuntime, make_runtime
 
 from blue.messages import encode_messages
-from blue.tool_context import ToolContext, bind_runtime_scoped, use_context
 from blue.transport import MemoryFanout
+from blue_tool_sdk import ToolContext, bind_runtime_scoped, use_context
 
 LONG_BODY = "x" * 5000
 """一条超长消息：用来验证截断标记。"""

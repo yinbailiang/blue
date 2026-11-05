@@ -299,3 +299,33 @@ async def _dependency(tmp_path: Path) -> None:
         await _wait_for(lambda: _status(state, "child") is ServiceStatus.READY)
     finally:
         await supervisor.stop()
+
+
+def test_launch_failure_respects_restart_never(tmp_path: Path) -> None:
+    """拉起就失败（command 不存在）时，restart=never 不该反复重试。"""
+    asyncio.run(_launch_failure_flow(tmp_path))
+
+
+async def _launch_failure_flow(tmp_path: Path) -> None:
+    desired = _desired(tmp_path, services={"demo": ("sleep", ())})
+    service = desired.services["demo"]
+    broken = service.model_copy(
+        update={
+            "meta": service.meta.model_copy(
+                update={"command": ("/nonexistent/binary",), "restart": "never"}
+            )
+        }
+    )
+    desired = desired.model_copy(update={"services": {"demo": broken}})
+    supervisor = _supervisor(desired)
+    state = StateStore(desired.supervisor.state_dir)
+    try:
+        await supervisor.start()
+        await _wait_for(lambda: _status(state, "demo") is ServiceStatus.FAILED)
+        snapshot = state.read_state()
+        assert snapshot is not None
+        assert snapshot.services["demo"].consecutive_failures == 0, "不该计入重试次数"
+        await asyncio.sleep(0.3)
+        assert _status(state, "demo") is ServiceStatus.FAILED
+    finally:
+        await supervisor.stop()

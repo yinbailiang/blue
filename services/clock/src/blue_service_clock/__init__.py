@@ -7,7 +7,7 @@ from typing import Annotated, Literal
 
 from pydantic import BaseModel, Field
 
-from blue.runtime import run_tool
+from blue_tool_sdk import run_tool
 
 
 class ClockResult(BaseModel):

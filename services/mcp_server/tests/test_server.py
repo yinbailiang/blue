@@ -25,7 +25,7 @@ from infinity_agent.tools import ToolRegistry
 from tests.support import make_runtime, wait_until
 
 from blue.transport import BusRuntime, MemoryFanout
-from blue.worker import ToolLease, ToolRegistrar, ToolWorker
+from blue_tool_sdk import ToolLease, ToolRegistrar, ToolWorker
 
 
 class FakeIO:

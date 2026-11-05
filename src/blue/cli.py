@@ -29,6 +29,9 @@ from blue.config import (
 )
 from blue.control import mcp
 from blue.control import plan as planner
+from blue.control.artifacts import ArtifactStore
+from blue.control.desired import topological_order
+from blue.control.generations import Generation, GenerationStore
 from blue.control.logs import LogManager
 from blue.control.model import ActualState, ServiceStatus
 from blue.control.reconciler import Supervisor
@@ -55,8 +58,29 @@ def main(argv: Sequence[str] | None = None) -> int:
                 return _apply(
                     config_path,
                     wait=bool(args.wait),
-                    timeout=float(args.timeout),
+                    timeout=args.timeout,
+                    staged=bool(args.staged),
+                    build=not bool(args.no_build),
                 )
+            case "activate":
+                return _activate(
+                    config_path,
+                    generation_id=int(args.generation),
+                    wait=bool(args.wait),
+                    timeout=args.timeout,
+                )
+            case "rollback":
+                return _rollback(
+                    config_path,
+                    to=args.to,
+                    service=args.service,
+                    wait=bool(args.wait),
+                    timeout=args.timeout,
+                )
+            case "generations":
+                return _generations(config_path, as_json=bool(args.json))
+            case "gc":
+                return _gc(config_path, keep=args.keep, dry_run=bool(args.dry_run))
             case "status":
                 return _status(config_path, as_json=bool(args.json))
             case "logs":
@@ -110,6 +134,7 @@ def _up(config_path: str, *, foreground: bool = False) -> int:
     ``--foreground`` 保留旧行为（容器/调试里有用）。
     """
     desired = load_desired(config_path)
+    _ensure_initial_generation(desired)
     if foreground:
         asyncio.run(_run_supervisor(desired))
         return 0
@@ -125,6 +150,24 @@ def _up(config_path: str, *, foreground: bool = False) -> int:
     print(f"  日志：{state.log_dir}")
     print("  改完配置用 blue apply 生效；停止用 blue down")
     return 0
+
+
+def _ensure_initial_generation(desired: DesiredState) -> None:
+    """首次启动（或从旧版本升级）时补一个世代，让调谐器有 ``current`` 可依。"""
+    store = _generation_store(desired)
+    if store.current() is not None:
+        return
+    artifacts = _artifact_store(desired)
+    _build_artifacts(desired, artifacts)
+    generation = store.create(
+        desired,
+        artifacts,
+        reason="bootstrap",
+        created_by=_git_revision(desired.base_dir),
+    )
+    store.mark_stable(generation)
+    store.activate(generation)
+    print(f"已初始化世代 {generation.id:04d}（bootstrap）")
 
 
 def _spawn_detached(config_path: str) -> int:
@@ -232,10 +275,87 @@ def _exec_self(desired: DesiredState) -> None:
     os.execv(sys.executable, argv)
 
 
-def _apply(config_path: str, *, wait: bool, timeout: float) -> int:
-    """通知运行中的 supervisor 重新加载配置。"""
+def _artifact_store(desired: DesiredState) -> ArtifactStore:
+    """按 ``supervisor`` 配置构造产物仓库。"""
+    settings = desired.supervisor
+    return ArtifactStore(
+        settings.state_dir,
+        project_root=desired.base_dir,
+        python=settings.artifact_python,
+        link_mode=settings.artifact_link_mode,
+        warn_cross_device=settings.artifact_warn_cross_device,
+    )
+
+
+def _generation_store(desired: DesiredState) -> GenerationStore:
+    """按 ``supervisor`` 配置构造世代仓库。"""
+    return GenerationStore(desired.supervisor.state_dir)
+
+
+def _build_artifacts(desired: DesiredState, artifacts: ArtifactStore) -> None:
+    """按依赖顺序构建所有服务的产物（已存在的直接复用）。
+
+    这一步**不碰运行中的系统**：失败时系统一个字节都没变。
+    """
+    ordered = topological_order(desired.services)
+    total = len(ordered)
+    for index, name in enumerate(ordered, start=1):
+        service = desired.services[name]
+        if service.meta.command:
+            print(f"[{index}/{total}] {name:<14} 自定义命令，无产物")
+            continue
+        digest = artifacts.hash_for(service, desired)
+        ref = artifacts.resolve(name, digest)
+        if ref.complete:
+            print(f"[{index}/{total}] {name:<14} 复用产物 {digest[:12]}")
+            continue
+        print(f"[{index}/{total}] {name:<14} 构建产物 {digest[:12]} …", flush=True)
+        artifacts.ensure(service, desired)
+    artifacts.ensure_base(desired)
+
+
+def _git_revision(base_dir: Path) -> str:
+    """记录世代对应的 git 提交（脏工作区加标记），best-effort 永不失败。"""
+
+    def run(*args: str) -> str:
+        try:
+            result = subprocess.run(
+                ["git", *args],
+                cwd=base_dir,
+                capture_output=True,
+                text=True,
+                timeout=10,
+                check=False,
+            )
+        except OSError, subprocess.SubprocessError:
+            return ""
+        return result.stdout.strip() if result.returncode == 0 else ""
+
+    revision = run("rev-parse", "--short", "HEAD")
+    if not revision:
+        return ""
+    return f"git {revision}{' (dirty)' if run('status', '--porcelain') else ''}"
+
+
+def _prepare_generation(
+    config_path: str, *, reason: str, build: bool
+) -> tuple[DesiredState, Generation]:
+    """编译 → 构建产物 → 冻结世代目录（**不激活**）。"""
     desired = load_desired(config_path)
-    state = StateStore(desired.supervisor.state_dir)
+    artifacts = _artifact_store(desired)
+    if build:
+        _build_artifacts(desired, artifacts)
+    generation = _generation_store(desired).create(
+        desired,
+        artifacts,
+        reason=reason,
+        created_by=_git_revision(desired.base_dir),
+    )
+    return desired, generation
+
+
+def _notify_supervisor(desired: DesiredState, state: StateStore) -> None:
+    """让调谐器按 ``current`` 重新加载（必要时先 execv 换掉自己的代码）。"""
     running, info = state.supervisor_running()
     if not running or info is None:
         raise BlueError("supervisor 未运行；请先执行 blue up")
@@ -249,20 +369,256 @@ def _apply(config_path: str, *, wait: bool, timeout: float) -> int:
     else:
         print(f"已通知 supervisor 重新加载（pid={info.pid}）")
 
-    if wait:
-        deadline = time.monotonic() + timeout
-        while time.monotonic() < deadline:
-            current = state.read_state()
-            if current is not None:
-                if current.config_error:
-                    raise BlueError(f"配置重载失败：{current.config_error}")
-                if current.generation == desired.generation:
+
+def _wait_for_activation(
+    desired: DesiredState, generation: Generation, timeout: float | None
+) -> int:
+    """等该世代通过健康闸门；失败/回滚返回非 0。"""
+    state = StateStore(desired.supervisor.state_dir)
+    limit = (
+        timeout if timeout is not None else desired.supervisor.activation_timeout + 30.0
+    )
+    deadline = time.monotonic() + limit
+    while time.monotonic() < deadline:
+        current = state.read_state()
+        if current is not None:
+            activation = current.activation
+            if activation is not None and activation.generation_id == generation.id:
+                if activation.phase == "stable":
                     _warn_if_stale_reconciler(state, desired)
-                    print("配置已生效")
+                    print(f"世代 {generation.id:04d} 已稳定：全部服务就绪")
                     return 0
-            time.sleep(0.1)
-        raise BlueError(f"等待配置生效超时（{timeout}s）")
+                if activation.phase in {"rolled_back", "failed"}:
+                    message = activation.message or activation.phase
+                    print(
+                        f"❌ 世代 {generation.id:04d} 激活失败：{message}",
+                        file=sys.stderr,
+                    )
+                    if activation.phase == "rolled_back":
+                        print(
+                            f"   已自动回滚到世代 {activation.previous_id}",
+                            file=sys.stderr,
+                        )
+                    return 1
+            if current.config_error:
+                print(f"⚠️ {current.config_error}", file=sys.stderr)
+        time.sleep(0.2)
+    raise BlueError(f"等待世代 {generation.id:04d} 验证超时（{limit:.0f}s）")
+
+
+def _apply(
+    config_path: str,
+    *,
+    wait: bool,
+    timeout: float | None,
+    staged: bool = False,
+    build: bool = True,
+) -> int:
+    """三阶段 apply：构建 → 原子切换 → 健康验证。
+
+    ``--staged`` 只到"世代目录已就绪"为止（等价 NixOS 的 ``nixos-rebuild boot``），
+    用 ``blue activate <N>`` 才真正切换。
+    """
+    desired, generation = _prepare_generation(config_path, reason="apply", build=build)
+    store = _generation_store(desired)
+    state = StateStore(desired.supervisor.state_dir)
+    current = store.current()
+
+    if staged:
+        print(
+            f"已生成世代 {generation.id:04d}（未激活）："
+            f"执行 blue activate {generation.id} 生效"
+        )
+        return 0
+
+    if current is not None and current.id == generation.id:
+        print(
+            f"配置未变化：沿用世代 {generation.id:04d}（{generation.generation[:12]}）"
+        )
+        _notify_supervisor(desired, state)
+        return _wait_for_activation(desired, generation, timeout) if wait else 0
+
+    store.activate(generation)
+    parent = generation.parent_id
+    print(
+        f"已切换 current → 世代 {generation.id:04d}"
+        f"（父世代 {parent if parent is not None else '无'}）"
+    )
+    _notify_supervisor(desired, state)
+    return _wait_for_activation(desired, generation, timeout) if wait else 0
+
+
+def _activate(
+    config_path: str, *, generation_id: int, wait: bool, timeout: float | None
+) -> int:
+    """激活一个已存在的世代（配合 ``apply --staged``）。"""
+    desired = load_desired(config_path)
+    store = _generation_store(desired)
+    generation = store.load(generation_id)
+    store.activate(generation)
+    print(f"已切换 current → 世代 {generation.id:04d}（{generation.generation[:12]}）")
+    _notify_supervisor(desired, StateStore(desired.supervisor.state_dir))
+    return _wait_for_activation(desired, generation, timeout) if wait else 0
+
+
+def _rollback(
+    config_path: str,
+    *,
+    to: int | None,
+    service: str | None,
+    wait: bool,
+    timeout: float | None,
+) -> int:
+    """回滚：整机回到上一个（或指定）stable 世代，或只换一个服务的产物与配置。"""
+    desired = load_desired(config_path)
+    store = _generation_store(desired)
+    current = store.current()
+    if current is None:
+        raise BlueError("没有当前世代（还没 apply 过），无从回滚")
+
+    if service is not None:
+        source = (
+            store.load(to)
+            if to is not None
+            else _previous_service_generation(store, current, service)
+        )
+        target = store.rebind_service(
+            service=service,
+            source=source,
+            created_by=_git_revision(desired.base_dir),
+        )
+        print(
+            f"已构造世代 {target.id:04d}："
+            f"{service} 回到世代 {source.id:04d} 的产物与配置"
+        )
+    else:
+        resolved = (
+            store.load(to)
+            if to is not None
+            else store.latest_stable(exclude=current.id)
+        )
+        if resolved is None:
+            raise BlueError("没有更早的稳定世代可以回滚")
+        target = resolved
+        print(f"回滚：世代 {current.id:04d} → 世代 {target.id:04d}")
+
+    store.activate(target)
+    _notify_supervisor(desired, StateStore(desired.supervisor.state_dir))
+    return _wait_for_activation(desired, target, timeout) if wait else 0
+
+
+def _previous_service_generation(
+    store: GenerationStore, current: Generation, service: str
+) -> Generation:
+    """找最近一个"该服务的产物或配置不同"的世代（单服务回滚的默认目标）。
+
+    :raises BlueError: 没有任何这样的世代
+    """
+    if service not in current.services:
+        raise BlueError(f"当前世代里没有服务 {service!r}")
+    target = current.services[service]
+    fingerprint = (target.artifact_hash, target.config_hash)
+    for generation in reversed(store.list()):
+        if generation.id == current.id or service not in generation.services:
+            continue
+        entry = generation.services[service]
+        if (entry.artifact_hash, entry.config_hash) != fingerprint:
+            return generation
+    raise BlueError(f"没有更早的世代包含不同的 {service} 产物或配置，无法回滚")
+
+
+def _generations(config_path: str, *, as_json: bool) -> int:
+    """列出全部世代与当前指针。"""
+    desired = _try_load(config_path)
+    state_dir = desired.supervisor.state_dir if desired is not None else Path(".blue")
+    store = GenerationStore(state_dir)
+    generations = store.list()
+    current = store.current()
+    entries = [
+        (generation, current is not None and generation.id == current.id)
+        for generation in generations
+    ]
+    if as_json:
+        payload: dict[str, object] = {
+            "current": current.id if current is not None else None,
+            "generations": [
+                {
+                    "id": generation.id,
+                    "current": is_current,
+                    "state": generation.state,
+                    "generation": generation.generation,
+                    "parent_id": generation.parent_id,
+                    "created_at": generation.data.created_at,
+                    "created_by": generation.data.created_by,
+                    "reason": generation.data.reason,
+                    "services": len(generation.services),
+                }
+                for generation, is_current in entries
+            ],
+        }
+        print(json.dumps(payload, ensure_ascii=False, indent=2))
+        return 0
+    if not entries:
+        print("尚无世代（还没 apply 过）")
+        return 0
+    print(f"{'ID':<6}{'STATE':<10}{'SERVICES':>9}  {'CREATED':<20}GENERATION  NOTE")
+    for generation, is_current in entries:
+        marker = "*" if is_current else " "
+        created = _format_time(generation.data.created_at)
+        note = generation.data.reason
+        if generation.data.created_by:
+            note = (
+                f"{note} · {generation.data.created_by}"
+                if note
+                else generation.data.created_by
+            )
+        print(
+            f"{marker}{generation.id:04d}  {generation.state:<10}"
+            f"{len(generation.services):>9}  {created:<20}"
+            f"{generation.generation[:12]}  {note}"
+        )
     return 0
+
+
+def _gc(config_path: str, *, keep: int | None, dry_run: bool) -> int:
+    """回收老世代与无人引用的产物（数据面永不回收）。"""
+    desired = load_desired(config_path)
+    settings = desired.supervisor
+    keep_count = keep if keep is not None else settings.generation_keep
+    store = _generation_store(desired)
+    artifacts = _artifact_store(desired)
+
+    keep_hashes = store.keep_hashes(keep=keep_count)
+    # 上一轮 apply 的世代（回滚目标）也得留着，否则 gc 完就没有回滚目标了
+    bases = {
+        generation.data.deps_hash or "nolock"
+        for generation in store.list()
+        if generation.id in store.protected_ids(keep=keep_count)
+    }
+    removed_generations = store.gc(keep=keep_count, dry_run=dry_run)
+    removed_artifacts = artifacts.gc(keep_hashes, dry_run=dry_run)
+    removed_bases = artifacts.gc_bases(bases, dry_run=dry_run)
+
+    verb = "将删除" if dry_run else "已删除"
+    print(
+        f"{verb}世代 {len(removed_generations)} 个："
+        + (", ".join(f"{gid:04d}" for gid in removed_generations) or "无")
+    )
+    print(
+        f"{verb}产物 {len(removed_artifacts)} 个："
+        + (", ".join(removed_artifacts[:6]) or "无")
+        + (" …" if len(removed_artifacts) > 6 else "")
+    )
+    print(
+        f"{verb}依赖基座 {len(removed_bases)} 个：" + (", ".join(removed_bases) or "无")
+    )
+    return 0
+
+
+def _current_generation_id(state_dir: Path) -> int | None:
+    """``current`` 指向的世代号（没有则为 ``None``）。"""
+    current = GenerationStore(state_dir).current()
+    return current.id if current is not None else None
 
 
 def _warn_if_stale_reconciler(store: StateStore, desired: DesiredState) -> None:
@@ -313,6 +669,7 @@ def _status(config_path: str, *, as_json: bool) -> int:
 
     service_rows = _service_status_rows(desired, actual)
     contract_rows = _contract_status_rows(desired, actual)
+    sdk_rows = _sdk_status_rows(desired, actual)
     blue_version = _blue_version()
 
     if as_json:
@@ -332,8 +689,19 @@ def _status(config_path: str, *, as_json: bool) -> int:
                 }
                 for name, package, version, source_hash, used_by in contract_rows
             },
+            "sdk": {
+                name: {
+                    "name": name,
+                    "package": package,
+                    "version": version,
+                    "source_hash": source_hash,
+                    "used_by": [] if used_by == "-" else used_by.split(","),
+                }
+                for name, package, version, source_hash, used_by in sdk_rows
+            },
             "state": actual.model_dump(mode="json") if actual is not None else None,
             "desired_generation": desired.generation if desired is not None else None,
+            "current_generation": _current_generation_id(state_dir),
         }
         print(json.dumps(payload, ensure_ascii=False, indent=2))
         return 0
@@ -354,6 +722,21 @@ def _status(config_path: str, *, as_json: bool) -> int:
             f"generation : {actual.generation[:12]}  "
             f"updated={_format_time(actual.updated_at)}"
         )
+        current_generation = GenerationStore(state_dir).current()
+        if current_generation is not None:
+            print(
+                f"世代       : {current_generation.id:04d} "
+                f"{current_generation.state:<8}"
+                f"{current_generation.generation[:12]}  "
+                f"{current_generation.data.created_by}"
+            )
+        activation = actual.activation
+        if activation is not None:
+            detail = activation.message
+            if activation.failures:
+                detail = "未就绪：" + ", ".join(activation.failures[:5])
+            suffix = f"（{detail}）" if detail else ""
+            print(f"激活       : {activation.phase}{suffix}")
         if desired is not None and desired.generation != actual.generation:
             print(
                 f"desired    : {desired.generation[:12]}  "
@@ -379,6 +762,15 @@ def _status(config_path: str, *, as_json: bool) -> int:
     if contract_rows:
         print(f"{'NAME':<18}{'PACKAGE':<26}{'VERSION':<10}{'SOURCE':<14}USED BY")
         for name, package, version, source_hash, used_by in contract_rows:
+            print(
+                f"{name:<18}{package:<26}{version or '-':<10}"
+                f"{source_hash[:12]:<14}{used_by}"
+            )
+
+    print(f"sdk        : {len(sdk_rows)}")
+    if sdk_rows:
+        print(f"{'NAME':<18}{'PACKAGE':<26}{'VERSION':<10}{'SOURCE':<14}USED BY")
+        for name, package, version, source_hash, used_by in sdk_rows:
             print(
                 f"{name:<18}{package:<26}{version or '-':<10}"
                 f"{source_hash[:12]:<14}{used_by}"
@@ -471,6 +863,45 @@ def _contract_status_rows(
     return sorted(rows)
 
 
+def _sdk_status_rows(
+    desired: DesiredState | None, actual: ActualState | None
+) -> list[tuple[str, str, str, str, str]]:
+    """SDK 运行时包展示行：name/package/version/source/used_by。"""
+    usage: dict[str, list[str]] = {}
+    if desired is not None:
+        for service_name, service in desired.services.items():
+            for dependency in service.meta.depends_sdk:
+                usage.setdefault(dependency, []).append(service_name)
+
+    rows: list[tuple[str, str, str, str, str]] = []
+    packages = actual.sdk.packages if actual is not None and actual.sdk else None
+    if packages:
+        for name, package in packages.items():
+            used_by = ",".join(sorted(usage.get(name, []))) or "-"
+            rows.append(
+                (
+                    name,
+                    package.meta.package,
+                    package.package_version,
+                    package.source_hash,
+                    used_by,
+                )
+            )
+    elif desired is not None:
+        for name, package in desired.sdk.packages.items():
+            used_by = ",".join(sorted(usage.get(name, []))) or "-"
+            rows.append(
+                (
+                    name,
+                    package.meta.package,
+                    package.package_version,
+                    package.source_hash,
+                    used_by,
+                )
+            )
+    return sorted(rows)
+
+
 def _logs(config_path: str, *, name: str, tail: int, follow: bool) -> int:
     """查看服务日志。"""
     desired = _try_load(config_path)
@@ -535,11 +966,12 @@ def _config_check(config_path: str, *, write: bool) -> int:
         meta = service.meta
         deps = ",".join(meta.depends_on) or "-"
         contracts = ",".join(meta.depends_contracts) or "-"
+        sdk = ",".join(meta.depends_sdk) or "-"
         version = service.package_version or "-"
         print(
             f"  - {name:<18} kind={meta.kind:<6} restart={meta.restart:<10} "
-            f"deps={deps:<18} contracts={contracts:<14} version={version:<10} "
-            f"config={service.config_hash[:12]}"
+            f"deps={deps:<18} contracts={contracts:<14} sdk={sdk:<10} "
+            f"version={version:<10} config={service.config_hash[:12]}"
         )
     print(f"contracts  : {len(desired.contracts)}")
     for name in sorted(desired.contracts):
@@ -548,6 +980,14 @@ def _config_check(config_path: str, *, write: bool) -> int:
             f"  - {name:<18} package={contract.meta.package:<24} "
             f"version={contract.package_version or '-':<10} "
             f"source={contract.source_hash[:12]}"
+        )
+    print(f"sdk        : {len(desired.sdk.packages)}")
+    for name in sorted(desired.sdk.packages):
+        package = desired.sdk.packages[name]
+        print(
+            f"  - {name:<18} package={package.meta.package:<24} "
+            f"version={package.package_version or '-':<10} "
+            f"source={package.source_hash[:12]}"
         )
     if write:
         changed = write_runtime_configs(desired, only_changed=False)
@@ -623,6 +1063,16 @@ def _plan(config_path: str, *, as_json: bool, show_diff: bool = False) -> int:
                         }
                         for change in result.contracts
                     ],
+                    "sdk": [
+                        {
+                            "name": change.name,
+                            "action": change.action,
+                            "before": change.before,
+                            "after": change.after,
+                            "affected": list(change.affected),
+                        }
+                        for change in result.sdk
+                    ],
                     "note": result.note,
                 },
                 ensure_ascii=False,
@@ -656,6 +1106,14 @@ def _plan(config_path: str, *, as_json: bool, show_diff: bool = False) -> int:
             after = change.after.split(":")[1][:8] if ":" in change.after else "-"
             affected = ", ".join(change.affected) or "无"
             print(f"  ~ {change.name:<16}{before} → {after}   影响：{affected}")
+    if result.sdk:
+        print("\nSDK 变更")
+        for change in result.sdk:
+            before = change.before[:8] or "-"
+            after = change.after[:8] or "-"
+            affected = ", ".join(change.affected) or "无"
+            marker = {"create": "+", "remove": "-", "change": "~"}[change.action]
+            print(f"  {marker} {change.name:<16}{before} → {after}   影响：{affected}")
     if unchanged and interesting:
         names = ", ".join(change.name for change in unchanged)
         print(f"\n不变（{len(unchanged)}）：{names}")
@@ -831,11 +1289,51 @@ def _parser() -> argparse.ArgumentParser:
         help="前台运行（容器/调试用；Ctrl-C 即停）",
     )
 
-    apply_parser = subparsers.add_parser("apply", help="重新加载配置")
+    apply_parser = subparsers.add_parser("apply", help="编译 → 构建产物 → 原子切换世代")
     apply_parser.add_argument(
-        "--wait", action="store_true", help="等待新 generation 生效"
+        "--wait", action="store_true", help="等待新世代通过健康验证"
     )
-    apply_parser.add_argument("--timeout", type=float, default=20.0, help="等待秒数")
+    apply_parser.add_argument(
+        "--timeout",
+        type=float,
+        default=None,
+        help="等待验证的秒数（默认 activation_timeout + 30）",
+    )
+    apply_parser.add_argument(
+        "--staged",
+        action="store_true",
+        help="只生成世代、不激活（之后用 blue activate <N>；等价 nixos-rebuild boot）",
+    )
+    apply_parser.add_argument(
+        "--no-build", action="store_true", help="不构建产物，只切换世代"
+    )
+
+    activate_parser = subparsers.add_parser("activate", help="激活一个已存在的世代")
+    activate_parser.add_argument("generation", type=int, help="世代号")
+    activate_parser.add_argument("--wait", action="store_true", help="等待健康验证")
+    activate_parser.add_argument("--timeout", type=float, default=None)
+
+    rollback_parser = subparsers.add_parser(
+        "rollback", help="回滚：整机或单个服务回到旧世代"
+    )
+    rollback_parser.add_argument("--to", type=int, default=None, help="目标世代号")
+    rollback_parser.add_argument(
+        "--service", default=None, help="只回滚这个服务（产物 + 配置一起换）"
+    )
+    rollback_parser.add_argument("--wait", action="store_true", help="等待健康验证")
+    rollback_parser.add_argument("--timeout", type=float, default=None)
+
+    generations_parser = subparsers.add_parser("generations", help="列出全部世代")
+    generations_parser.add_argument("--json", action="store_true", help="输出 JSON")
+
+    gc_parser = subparsers.add_parser("gc", help="回收老世代与无人引用的产物")
+    gc_parser.add_argument(
+        "--keep",
+        type=int,
+        default=None,
+        help="保留多少个最近世代（默认 generation_keep）",
+    )
+    gc_parser.add_argument("--dry-run", action="store_true", help="只列出，不删除")
 
     status_parser = subparsers.add_parser("status", help="查看服务状态")
     status_parser.add_argument("--json", action="store_true", help="输出 JSON")

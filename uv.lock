@@ -31,6 +31,7 @@ members = [
     "blue-service-web-search",
     "blue-service-webui",
     "blue-service-write-file",
+    "blue-tool-sdk",
 ]
 
 [[package]]
@@ -243,7 +244,6 @@ name = "blue"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [
-    { name = "blue-contracts-tool" },
     { name = "infinity-agent" },
     { name = "infinity-agent-kit" },
     { name = "infinity-bus", extra = ["templates"] },
@@ -253,6 +253,8 @@ dependencies = [
 [package.dev-dependencies]
 dev = [
     { name = "blue-contracts-session" },
+    { name = "blue-contracts-tool" },
+    { name = "blue-tool-sdk" },
     { name = "httpx" },
     { name = "pre-commit" },
     { name = "pyright" },
@@ -262,7 +264,6 @@ dev = [
 
 [package.metadata]
 requires-dist = [
-    { name = "blue-contracts-tool", editable = "contracts/tool" },
     { name = "infinity-agent", specifier = ">=0.3.0" },
     { name = "infinity-agent-kit", specifier = ">=1.0.0" },
     { name = "infinity-bus", extras = ["templates"], specifier = ">=6.0.0" },
@@ -272,6 +273,8 @@ requires-dist = [
 [package.metadata.requires-dev]
 dev = [
     { name = "blue-contracts-session", editable = "contracts/session" },
+    { name = "blue-contracts-tool", editable = "contracts/tool" },
+    { name = "blue-tool-sdk", editable = "sdk/tool" },
     { name = "httpx", specifier = ">=0.28.0" },
     { name = "pre-commit" },
     { name = "pyright", specifier = ">=1.1.414" },
@@ -348,6 +351,7 @@ version = "0.1.0"
 source = { editable = "services/browser" }
 dependencies = [
     { name = "blue" },
+    { name = "blue-tool-sdk" },
     { name = "pillow" },
     { name = "pydantic" },
 ]
@@ -355,6 +359,7 @@ dependencies = [
 [package.metadata]
 requires-dist = [
     { name = "blue", editable = "." },
+    { name = "blue-tool-sdk", editable = "sdk/tool" },
     { name = "pillow", specifier = ">=11" },
     { name = "pydantic", specifier = ">=2" },
 ]
@@ -365,6 +370,7 @@ version = "0.1.0"
 source = { editable = "services/browser_ops" }
 dependencies = [
     { name = "blue" },
+    { name = "blue-tool-sdk" },
     { name = "httpx" },
     { name = "pillow" },
     { name = "pydantic" },
@@ -373,6 +379,7 @@ dependencies = [
 [package.metadata]
 requires-dist = [
     { name = "blue", editable = "." },
+    { name = "blue-tool-sdk", editable = "sdk/tool" },
     { name = "httpx", specifier = ">=0.28" },
     { name = "pillow", specifier = ">=11" },
     { name = "pydantic", specifier = ">=2" },
@@ -418,12 +425,14 @@ version = "0.1.0"
 source = { editable = "services/clock" }
 dependencies = [
     { name = "blue" },
+    { name = "blue-tool-sdk" },
     { name = "pydantic" },
 ]
 
 [package.metadata]
 requires-dist = [
     { name = "blue", editable = "." },
+    { name = "blue-tool-sdk", editable = "sdk/tool" },
     { name = "pydantic", specifier = ">=2" },
 ]
 
@@ -433,12 +442,14 @@ version = "0.1.0"
 source = { editable = "services/echo" }
 dependencies = [
     { name = "blue" },
+    { name = "blue-tool-sdk" },
     { name = "pydantic" },
 ]
 
 [package.metadata]
 requires-dist = [
     { name = "blue", editable = "." },
+    { name = "blue-tool-sdk", editable = "sdk/tool" },
     { name = "pydantic", specifier = ">=2" },
 ]
 
@@ -448,12 +459,14 @@ version = "0.1.0"
 source = { editable = "services/edit_file" }
 dependencies = [
     { name = "blue" },
+    { name = "blue-tool-sdk" },
     { name = "pydantic" },
 ]
 
 [package.metadata]
 requires-dist = [
     { name = "blue", editable = "." },
+    { name = "blue-tool-sdk", editable = "sdk/tool" },
     { name = "pydantic", specifier = ">=2" },
 ]
 
@@ -463,12 +476,14 @@ version = "0.1.0"
 source = { editable = "services/history_read" }
 dependencies = [
     { name = "blue" },
+    { name = "blue-tool-sdk" },
     { name = "pydantic" },
 ]
 
 [package.metadata]
 requires-dist = [
     { name = "blue", editable = "." },
+    { name = "blue-tool-sdk", editable = "sdk/tool" },
     { name = "pydantic", specifier = ">=2" },
 ]
 
@@ -478,12 +493,14 @@ version = "0.1.0"
 source = { editable = "services/history_search" }
 dependencies = [
     { name = "blue" },
+    { name = "blue-tool-sdk" },
     { name = "pydantic" },
 ]
 
 [package.metadata]
 requires-dist = [
     { name = "blue", editable = "." },
+    { name = "blue-tool-sdk", editable = "sdk/tool" },
     { name = "pydantic", specifier = ">=2" },
 ]
 
@@ -513,6 +530,7 @@ source = { editable = "services/mcp_bridge" }
 dependencies = [
     { name = "blue" },
     { name = "blue-contracts-tool" },
+    { name = "blue-tool-sdk" },
     { name = "infinity-agent" },
     { name = "pydantic" },
 ]
@@ -521,6 +539,7 @@ dependencies = [
 requires-dist = [
     { name = "blue", editable = "." },
     { name = "blue-contracts-tool", editable = "contracts/tool" },
+    { name = "blue-tool-sdk", editable = "sdk/tool" },
     { name = "infinity-agent", specifier = ">=0.3.0" },
     { name = "pydantic", specifier = ">=2" },
 ]
@@ -550,12 +569,14 @@ version = "0.1.0"
 source = { editable = "services/read_file" }
 dependencies = [
     { name = "blue" },
+    { name = "blue-tool-sdk" },
     { name = "pydantic" },
 ]
 
 [package.metadata]
 requires-dist = [
     { name = "blue", editable = "." },
+    { name = "blue-tool-sdk", editable = "sdk/tool" },
     { name = "pydantic", specifier = ">=2" },
 ]
 
@@ -607,12 +628,14 @@ version = "0.1.0"
 source = { editable = "services/shell" }
 dependencies = [
     { name = "blue" },
+    { name = "blue-tool-sdk" },
     { name = "pydantic" },
 ]
 
 [package.metadata]
 requires-dist = [
     { name = "blue", editable = "." },
+    { name = "blue-tool-sdk", editable = "sdk/tool" },
     { name = "pydantic", specifier = ">=2" },
 ]
 
@@ -622,6 +645,7 @@ version = "0.1.0"
 source = { editable = "services/terminal" }
 dependencies = [
     { name = "blue" },
+    { name = "blue-tool-sdk" },
     { name = "pillow" },
     { name = "pydantic" },
     { name = "pyte" },
@@ -631,6 +655,7 @@ dependencies = [
 [package.metadata]
 requires-dist = [
     { name = "blue", editable = "." },
+    { name = "blue-tool-sdk", editable = "sdk/tool" },
     { name = "pillow", specifier = ">=11" },
     { name = "pydantic", specifier = ">=2" },
     { name = "pyte", specifier = ">=0.8" },
@@ -643,12 +668,14 @@ version = "0.1.0"
 source = { editable = "services/text_stats" }
 dependencies = [
     { name = "blue" },
+    { name = "blue-tool-sdk" },
     { name = "pydantic" },
 ]
 
 [package.metadata]
 requires-dist = [
     { name = "blue", editable = "." },
+    { name = "blue-tool-sdk", editable = "sdk/tool" },
     { name = "pydantic", specifier = ">=2" },
 ]
 
@@ -658,6 +685,7 @@ version = "0.1.0"
 source = { editable = "services/view_image" }
 dependencies = [
     { name = "blue" },
+    { name = "blue-tool-sdk" },
     { name = "pillow" },
     { name = "pydantic" },
 ]
@@ -665,6 +693,7 @@ dependencies = [
 [package.metadata]
 requires-dist = [
     { name = "blue", editable = "." },
+    { name = "blue-tool-sdk", editable = "sdk/tool" },
     { name = "pillow", specifier = ">=11" },
     { name = "pydantic", specifier = ">=2" },
 ]
@@ -675,6 +704,7 @@ version = "0.1.0"
 source = { editable = "services/weather" }
 dependencies = [
     { name = "blue" },
+    { name = "blue-tool-sdk" },
     { name = "httpx" },
     { name = "pydantic" },
 ]
@@ -682,6 +712,7 @@ dependencies = [
 [package.metadata]
 requires-dist = [
     { name = "blue", editable = "." },
+    { name = "blue-tool-sdk", editable = "sdk/tool" },
     { name = "httpx", specifier = ">=0.28.0" },
     { name = "pydantic", specifier = ">=2" },
 ]
@@ -692,6 +723,7 @@ version = "0.1.0"
 source = { editable = "services/web_search" }
 dependencies = [
     { name = "blue" },
+    { name = "blue-tool-sdk" },
     { name = "httpx" },
     { name = "pydantic" },
 ]
@@ -699,6 +731,7 @@ dependencies = [
 [package.metadata]
 requires-dist = [
     { name = "blue", editable = "." },
+    { name = "blue-tool-sdk", editable = "sdk/tool" },
     { name = "httpx", specifier = ">=0.28.0" },
     { name = "pydantic", specifier = ">=2" },
 ]
@@ -738,13 +771,34 @@ version = "0.1.0"
 source = { editable = "services/write_file" }
 dependencies = [
     { name = "blue" },
+    { name = "blue-tool-sdk" },
     { name = "pydantic" },
 ]
 
 [package.metadata]
 requires-dist = [
     { name = "blue", editable = "." },
+    { name = "blue-tool-sdk", editable = "sdk/tool" },
     { name = "pydantic", specifier = ">=2" },
+]
+
+[[package]]
+name = "blue-tool-sdk"
+version = "0.1.0"
+source = { editable = "sdk/tool" }
+dependencies = [
+    { name = "blue" },
+    { name = "blue-contracts-tool" },
+    { name = "infinity-agent" },
+    { name = "infinity-bus", extra = ["templates"] },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "blue", editable = "." },
+    { name = "blue-contracts-tool", editable = "contracts/tool" },
+    { name = "infinity-agent", specifier = ">=0.3.0" },
+    { name = "infinity-bus", extras = ["templates"], specifier = ">=6.0.0" },
 ]
 
 [[package]]

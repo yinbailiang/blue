@@ -44,6 +44,19 @@ supervisor {
   registry_ttl: <float, positive> = 15.0
   registry_sweep_interval: <float, positive> = 2.0
   uv_frozen: bool = true
+
+  # —— 世代（generation）机制，见 docs/generations.md ——
+  # 激活新世代后等全部服务 Ready 的上限；超时按"激活失败"处理。
+  activation_timeout: <float, positive> = 120.0
+  # gc 至少保留多少个最近世代（另有当前世代与最新 stable 世代始终保留）。
+  generation_keep: <int, range(1, 1000)> = 5
+  # 激活验证失败时，是否自动回退到上一个 stable 世代。
+  generation_auto_rollback: bool = true
+  # 建产物 venv 用的解释器（交给 uv 解析，必要时自动下载）。
+  artifact_python: str = "3.14"
+  artifact_link_mode: str = "hardlink"
+  # 产物目录与 .venv 跨分区时硬链接会退化成拷贝，是否告警。
+  artifact_warn_cross_device: bool = true
 }
 
 bus = BusService(

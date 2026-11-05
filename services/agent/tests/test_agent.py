@@ -47,7 +47,7 @@ from tests.support import (
 
 from blue.errors import RuntimeConfigError
 from blue.transport import MemoryFanout
-from blue.worker import ToolWorker
+from blue_tool_sdk import ToolWorker
 
 
 class StreamCollector(EventHandler):

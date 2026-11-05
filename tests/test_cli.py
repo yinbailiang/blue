@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import signal
 import subprocess
 import sys
@@ -12,16 +13,36 @@ from pathlib import Path
 import pytest
 
 from blue.cli import main
+from blue.control.artifacts import ArtifactStore
+from blue.control.generations import GenerationStore
 from blue.control.model import (
+    ActivationState,
     ActualContract,
+    ActualSdk,
     ActualService,
     ActualState,
+    DesiredSdkPackage,
+    SdkMeta,
     ServiceStatus,
 )
 from blue.control.state import StateStore
 from blue.runtime import RUNTIME_CONFIG_VERSION
 
 ROOT = Path(__file__).resolve().parents[1]
+
+
+def _stub_artifacts(monkeypatch: pytest.MonkeyPatch) -> None:
+    """跳过产物构建。
+
+    产物构建需要真实的开发用 ``.venv``（测试工作区里没有）；这些用例只关心
+    "apply 发了什么信号"，所以把构建这一步打桩，其余链路（冻结世代、翻转
+    current、通知调谐器）仍然真实执行。
+    """
+
+    def no_build(desired: object, artifacts: object) -> None:
+        return None
+
+    monkeypatch.setattr("blue.cli._build_artifacts", no_build)
 
 
 def _config(root: Path) -> Path:
@@ -59,6 +80,38 @@ module-root = "src"
         "", encoding="utf-8"
     )
 
+    sdk_dir = root / "sdk" / "demo"
+    (sdk_dir / "src" / "demo_sdk").mkdir(parents=True, exist_ok=True)
+    (sdk_dir / "sdk.infd").write_text(
+        """
+sdk {
+  name = "demo"
+  package = "demo-sdk"
+  module = "demo_sdk"
+  description = "demo sdk"
+}
+""",
+        encoding="utf-8",
+    )
+    (sdk_dir / "pyproject.toml").write_text(
+        """
+[project]
+name = "demo-sdk"
+version = "0.2.0"
+requires-python = ">=3.14"
+
+[build-system]
+requires = ["uv_build>=0.9.0,<0.14"]
+build-backend = "uv_build"
+
+[tool.uv.build-backend]
+module-name = "demo_sdk"
+module-root = "src"
+""",
+        encoding="utf-8",
+    )
+    (sdk_dir / "src" / "demo_sdk" / "__init__.py").write_text("", encoding="utf-8")
+
     service_dir = root / "services" / "demo"
     service_dir.mkdir(parents=True, exist_ok=True)
     (service_dir / "service.infd").write_text(
@@ -74,6 +127,7 @@ service {
   module = "demo"
   depends_on = []
   depends_contracts = ["demo"]
+  depends_sdk = ["demo"]
 }
 """,
         encoding="utf-8",
@@ -104,6 +158,7 @@ def test_config_check_prints_services(
     assert code == 0
     assert "services   : 1" in output
     assert "contracts  : 1" in output
+    assert "sdk        : 1" in output
     assert "demo" in output
 
 
@@ -127,8 +182,11 @@ def test_status_without_supervisor(
     assert "stopped" in output
     assert "services   : 1" in output
     assert "contracts  : 1" in output
+    assert "sdk        : 1" in output
     assert "demo-contracts" in output
+    assert "demo-sdk" in output
     assert "0.1.0" in output
+    assert "0.2.0" in output
 
 
 def test_status_json_includes_contracts(
@@ -141,6 +199,9 @@ def test_status_json_includes_contracts(
     assert payload["state"] is None
     assert payload["contracts"]["demo"]["version"] == "0.1.0"
     assert payload["contracts"]["demo"]["used_by"] == ["demo"]
+    assert payload["sdk"]["demo"]["package"] == "demo-sdk"
+    assert payload["sdk"]["demo"]["version"] == "0.2.0"
+    assert payload["sdk"]["demo"]["used_by"] == ["demo"]
 
 
 def test_status_reads_actual_contracts(
@@ -187,8 +248,82 @@ def test_status_reads_actual_contracts(
     assert "blue apply" in output
 
 
-def test_apply_without_supervisor_returns_error(tmp_path: Path) -> None:
+def _state_with_old_sdk(tmp_path: Path) -> None:
+    """写一份实际快照：SDK 包指纹与当前期望不同。"""
+    state = StateStore(tmp_path / ".blue")
+    state.write_state(
+        ActualState(
+            generation="gen-1",
+            supervisor_pid=1,
+            started_at=0.0,
+            updated_at=0.0,
+            services={
+                "demo": ActualService(
+                    name="demo",
+                    kind="tool",
+                    status=ServiceStatus.READY,
+                )
+            },
+            sdk=ActualSdk(
+                package_version="0.1.0",
+                source_hash="core",
+                packages={
+                    "demo": DesiredSdkPackage(
+                        meta=SdkMeta(
+                            name="demo", package="demo-sdk", module="demo_sdk"
+                        ),
+                        package_version="0.2.0",
+                        source_hash="old-hash",
+                    )
+                },
+            ),
+        )
+    )
+
+
+def test_plan_shows_sdk_change(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """``blue plan`` 在文本输出里展示 SDK 包变更与受影响服务。"""
+    config = _config(tmp_path)
+    _state_with_old_sdk(tmp_path)
+
+    code = main(["--config", str(config), "plan"])
+
+    output = capsys.readouterr().out
+    assert code == 1
+    assert "SDK 变更" in output
+    assert "影响：demo" in output
+
+
+def test_plan_json_includes_sdk(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """``blue plan --json`` 暴露 SDK 包变更。"""
+    config = _config(tmp_path)
+    _state_with_old_sdk(tmp_path)
+
+    code = main(["--config", str(config), "plan", "--json"])
+
+    payload = json.loads(capsys.readouterr().out)
+    assert code == 1
+    assert payload["sdk"] == [
+        {
+            "name": "demo",
+            "action": "change",
+            "before": "old-hash",
+            "after": payload["sdk"][0]["after"],
+            "affected": ["demo"],
+        }
+    ]
+    assert payload["sdk"][0]["after"]
+
+
+def test_apply_without_supervisor_returns_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """无 supervisor 时 apply 返回配置错误码。"""
+    _stub_artifacts(monkeypatch)
     assert main(["--config", str(_config(tmp_path)), "apply"]) == 2
 
 
@@ -197,6 +332,7 @@ def test_apply_asks_self_restart_when_config_format_is_old(
 ) -> None:
     """配置格式过旧 → 让调谐器重启自己（不再要求人工 down/up）。"""
     config = _config(tmp_path)
+    _stub_artifacts(monkeypatch)
     store = StateStore(tmp_path / ".blue")
     store.acquire(
         generation="gen-1",
@@ -225,6 +361,7 @@ def test_apply_asks_self_restart_on_blue_version_mismatch(
 ) -> None:
     """blue 版本不同 → 自重启（SIGUSR1）。"""
     config = _config(tmp_path)
+    _stub_artifacts(monkeypatch)
     monkeypatch.setattr("blue.cli._blue_version", lambda: "9.9.9")
     store = StateStore(tmp_path / ".blue")
     store.acquire(
@@ -252,6 +389,7 @@ def test_apply_signals_compatible_supervisor(
 ) -> None:
     """版本一致时正常发送 SIGHUP。"""
     config = _config(tmp_path)
+    _stub_artifacts(monkeypatch)
     monkeypatch.setattr("blue.cli._blue_version", lambda: "9.9.9")
     store = StateStore(tmp_path / ".blue")
     store.acquire(
@@ -373,3 +511,302 @@ def test_module_entry_point_works() -> None:
     )
     assert result.returncode == 0, result.stderr
     assert "up" in result.stdout
+
+
+# ---------------------------------------------------------------------------
+# 世代相关命令：apply --staged / activate / rollback / generations / gc
+# ---------------------------------------------------------------------------
+
+
+def _lock(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> StateStore:
+    """伪造"supervisor 正在运行"：写锁文件并拦截信号。"""
+    store = StateStore(tmp_path / ".blue")
+    store.ensure_dirs()
+    store.acquire(
+        generation="gen-1", blue_version="9.9.9", config_version=RUNTIME_CONFIG_VERSION
+    )
+    monkeypatch.setattr("blue.cli._blue_version", lambda: "9.9.9")
+
+    def fake_kill(pid: int, sig: int) -> None:
+        return None
+
+    monkeypatch.setattr("blue.cli.os.kill", fake_kill)
+    return store
+
+
+def _generations(tmp_path: Path) -> GenerationStore:
+    return GenerationStore(tmp_path / ".blue")
+
+
+def _rewrite_value(config: Path, value: str) -> None:
+    """改 blue.infd 的一个配置值，制造"配置变化"。"""
+    text = config.read_text(encoding="utf-8")
+    text = re.sub(
+        r'DemoService\(value = "[^"]*"\)',
+        f'DemoService(value = "{value}")',
+        text,
+    )
+    config.write_text(text, encoding="utf-8")
+
+
+def test_apply_staged_does_not_switch_current(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """--staged 只冻结世代，不动 current（等价 nixos-rebuild boot）。"""
+    config = _config(tmp_path)
+    _stub_artifacts(monkeypatch)
+    store = _lock(tmp_path, monkeypatch)
+    try:
+        assert main(["--config", str(config), "apply", "--staged"]) == 0
+    finally:
+        store.release()
+
+    generations = _generations(tmp_path)
+    assert generations.current() is None
+    assert [generation.id for generation in generations.list()] == [1]
+    assert "未激活" in capsys.readouterr().out
+
+
+def test_activate_switches_current_and_signals(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """activate 切换 current 并通知调谐器。"""
+    config = _config(tmp_path)
+    _stub_artifacts(monkeypatch)
+    lock = _lock(tmp_path, monkeypatch)
+    try:
+        assert main(["--config", str(config), "apply", "--staged"]) == 0
+        assert main(["--config", str(config), "activate", "1"]) == 0
+    finally:
+        lock.release()
+
+    current = _generations(tmp_path).current()
+    assert current is not None
+    assert current.id == 1
+
+
+def test_apply_unchanged_config_reuses_generation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """配置没变时 apply 不产生新世代。"""
+    config = _config(tmp_path)
+    _stub_artifacts(monkeypatch)
+    lock = _lock(tmp_path, monkeypatch)
+    try:
+        assert main(["--config", str(config), "apply"]) == 0
+        assert main(["--config", str(config), "apply"]) == 0
+    finally:
+        lock.release()
+
+    generations = _generations(tmp_path)
+    assert len(generations.list()) == 1
+    assert "配置未变化" in capsys.readouterr().out
+
+
+def test_apply_changed_config_creates_second_generation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """配置变化 → 新世代，父世代指向前一个。"""
+    config = _config(tmp_path)
+    _stub_artifacts(monkeypatch)
+    lock = _lock(tmp_path, monkeypatch)
+    try:
+        assert main(["--config", str(config), "apply"]) == 0
+        _rewrite_value(config, "world")
+        assert main(["--config", str(config), "apply"]) == 0
+    finally:
+        lock.release()
+
+    generations = _generations(tmp_path)
+    listed = generations.list()
+    assert [generation.id for generation in listed] == [1, 2]
+    assert listed[1].parent_id == 1
+    assert generations.current() is not None
+    assert generations.current().id == 2  # type: ignore[union-attr]
+
+
+def test_generations_lists_current_and_json(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """generations 输出当前标记，--json 可直接解析。"""
+    config = _config(tmp_path)
+    _stub_artifacts(monkeypatch)
+    lock = _lock(tmp_path, monkeypatch)
+    try:
+        assert main(["--config", str(config), "apply"]) == 0
+        assert main(["--config", str(config), "generations"]) == 0
+        text = capsys.readouterr().out
+        assert "*0001" in text or "*0" in text
+        assert "0001" in text
+
+        assert main(["--config", str(config), "generations", "--json"]) == 0
+    finally:
+        lock.release()
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["current"] == 1
+    assert payload["generations"][0]["id"] == 1
+    assert payload["generations"][0]["current"] is True
+
+
+def test_rollback_returns_to_previous_stable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """整机回滚：current 指回上一个 stable 世代。"""
+    config = _config(tmp_path)
+    _stub_artifacts(monkeypatch)
+    lock = _lock(tmp_path, monkeypatch)
+    generations = _generations(tmp_path)
+    try:
+        assert main(["--config", str(config), "apply"]) == 0
+        _rewrite_value(config, "world")
+        assert main(["--config", str(config), "apply"]) == 0
+        # 手工标记两个世代都 stable（真实系统里由健康闸门落标记）
+        for generation in generations.list():
+            generations.mark_stable(generation)
+        assert main(["--config", str(config), "rollback"]) == 0
+    finally:
+        lock.release()
+
+    current = generations.current()
+    assert current is not None
+    assert current.id == 1
+    assert "回滚" in capsys.readouterr().out
+
+
+def test_rollback_service_rebinds_single_service(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """单服务回滚：产出新世代，只有目标服务回到旧配置。"""
+    config = _config(tmp_path)
+    _stub_artifacts(monkeypatch)
+    lock = _lock(tmp_path, monkeypatch)
+    generations = _generations(tmp_path)
+    try:
+        assert main(["--config", str(config), "apply"]) == 0
+        _rewrite_value(config, "world")
+        assert main(["--config", str(config), "apply"]) == 0
+        for generation in generations.list():
+            generations.mark_stable(generation)
+        assert main(["--config", str(config), "rollback", "--service", "demo"]) == 0
+    finally:
+        lock.release()
+
+    current = generations.current()
+    assert current is not None
+    assert current.id == 3
+    payload = json.loads(current.config_path("demo").read_text(encoding="utf-8"))
+    assert payload["config"]["value"] == "hello"
+    out = capsys.readouterr().out
+    assert "已构造世代 0003" in out
+
+
+def test_rollback_without_previous_stable_errors(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """没有更早的 stable 世代时回滚报错退出码 2。"""
+    config = _config(tmp_path)
+    _stub_artifacts(monkeypatch)
+    lock = _lock(tmp_path, monkeypatch)
+    try:
+        assert main(["--config", str(config), "apply"]) == 0
+        assert main(["--config", str(config), "rollback"]) == 2
+    finally:
+        lock.release()
+
+
+def test_gc_keeps_current_generation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """gc 至少保留当前世代，--dry-run 不删任何东西。"""
+    config = _config(tmp_path)
+    _stub_artifacts(monkeypatch)
+    lock = _lock(tmp_path, monkeypatch)
+    generations = _generations(tmp_path)
+    try:
+        for index in range(3):
+            _rewrite_value(config, f"v{index}")
+            assert main(["--config", str(config), "apply"]) == 0
+        assert main(["--config", str(config), "gc", "--keep", "1", "--dry-run"]) == 0
+        assert len(generations.list()) == 3
+        assert main(["--config", str(config), "gc", "--keep", "1"]) == 0
+    finally:
+        lock.release()
+
+    remaining = [generation.id for generation in generations.list()]
+    assert remaining == [3]
+    assert "将删除世代 2 个" in capsys.readouterr().out
+
+
+def test_wait_for_activation_reports_rollback(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """apply --wait 遇到 rolled_back 时返回非 0 并说明回滚去向。"""
+    from blue.cli import _wait_for_activation  # pyright: ignore[reportPrivateUsage]
+    from blue.config import load_desired
+
+    config = _config(tmp_path)
+    desired = load_desired(config)
+    _stub_artifacts(monkeypatch)
+    store = _generations(tmp_path)
+    artifacts = ArtifactStore(
+        tmp_path / ".blue", project_root=tmp_path, warn_cross_device=False
+    )
+    generation = store.create(desired, artifacts, reason="test")
+    state = StateStore(desired.supervisor.state_dir)
+    state.ensure_dirs()
+    state.write_state(
+        ActualState(
+            generation=desired.generation,
+            supervisor_pid=os.getpid(),
+            started_at=1.0,
+            updated_at=2.0,
+            generation_id=generation.id,
+            activation=ActivationState(
+                phase="rolled_back",
+                generation_id=generation.id,
+                previous_id=1,
+                message="未在 1s 内就绪：demo",
+                failures=["demo"],
+            ),
+        )
+    )
+
+    code = _wait_for_activation(desired, generation, timeout=5.0)
+
+    assert code == 1
+    captured = capsys.readouterr()
+    assert "激活失败" in captured.err
+    assert "已自动回滚到世代 1" in captured.err
+
+
+def test_wait_for_activation_returns_zero_when_stable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """apply --wait 在 stable 时返回 0。"""
+    from blue.cli import _wait_for_activation  # pyright: ignore[reportPrivateUsage]
+    from blue.config import load_desired
+
+    config = _config(tmp_path)
+    desired = load_desired(config)
+    _stub_artifacts(monkeypatch)
+    store = _generations(tmp_path)
+    artifacts = ArtifactStore(
+        tmp_path / ".blue", project_root=tmp_path, warn_cross_device=False
+    )
+    generation = store.create(desired, artifacts, reason="test")
+    state = StateStore(desired.supervisor.state_dir)
+    state.ensure_dirs()
+    state.write_state(
+        ActualState(
+            generation=desired.generation,
+            supervisor_pid=os.getpid(),
+            started_at=1.0,
+            updated_at=2.0,
+            generation_id=generation.id,
+            activation=ActivationState(phase="stable", generation_id=generation.id),
+        )
+    )
+
+    assert _wait_for_activation(desired, generation, timeout=5.0) == 0
+    assert "已稳定" in capsys.readouterr().out

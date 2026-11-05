@@ -23,9 +23,11 @@
    - `blue_contracts_session.EVENTS`
    - 不再维护全局 `ALL_EVENTS`。
 
-5. **运行时显式注册**
-   - `BusRuntime(member_id=..., events=[...])`
-   - 每个进程只注册自己生产/消费的事件。
+5. **运行时按配置注册**
+   - supervisor 把 `depends_contracts` 展开成模块名写进运行时配置
+     （`infra.contracts`）。
+   - `build_runtime()` / `run_tool()` 自动导入这些模块的 `EVENTS`。
+   - 每个进程只注册自己声明过的事件。
    - 控制面不导入 session/tool 契约。
 
 6. **事件命名与归属**
@@ -66,19 +68,59 @@ contracts/
         ├── __init__.py
         ├── events.py
         └── py.typed
+
+sdk/
+└── tool/                       # blue-tool-sdk：工具域运行时（依赖 blue + 工具契约）
+    ├── sdk.infd                # SDK 元数据：name / package / module
+    ├── pyproject.toml
+    └── src/blue_tool_sdk/
+        ├── worker.py           # ToolWorker / ToolRegistrar
+        ├── tool_call.py        # tool.call 处理器
+        └── tool_context.py     # ContextVar 调用上下文
 ```
 
-## 运行时接线
+`sdk.infd` 与 `contract.infd` 同构；控制面按 **SDK 名**（目录名）维护指纹，
+服务用 `depends_sdk = ["tool"]` 声明依赖，产物安装时才展开成包名
+`blue-tool-sdk`。
+
+## 运行时接线（配置驱动）
+
+服务在 `service.infd` 里声明 `depends_contracts`；supervisor 把契约名展开成
+模块名写进 `service_runtime_config.json` 的 `infra.contracts`：
+
+```json
+{
+  "infra": {
+    "contracts": {
+      "tool": "blue_contracts_tool",
+      "session": "blue_contracts_session"
+    }
+  }
+}
+```
+
+服务代码不再手写事件列表：
 
 ```python
-from blue_contracts_tool import EVENTS as TOOL_EVENTS
-from blue_contracts_session import EVENTS as SESSION_EVENTS
 from blue.runtime import build_runtime
 
-runtime = build_runtime("agent", (*TOOL_EVENTS, *SESSION_EVENTS))
+runtime = build_runtime()  # 自动导入各契约模块的 EVENTS
+runtime = build_runtime("ui.chat")  # role 缺省取服务名
 ```
 
-工具服务通过 `run_tool()` 自带 `TOOL_EVENTS`，无需手动注册。
+工具服务：
+
+```python
+from blue_tool_sdk import run_tool
+
+return run_tool(TOOL)  # 事件同样由配置扫描
+```
+
+- 事件注册只来自 `depends_contracts`：多装/漏装都能在配置层看出来。
+- 手工运行（没有 supervisor 下发的配置）时退化为扫描已安装的
+  `blue-contracts-*` 发行包，开发时 `uv run blue-service-echo` 仍能直接用。
+- 显式传给 `build_runtime(..., events=...)` / `run_tool(..., events=...)` 的
+  事件会**覆盖**自动扫描，仅供单测与特殊进程使用。
 
 ## 控制面集成
 
@@ -184,7 +226,9 @@ WebSocket 的 `status` / `stream` / `reply` / `queued_ack` / `cancelled` 帧顶�
 - 跨语言契约生成。
 - 运行时事件注册中心。
 - 动态版本协商。
-- 把 `blue` 拆成 `blue-bus` / `blue-control` / `blue-sdk` 多个发行包。
+
+> 2026-11-05 补充：`blue` 已拆出 `blue-tool-sdk`（`sdk/tool`）作为工具域运行时包，
+> 核心不再依赖任何契约包；这属于「按域拆运行时」，仍不拆控制面与总线能力。
 
 ## 验收标准
 

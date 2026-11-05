@@ -1,7 +1,7 @@
 """进程生命周期：把「可启动 / 可停止」的服务跑起来并等待退出信号。
 
-核心与外置程序共用：核心用 :class:`~blue.aggregate.AgentAggregate` 作为服务，
-工具进程用 :class:`~blue.worker.ToolWorker` 作为服务。
+核心与外置程序共用：服务实现提供 ``start`` / ``stop``，工具进程用
+``blue_tool_sdk.ToolWorker`` 作为服务。
 """
 
 from __future__ import annotations

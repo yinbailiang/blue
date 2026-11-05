@@ -68,6 +68,40 @@ def _workspace(tmp_path: Path) -> None:
     _service(tmp_path, "demo")
 
 
+def _contract(root: Path, name: str = "tool") -> None:
+    """写入一个最小契约包（contract.infd + pyproject.toml + src）。"""
+    directory = root / "contracts" / name
+    module = directory / "src" / f"blue_contracts_{name}"
+    module.mkdir(parents=True, exist_ok=True)
+    (module / "__init__.py").write_text("EVENTS = ()\n", encoding="utf-8")
+    (directory / "contract.infd").write_text(
+        f'contract {{\n  name = "{name}"\n  package = "blue-contracts-{name}"\n'
+        f'  module = "blue_contracts_{name}"\n}}\n',
+        encoding="utf-8",
+    )
+    (directory / "pyproject.toml").write_text(
+        f'[project]\nname = "blue-contracts-{name}"\nversion = "0.1.0"\n',
+        encoding="utf-8",
+    )
+
+
+def _sdk(root: Path, name: str = "tool") -> None:
+    """写入一个最小 SDK 运行时包（sdk.infd + pyproject.toml + src）。"""
+    directory = root / "sdk" / name
+    module = directory / "src" / f"blue_{name}_sdk"
+    module.mkdir(parents=True, exist_ok=True)
+    (module / "__init__.py").write_text("", encoding="utf-8")
+    (directory / "sdk.infd").write_text(
+        f'sdk {{\n  name = "{name}"\n  package = "blue-{name}-sdk"\n'
+        f'  module = "blue_{name}_sdk"\n}}\n',
+        encoding="utf-8",
+    )
+    (directory / "pyproject.toml").write_text(
+        f'[project]\nname = "blue-{name}-sdk"\nversion = "0.1.0"\n',
+        encoding="utf-8",
+    )
+
+
 def test_load_desired_parses_services_and_supervisor(tmp_path: Path) -> None:
     """顶层键成为服务，supervisor 块独立解析。"""
     _workspace(tmp_path)
@@ -261,6 +295,87 @@ demo = DemoService(value = "hello")
     assert stat.S_IMODE(target.stat().st_mode) == 0o600
 
     assert write_runtime_configs(desired) == []
+
+
+def test_runtime_config_projects_contract_modules(tmp_path: Path) -> None:
+    """``depends_contracts`` 展开成 ``infra.contracts``，未声明的服务为空。"""
+    _workspace(tmp_path)
+    _contract(tmp_path)
+    _service(
+        tmp_path,
+        "demo",
+        metadata=(
+            'service {\n  name = "demo"\n  kind = "tool"\n  package = "demo-demo"\n'
+            '  module = "demo_demo"\n  depends_on = ["bus"]\n'
+            '  depends_contracts = ["tool"]\n}\n'
+        ),
+    )
+    config = _config(
+        tmp_path,
+        """
+!from p"services/bus/service.infd" import ServiceTemplate as BusService
+!from p"services/demo/service.infd" import ServiceTemplate as DemoService
+bus = BusService()
+demo = DemoService()
+""",
+    )
+    desired = load_desired(config)
+
+    write_runtime_configs(desired)
+
+    demo = json.loads(desired.services["demo"].config_path.read_text(encoding="utf-8"))
+    bus = json.loads(desired.services["bus"].config_path.read_text(encoding="utf-8"))
+    assert demo["infra"]["contracts"] == {"tool": "blue_contracts_tool"}
+    assert bus["infra"]["contracts"] == {}
+
+
+def test_load_desired_rejects_unknown_sdk(tmp_path: Path) -> None:
+    """``depends_sdk`` 指向不存在的 SDK 时直接报错。"""
+    _workspace(tmp_path)
+    _service(
+        tmp_path,
+        "demo",
+        metadata=(
+            'service {\n  name = "demo"\n  kind = "tool"\n  package = "demo-demo"\n'
+            '  module = "demo_demo"\n  depends_on = ["bus"]\n'
+            '  depends_sdk = ["nope"]\n}\n'
+        ),
+    )
+    config = _config(
+        tmp_path,
+        """
+!from p"services/bus/service.infd" import ServiceTemplate as BusService
+!from p"services/demo/service.infd" import ServiceTemplate as DemoService
+bus = BusService()
+demo = DemoService()
+""",
+    )
+
+    with pytest.raises(ConfigError, match="不存在的 SDK"):
+        load_desired(config)
+
+
+def test_sdk_metadata_enters_desired_state(tmp_path: Path) -> None:
+    """``sdk/<name>/sdk.infd`` 的元数据进入期望状态，按 SDK 名记录。"""
+    _workspace(tmp_path)
+    _sdk(tmp_path)
+    config = _config(
+        tmp_path,
+        """
+!from p"services/bus/service.infd" import ServiceTemplate as BusService
+!from p"services/demo/service.infd" import ServiceTemplate as DemoService
+bus = BusService()
+demo = DemoService()
+""",
+    )
+
+    desired = load_desired(config)
+
+    package = desired.sdk.packages["tool"]
+    assert package.meta.package == "blue-tool-sdk"
+    assert package.meta.module == "blue_tool_sdk"
+    assert package.package_version == "0.1.0"
+    assert len(package.source_hash) == 64
 
 
 def test_render_state_redacts_secrets(tmp_path: Path) -> None:

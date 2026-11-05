@@ -66,3 +66,31 @@ def test_sdk_version_comes_from_root_pyproject(tmp_path: Path) -> None:
 def test_missing_sdk_dir_yields_empty_fingerprint(tmp_path: Path) -> None:
     """配置不在项目根（没有 src/blue）时给空指纹，不炸。"""
     assert _load_sdk(tmp_path).source_hash == ""
+
+
+def test_sdk_packages_enter_fingerprint(tmp_path: Path) -> None:
+    """``sdk/*`` 运行时包单独计指纹，核心指纹不受它影响。"""
+    root = _fake_project(tmp_path)
+    package = root / "sdk" / "tool"
+    module = package / "src" / "blue_tool_sdk"
+    module.mkdir(parents=True)
+    (package / "sdk.infd").write_text(
+        'sdk {\n  name = "tool"\n  package = "blue-tool-sdk"\n'
+        '  module = "blue_tool_sdk"\n}\n',
+        encoding="utf-8",
+    )
+    (package / "pyproject.toml").write_text(
+        '[project]\nname = "blue-tool-sdk"\nversion = "0.1.0"\n', encoding="utf-8"
+    )
+    source = module / "worker.py"
+    source.write_text("Z = 1\n", encoding="utf-8")
+
+    before = _load_sdk(root)
+    source.write_text("Z = 2\n", encoding="utf-8")
+    after = _load_sdk(root)
+
+    assert set(before.packages) == {"tool"}
+    assert before.packages["tool"].meta.package == "blue-tool-sdk"
+    assert before.packages["tool"].package_version == "0.1.0"
+    assert before.packages["tool"].source_hash != after.packages["tool"].source_hash
+    assert before.source_hash == after.source_hash

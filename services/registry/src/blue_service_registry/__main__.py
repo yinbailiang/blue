@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-from blue_contracts_tool import EVENTS as TOOL_EVENTS
-
 from blue.runtime import build_runtime, load_infra_config, run_service
 from blue_service_registry.config import RegistryConfig
 from blue_service_registry.registry import ToolRegistryService
@@ -20,7 +18,7 @@ def main() -> int:
     )
     return run_service(
         ToolRegistryService(
-            runtime=build_runtime("registry", TOOL_EVENTS),
+            runtime=build_runtime("registry"),
             ttl=config.ttl,
             sweep_interval=config.sweep_interval,
         )

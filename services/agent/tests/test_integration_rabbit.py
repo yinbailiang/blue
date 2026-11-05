@@ -30,7 +30,7 @@ from blue_service_registry import ToolRegistryService
 from infinity_bus.templates.request import request
 
 from blue.transport import RabbitRuntime
-from blue.worker import ToolWorker
+from blue_tool_sdk import ToolWorker
 
 RABBIT_URL = os.environ.get(
     "BLUE_RABBIT_URL",

@@ -16,7 +16,9 @@ from blue.control.model import (
     ActualSdk,
     ActualService,
     ActualState,
+    DesiredSdkPackage,
     DesiredState,
+    SdkMeta,
     ServiceStatus,
 )
 from blue.control.plan import config_diff, plan, restart_reasons
@@ -52,6 +54,7 @@ def _actual(desired: DesiredState, *, generation: str = "old") -> ActualState:
         sdk=ActualSdk(
             package_version=desired.sdk.package_version,
             source_hash=desired.sdk.source_hash,
+            packages=desired.sdk.packages,
         ),
         contracts={
             name: ActualContract(
@@ -276,7 +279,7 @@ def test_plan_omits_diff_when_snapshot_has_no_config(
 
 
 def test_sdk_change_restarts_every_service(desired: DesiredState) -> None:
-    """SDK 变了（worker/runtime 在里面）→ 所有服务都要重启。
+    """blue 核心变了（runtime/transport 在里面）→ 所有服务都要重启。
 
     这是调谐器原来的盲区：服务包的 source_hash 只覆盖 services/<name>/，
     SDK 改了完全察觉不到，进程会一直跑旧代码。
@@ -287,6 +290,43 @@ def test_sdk_change_restarts_every_service(desired: DesiredState) -> None:
     assert result.counts()["restart"] == len(desired.services)
     for change in result.services:
         assert "SDK 变化" in change.reasons
+
+
+def test_runtime_package_change_restarts_only_dependents(
+    desired: DesiredState,
+) -> None:
+    """``sdk/*`` 运行时包变化只重启声明了 ``depends_sdk`` 的服务。"""
+    snapshot = _actual(desired)
+    assert snapshot.sdk is not None
+    snapshot.sdk.packages["tool"] = DesiredSdkPackage(
+        meta=SdkMeta(name="tool", package="blue-tool-sdk", module="blue_tool_sdk"),
+        package_version="0.1.0",
+        source_hash="old-hash",
+    )
+
+    result = plan(desired, snapshot)
+
+    dependents = {
+        name
+        for name, service in desired.services.items()
+        if "tool" in service.meta.depends_sdk
+    }
+    restarted = {
+        change.name for change in result.services if change.action == "restart"
+    }
+    assert dependents
+    assert restarted == dependents
+    for change in result.services:
+        if change.name in dependents:
+            assert any("依赖 SDK 变化" in reason for reason in change.reasons)
+
+    sdk_change = next(change for change in result.sdk if change.name == "tool")
+    assert sdk_change.action == "change"
+    assert sdk_change.before == "old-hash"
+    assert sdk_change.after == desired.sdk.packages["tool"].source_hash
+    assert "clock" in sdk_change.affected
+    # agent 只依赖契约，不装工具运行时包
+    assert "agent" not in sdk_change.affected
 
 
 def test_sdk_unchanged_does_not_restart(desired: DesiredState) -> None:

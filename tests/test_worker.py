@@ -29,7 +29,7 @@ from infinity_bus.templates.request import RequestProtocol, request
 from pydantic import BaseModel
 
 from blue.transport import MemoryFanout, MemoryRuntime
-from blue.worker import ToolLease, ToolRegistrar, ToolWorker
+from blue_tool_sdk import ToolLease, ToolRegistrar, ToolWorker
 from tests.support import make_runtime, wait_until
 
 
@@ -373,7 +373,7 @@ async def _worker_extracts_attachments() -> None:
 
 def test_unpack_skips_malformed_attachments() -> None:
     """附件条目缺 mime/data 时跳过，不影响正文。"""
-    from blue.worker import unpack_tool_output
+    from blue_tool_sdk import unpack_tool_output
 
     payload = '{"text": "hi", "attachments": [{"mime": "image/png"}, "junk"]}'
     text, ok, attachments = unpack_tool_output(payload)

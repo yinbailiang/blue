@@ -1,0 +1,6 @@
+sdk {
+  name = "tool"
+  package = "blue-tool-sdk"
+  module = "blue_tool_sdk"
+  description = "工具域运行时：工具进程、注册租约与调用上下文"
+}

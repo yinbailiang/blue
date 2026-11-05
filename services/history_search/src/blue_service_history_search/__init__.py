@@ -13,16 +13,12 @@ from __future__ import annotations
 from typing import Annotated
 
 from blue_contracts_session import (
-    EVENTS as SESSION_EVENTS,
-)
-from blue_contracts_session import (
     SessionCallError,
     SessionSearchHit,
 )
 from pydantic import BaseModel, Field
 
-from blue.runtime import run_tool
-from blue.tool_context import current_context, session_proxy
+from blue_tool_sdk import current_context, run_tool, session_proxy
 
 MAX_LIMIT = 50
 """一次搜索最多返回多少条命中。"""
@@ -70,4 +66,4 @@ TOOL = history_search
 
 def main() -> int:
     """控制台脚本入口（额外注册会话契约，才能反向调用 session 服务）。"""
-    return run_tool(TOOL, "history_search", events=SESSION_EVENTS)
+    return run_tool(TOOL)

@@ -84,17 +84,24 @@ class ProcessRunner:
                 f"服务 {service.meta.name!r} 缺少运行时配置：{service.config_path}"
             )
 
-        command = build_command(service.meta, uv_frozen=self._uv_frozen)
+        command = build_command(
+            service.meta,
+            uv_frozen=self._uv_frozen,
+            artifact_python=service.artifact_python,
+        )
         merged_env = dict(os.environ)
         merged_env.update(service.meta.env)
         merged_env["BLUE_SERVICE_NAME"] = service.meta.name
         merged_env["BLUE_INSTANCE_ID"] = instance_id
         merged_env["BLUE_CONFIG_FILE"] = str(service.config_path)
+        if service.artifact_hash:
+            merged_env["BLUE_ARTIFACT_HASH"] = service.artifact_hash
+        cwd = service.cwd if service.cwd is not None else service.service_dir
 
         try:
             process = await asyncio.create_subprocess_exec(
                 *command,
-                cwd=service.service_dir,
+                cwd=cwd,
                 env=merged_env,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
@@ -175,14 +182,30 @@ class ProcessRunner:
             await self._logs.append(service, stream_name, buffer)
 
 
-def build_command(meta: ServiceMeta, *, uv_frozen: bool = True) -> list[str]:
+def build_command(
+    meta: ServiceMeta,
+    *,
+    uv_frozen: bool = True,
+    artifact_python: Path | None = None,
+) -> list[str]:
     """构造服务启动命令。
 
-    优先使用元数据里的显式 ``command``；否则使用 uv workspace：
-    ``uv run [--frozen] --package <package> python -m <module>``。
+    三种来源，优先级从高到低：
+
+    1. ``meta.command``：显式命令（外部脚本/二进制），原样使用；
+    2. ``artifact_python``：世代产物 venv 里的解释器，直接 ``-m`` 启动——
+       代码与依赖都冻结在那个产物里，与工作区无关；
+    3. 兜底：uv workspace
+       （``uv run [--frozen] --package <package> python -m <module>``），
+       仅在尚未世代化时使用。
+
+    :raises SupervisorError: 需要 uv 却找不到
     """
     if meta.command:
         return list(meta.command)
+
+    if artifact_python is not None:
+        return [str(artifact_python), "-m", meta.module]
 
     uv = shutil.which("uv")
     if uv is None:

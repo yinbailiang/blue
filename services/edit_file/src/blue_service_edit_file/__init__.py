@@ -10,9 +10,9 @@ from blue.runtime import (
     WorkspaceConfig,
     configure_workspace,
     load_runtime_config,
-    run_tool,
     workspace,
 )
+from blue_tool_sdk import run_tool
 
 __all__ = [
     "CONFIG_MODEL",

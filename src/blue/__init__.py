@@ -1,4 +1,9 @@
-"""blue —— 分布式 Agent 系统的控制面与共享 SDK。"""
+"""blue —— 分布式 Agent 系统的控制面与共享 SDK。
+
+``blue`` 核心不依赖任何契约包：工具调用等域运行时在 ``blue-tool-sdk``，
+契约在 ``contracts/*``。事件注册由服务配置驱动，见
+:func:`blue.runtime.build_runtime`。
+"""
 
 from blue.config import (
     DEFAULT_CONFIG_PATH,
@@ -15,7 +20,6 @@ from blue.runtime import (
     load_runtime_config,
     registry_ttl,
     run_service,
-    run_tool,
 )
 from blue.transport import (
     BusRuntime,
@@ -24,7 +28,6 @@ from blue.transport import (
     RabbitRuntime,
 )
 from blue.tree import ROOT_ID, Tree, TreeError, TreeNode
-from blue.worker import ToolLease, ToolRegistrar, ToolWorker
 
 __all__ = [
     "DEFAULT_CONFIG_PATH",
@@ -41,9 +44,6 @@ __all__ = [
     "Supervisor",
     "SupervisorError",
     "SupervisorSettings",
-    "ToolLease",
-    "ToolRegistrar",
-    "ToolWorker",
     "Tree",
     "TreeError",
     "TreeNode",
@@ -53,6 +53,5 @@ __all__ = [
     "registry_ttl",
     "render_state",
     "run_service",
-    "run_tool",
     "write_runtime_configs",
 ]

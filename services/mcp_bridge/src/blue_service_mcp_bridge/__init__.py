@@ -22,8 +22,6 @@ mcp_bridge = McpBridgeService(
 
 from __future__ import annotations
 
-from blue_contracts_tool import EVENTS as TOOL_EVENTS
-
 from blue.runtime import build_runtime, load_runtime_config, registry_ttl, run_service
 from blue_service_mcp_bridge.client import (
     McpCallError,
@@ -95,7 +93,7 @@ def build_bridge(
     :param ttl: 工具租约时长；缺省读 ``BLUE_REGISTRY_TTL``。
     """
     return McpBridge(
-        runtime=build_runtime(SERVICE_NAME, TOOL_EVENTS),
+        runtime=build_runtime(SERVICE_NAME),
         config=config,
         ttl=registry_ttl() if ttl is None else ttl,
         connector=connector,

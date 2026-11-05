@@ -23,7 +23,7 @@ from infinity_bus.templates.request import request
 from tests.support import MemorySessionGateway, ScriptedClient, make_runtime, wait_until
 
 from blue.transport import MemoryFanout
-from blue.worker import ToolWorker
+from blue_tool_sdk import ToolWorker
 
 
 def test_agent_and_registry_are_separate_services() -> None:

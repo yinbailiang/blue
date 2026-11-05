@@ -16,8 +16,8 @@ from blue.runtime import (
     load_runtime_config,
     project_root,
     resolve_workspace,
-    run_tool,
 )
+from blue_tool_sdk import run_tool
 
 MAX_OUTPUT_CHARS = 20_000
 """stdout / stderr 各自保留的最大字符数。"""

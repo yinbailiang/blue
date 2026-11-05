@@ -15,15 +15,9 @@ from collections.abc import Sequence
 from typing import cast
 
 from blue_contracts_session import (
-    EVENTS as SESSION_EVENTS,
-)
-from blue_contracts_session import (
     SessionStateEvent,
     SessionStateReplyEvent,
     SessionStateResponse,
-)
-from blue_contracts_tool import (
-    EVENTS as TOOL_EVENTS,
 )
 from blue_contracts_tool import (
     CatalogQueryEvent,
@@ -58,7 +52,7 @@ def main(argv: Sequence[str] | None = None) -> int:
 
 async def _run(*, bus_url: str | None, what: str, timeout: float) -> int:
     """按目标查询并打印。"""
-    runtime = build_runtime("ui.inspect", (*TOOL_EVENTS, *SESSION_EVENTS), url=bus_url)
+    runtime = build_runtime("ui.inspect", url=bus_url)
     await runtime.start()
     try:
         proxy = runtime.proxy("ui.inspect")

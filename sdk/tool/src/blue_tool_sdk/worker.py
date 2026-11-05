@@ -46,9 +46,9 @@ from infinity_agent import (
 from infinity_agent.tools import ToolRegistry
 from infinity_bus import EventBus
 
-from blue.subscribers.tool_call import ToolCallHandler
-from blue.tool_context import ToolContext, use_context
 from blue.transport import BusRuntime
+from blue_tool_sdk.tool_call import ToolCallHandler
+from blue_tool_sdk.tool_context import ToolContext, use_context
 
 logger = logging.getLogger(__name__)
 

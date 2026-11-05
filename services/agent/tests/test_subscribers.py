@@ -32,7 +32,7 @@ from infinity_agent import ToolDefinition
 from infinity_bus import Event, EventBus
 from pydantic import BaseModel
 
-from blue.subscribers.tool_call import ToolCallHandler
+from blue_tool_sdk import ToolCallHandler
 
 
 class RecordingProxy:

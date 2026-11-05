@@ -3,10 +3,14 @@
 from __future__ import annotations
 
 import json
+import sys
+import types
 from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
+from blue_contracts_tool import EVENTS as TOOL_EVENTS
+from infinity_bus import EventDeclaration
 from pydantic import BaseModel, ValidationError
 
 import blue.runtime as runtime
@@ -300,3 +304,80 @@ def test_infra_config_falls_back_for_manual_run_without_section(
 
     assert config.bus_url == runtime.DEFAULT_BUS_URL
     assert config.state_dir == Path(".blue")
+
+
+class _FirstDuplicate(EventDeclaration):
+    """与下一个类同名的事件声明。"""
+
+    name = "demo.duplicate"
+
+
+class _SecondDuplicate(EventDeclaration):
+    """与上一个类同名的事件声明。"""
+
+    name = "demo.duplicate"
+
+
+def test_build_runtime_scans_contract_events_from_config(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """事件注册由 ``infra.contracts`` 驱动，不靠调用方传列表。"""
+    _install_infra(tmp_path, monkeypatch, contracts={"tool": "blue_contracts_tool"})
+    monkeypatch.setenv("BLUE_SERVICE_NAME", "demo")
+
+    bus = runtime.build_runtime()
+
+    assert bus.member_id == "demo.demo"
+    names = set(bus._events.list_names())  # pyright: ignore[reportPrivateUsage]
+    assert names == {event.name for event in TOOL_EVENTS}
+
+
+def test_build_runtime_explicit_events_override_scan(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """显式传入 ``events`` 时不再扫描配置（单测/特殊进程用）。"""
+    _install_infra(tmp_path, monkeypatch, contracts={"tool": "no_such_module"})
+    monkeypatch.setenv("BLUE_SERVICE_NAME", "demo")
+
+    bus = runtime.build_runtime("demo", events=())
+
+    assert bus._events.list_names() == []  # pyright: ignore[reportPrivateUsage]
+
+
+def test_load_contract_events_reports_missing_module(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """契约模块没装/名字写错时给出可操作的错误。"""
+    _install_infra(tmp_path, monkeypatch, contracts={"tool": "no_such_module"})
+    monkeypatch.setenv("BLUE_SERVICE_NAME", "demo")
+
+    with pytest.raises(RuntimeConfigError, match="不可用"):
+        runtime.load_contract_events()
+
+
+def test_load_contract_events_rejects_modules_without_events(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """导入得到但没导 ``EVENTS`` 的模块不能静默跳过。"""
+    _install_infra(tmp_path, monkeypatch, contracts={"tool": "json"})
+    monkeypatch.setenv("BLUE_SERVICE_NAME", "demo")
+
+    with pytest.raises(RuntimeConfigError, match="没有导出 EVENTS"):
+        runtime.load_contract_events()
+
+
+def test_load_contract_events_rejects_duplicate_names(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """两个契约声明同名事件时直接报错，避免注册表静默覆盖。"""
+    first = types.ModuleType("demo_contract_first")
+    second = types.ModuleType("demo_contract_second")
+    first.__dict__["EVENTS"] = (_FirstDuplicate,)
+    second.__dict__["EVENTS"] = (_SecondDuplicate,)
+    monkeypatch.setitem(sys.modules, "demo_contract_first", first)
+    monkeypatch.setitem(sys.modules, "demo_contract_second", second)
+
+    with pytest.raises(RuntimeConfigError, match="重名"):
+        runtime.load_contract_events(
+            {"a": "demo_contract_first", "b": "demo_contract_second"}
+        )

@@ -5,6 +5,7 @@ description = "blue MCP 客户端桥：把外部 MCP server 的工具接入工�
 requires-python = ">=3.14"
 dependencies = [
     "blue",
+    "blue-tool-sdk",
     "blue-contracts-tool",
     "infinity-agent>=0.3.0",
     "pydantic>=2",
@@ -12,6 +13,7 @@ dependencies = [
 
 [tool.uv.sources]
 blue = { workspace = true }
+blue-tool-sdk = { workspace = true }
 blue-contracts-tool = { workspace = true }
 
 [build-system]

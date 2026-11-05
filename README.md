@@ -74,11 +74,10 @@ contracts/                    # 域契约包（不依赖控制面/服务实现�
 └── session/                  # blue-contracts-session：session.*
     └── contract.infd
 
-src/blue/                     # 控制面 + 共享 SDK（随包安装）
+src/blue/                     # 控制面 + 共享 SDK（不依赖任何契约包）
 ├── transport.py              # RabbitMQ fanout / 进程内 fanout
 ├── lifecycle.py              # serve_forever
-├── worker.py                 # ToolWorker / ToolRegistrar（工具服务使用）
-├── runtime.py                # 服务侧运行时：读配置、连总线、run_tool
+├── runtime.py                # 服务侧运行时：读配置、按 depends_contracts 扫事件、连总线
 ├── config.py                 # blue.infd 入口与文档导出
 ├── errors.py                 # BlueError / ConfigError / ...
 ├── control/
@@ -92,8 +91,13 @@ src/blue/                     # 控制面 + 共享 SDK（随包安装）
 │   ├── process.py            # 进程树信号
 │   └── backoff.py            # 指数退避 + 重启策略
 ├── cli.py                    # up / apply / status / logs / down / ...
-└── subscribers/
-    └── tool_call.py          # 工具调用处理器
+
+sdk/tool/                     # blue-tool-sdk：工具域运行时（只被工具服务依赖）
+├── sdk.infd                  # SDK 元数据（name / package / module）
+├── worker.py                 # ToolWorker / ToolRegistrar
+├── tool_call.py              # tool.call 处理器
+├── tool_context.py           # ContextVar 调用上下文 / call_service
+└── runtime.py                # run_tool
 
 services/                     # 工作负载（不随 blue 包安装）
 ├── bus/                      # RabbitMQ 生命周期 + 配置 + 可选代理
@@ -182,7 +186,8 @@ service {
   package = "blue-service-echo" # uv workspace 包名
   module = "blue_service_echo"  # python -m 模块
   depends_on = ["bus"]
-  depends_contracts = ["tool"]  # 依赖的事件契约名
+  depends_contracts = ["tool"]  # 依赖的事件契约名（自动注册其 EVENTS）
+  depends_sdk = ["tool"]        # 依赖的 SDK 运行时包名（sdk/<name>/sdk.infd）
   restart = "always"            # always / on-failure / never
   stop_timeout = 5.0
   startup_timeout = 30.0
@@ -212,7 +217,10 @@ contract {
 
 - 控制面为每个契约包计算 `source_hash`（`pyproject.toml` + `contract.infd` +
   `src/**` 全部文件），并把契约纳入 generation。
-- 服务用 `depends_contracts` 声明自己依赖的契约。
+- 服务用 `depends_contracts` 声明自己依赖的契约；supervisor 把契约名展开成
+  `{"tool": "blue_contracts_tool"}` 写进运行时配置的 `infra.contracts`。
+- 服务进程调 `build_runtime()` 时自动导入这些模块的 `EVENTS`，服务代码里不再
+  手写事件列表；`run_tool()` 同理。
 - `blue apply` / `reload()` 检测到契约变化时，会重启所有声明了该契约的服务；
   没有声明依赖的服务不受影响。
 - 契约依赖必须指向存在的契约，否则配置编译直接失败。
@@ -452,10 +460,10 @@ WebUI 通过 WebSocket 调用 Agent，并订阅 `session.stream` 实时展示模
 `session_id`，转成一次 RPC。
 
 **工具怎么知道自己在哪个会话**：工具函数的参数 schema 是发给模型看的，不能塞
-内部字段，所以上下文走 `blue.tool_context`（`ContextVar`）：`ToolWorker` 在调用前
+内部字段，所以上下文走 `blue_tool_sdk`（`ContextVar`）：`ToolWorker` 在调用前
 用 `ToolCallRequest.session_id` 绑定，调用后复位。工具里用 `current_context()`
-取；需要反向调用别的服务时用 `call_service(...)`，并把那个契约包的事件传给
-`run_tool(..., events=...)`。
+取；需要反向调用别的服务时用 `call_service(...)`，并在 `service.infd` 的
+`depends_contracts` 里声明对应契约——事件由运行时自动注册，不需要手传。
 
 > 为什么不做成 agent 内建工具：内建的看不见（不在 `/api/tools` 目录里、webui 与
 > MCP 桥都拿不到）、改一次要重启 agent、也没有租约/审计。实测内建方案每轮固定
@@ -579,24 +587,65 @@ WantedBy=default.target
 | **不变** | 走了 `execv` 自重启（只换代码，不换进程） |
 | **变了** | 走了人工 `down`/`up`，或进程管理器重新拉起 |
 
-## 变更追踪：契约、服务包、SDK 三件都算
+## 变更追踪：契约、服务包、核心、运行时包四件都算
 
-`blue plan` / 调谐器判断「要不要重启」时比对三样东西：
+`blue plan` / 调谐器判断「要不要重启」时比对四样东西：
 
 | 维度 | 覆盖范围 | 变化时的后果 |
 |---|---|---|
 | **契约**（`contracts/*`） | 事件、载荷、代理 | 只重启 `depends_contracts` 里声明了它的服务 |
 | **服务包**（`services/<name>/`） | pyproject + `src/**`（全部文件，含 `web/**` 静态资源；排除 `__pycache__`/`*.pyc` 等缓存） | 只重启该服务 |
-| **blue SDK**（`src/blue/**` + 根 pyproject） | worker、runtime、transport、tool_context | **重启全部服务** |
+| **blue 核心**（`src/blue/**` + 根 pyproject） | runtime、transport、控制面 | **重启全部服务** |
+| **SDK 运行时包**（`sdk/*`） | 如 `tool` → `blue-tool-sdk` 的 worker / tool_context | 只重启 `depends_sdk` 里声明了它的服务 |
 
-第三行是后补的：`ToolWorker`/`BusRuntime` 这些运行时宿主留在 SDK 里，而服务包的
-`source_hash` 只覆盖自己的目录——SDK 改了调谐器**完全看不见**，进程会一直跑旧代码。
-现在 SDK 指纹（版本 + `src/blue/**` 内容）进期望状态、写进 `.blue/state.json`，
-变化时 `plan` 会显示 `SDK 变化` 并重启所有服务。
+后两行是变更追踪的关键：`ToolWorker`/`BusRuntime` 这些运行时宿主不在服务目录里，
+而服务包的 `source_hash` 只覆盖自己的目录——不单独跟踪的话，运行时改了调谐器
+**完全看不见**，进程会一直跑旧代码。现在核心与 `sdk/*` 的指纹分别进期望状态、
+写进 `.blue/state.json`，`plan` 会显示「SDK 变化」或「依赖运行时包变化」。
 
 判据（为什么 worker 不搬进契约包）：能放进"别的语言也能实现"的包 → 契约；
-只有"我们的运行时"才懂 → SDK。搬进契约会把 `BusRuntime`/`ContextVar`/生命周期
-塞进协议包，还会让"改一行实现"变成全机重启（契约 hash 是重启信号）。
+只有"我们的运行时"才懂 → `sdk/*` 运行时包。搬进契约会把 `BusRuntime`/
+`ContextVar`/生命周期塞进协议包，还会让"改一行实现"变成全机重启。
+现在 `blue` 核心**不依赖任何契约包**，工具域实现集中在 `blue-tool-sdk`，
+工具服务用 `depends_sdk = ["tool"]` 声明它；改工具运行时只重启工具类服务。
+
+## 世代（generation）：原子激活与回滚
+
+`blue apply` 不再是"发信号 + 原地覆盖配置"，而是 NixOS 式的三阶段：
+
+```text
+build  → 计算每个服务的产物闭包指纹、构建缺失的产物（不碰运行中的系统）
+flip   → 冻结 .blue/generations/<N>/（含配置）+ os.replace 原子翻转 current
+verify → 等全部服务 Ready；超时/失败 → 自动翻回上一个 stable 世代
+```
+
+三层严格分离：**代码**（`.blue/artifacts`，内容寻址，可回滚）、**配置**
+（`.blue/generations/<N>/services/`，随世代冻结）、**数据**（`sessions.db`、
+`rabbitmq/`、用户文件，**永不回滚**）。
+
+| 命令 | 作用 |
+|---|---|
+| `blue apply` | 三阶段全流程；内容没变则直接复用当前世代 |
+| `blue apply --staged` | 只冻结世代、不切换（等价 `nixos-rebuild boot`） |
+| `blue activate <N>` | 激活一个已存在的世代 |
+| `blue rollback` | 回到上一个 stable 世代（整机） |
+| `blue rollback --service agent` | 只把某个服务的产物+配置换回旧世代（生成新世代，历史保持线性） |
+| `blue generations` | 列出全部世代、当前指针与状态（`*` 为当前） |
+| `blue gc --keep N` | 回收老世代与无人引用的产物；`--dry-run` 先看要删什么 |
+
+三条容易踩的规则：
+
+1. **控制面设置随世代冻结**。`activation_timeout`、`generation_auto_rollback`
+   这些属于"这一代怎么跑"，存进 `generation.json`；所以 `apply --config other.infd`
+   改这些值会生效（早期版本没存，实测就是这里翻的车：设 12s 却在跑 120s）。
+2. **gc 至少保留两个 stable**。自动回滚的目标是"上一个 stable"，只留一个等于
+   把机制刚需的东西回收掉。
+3. **execv 自重启 ≠ 崩溃**。两者都表现为"`current` 指向的世代还没 stable"，
+   区别在 PID：execv 保留 PID，崩溃后重新拉起的一定是新 PID。用状态快照里的
+   `supervisor_pid` 判定，自重启要继续验证，不能误回滚。
+
+详细设计（目录布局、产物闭包、状态机、崩溃兜底、已知边界）见
+[`docs/generations.md`](docs/generations.md)。
 
 ## 注册中心是单实例（工具登记走请求/应答）
 

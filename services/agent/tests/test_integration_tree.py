@@ -39,7 +39,7 @@ from tests.support import ScriptedClient, make_runtime, wait_until
 
 from blue.transport import MemoryFanout
 from blue.tree import Tree
-from blue.worker import ToolWorker
+from blue_tool_sdk import ToolWorker
 
 
 class Stack:

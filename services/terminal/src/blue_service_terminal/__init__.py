@@ -22,9 +22,6 @@ from pathlib import Path
 from typing import Annotated, Any
 
 from blue_contracts_tool import (
-    EVENTS as TOOL_EVENTS,
-)
-from blue_contracts_tool import (
     ToolCallRequest,
     ToolCallResult,
     ToolResultEvent,
@@ -36,9 +33,7 @@ from PIL import Image
 from pydantic import BaseModel, Field
 
 from blue.runtime import build_runtime, load_runtime_config, run_service
-from blue.subscribers.tool_call import ToolCallHandler
 from blue.transport import BusRuntime
-from blue.worker import ToolLease, ToolRegistrar, unpack_tool_output
 from blue_service_terminal.config import TerminalConfig
 from blue_service_terminal.render import (
     FontSet,
@@ -50,6 +45,12 @@ from blue_service_terminal.session import (
     SessionManager,
     TerminalSession,
     supports_line_editing,
+)
+from blue_tool_sdk import (
+    ToolCallHandler,
+    ToolLease,
+    ToolRegistrar,
+    unpack_tool_output,
 )
 
 logger = logging.getLogger(__name__)
@@ -489,7 +490,7 @@ CONFIG_MODEL = TerminalConfig
 def main() -> int:
     """控制台脚本入口。"""
     config = load_runtime_config(TerminalConfig)
-    runtime = build_runtime("terminal", TOOL_EVENTS)
+    runtime = build_runtime("terminal")
     return run_service(TerminalService(runtime=runtime, config=config))
 
 

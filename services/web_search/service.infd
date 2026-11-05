@@ -14,6 +14,7 @@ service {
   module = "blue_service_web_search"
   depends_on = ["bus"]
   depends_contracts = ["tool"]
+  depends_sdk = ["tool"]
   restart = "always"
   stop_timeout = 5.0
   startup_timeout = 30.0

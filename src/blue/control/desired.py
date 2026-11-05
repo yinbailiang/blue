@@ -6,6 +6,7 @@
 - ``supervisor`` 是唯一保留的非服务顶层键；
 - 每个服务的元数据来自 ``services/<name>/service.infd`` 的 ``service`` 块；
 - 每个契约包的元数据来自 ``contracts/<name>/contract.infd`` 的 ``contract`` 块。
+- 每个 SDK 运行时包的元数据来自 ``sdk/<name>/sdk.infd`` 的 ``sdk`` 块。
 - supervisor 把每个服务的运行时配置写入
   ``services/<name>/service_runtime_config.json``，文件内 ``config`` 段是该服务的
   业务配置，``infra`` 段是所有服务共享的基础设施参数。
@@ -29,8 +30,10 @@ from blue.control.model import (
     ContractMeta,
     DesiredContract,
     DesiredSdk,
+    DesiredSdkPackage,
     DesiredService,
     DesiredState,
+    SdkMeta,
     ServiceMeta,
     SupervisorSettings,
 )
@@ -93,10 +96,12 @@ def load_desired(path: str | Path = DEFAULT_CONFIG_PATH) -> DesiredState:
 
     _validate_dependencies(services)
     _validate_contract_dependencies(services, contracts)
-    bus_url, bus_transport = _bus_endpoint(services)
     sdk = _load_sdk(base_dir)
+    _validate_sdk_dependencies(services, sdk)
+    bus_url, bus_transport = _bus_endpoint(services)
+    deps_hash = _load_deps_hash(base_dir)
     return DesiredState(
-        generation=_generation(supervisor, services, contracts, sdk),
+        generation=_generation(supervisor, services, contracts, sdk, deps_hash),
         config_path=config_path,
         base_dir=base_dir,
         supervisor=supervisor,
@@ -105,6 +110,7 @@ def load_desired(path: str | Path = DEFAULT_CONFIG_PATH) -> DesiredState:
         sdk=sdk,
         bus_url=bus_url,
         bus_transport=bus_transport,
+        deps_hash=deps_hash,
     )
 
 
@@ -150,6 +156,11 @@ def _runtime_config_content(service: DesiredService, desired: DesiredState) -> s
             "project_root": str(desired.base_dir),
             "bus_url": desired.bus_url,
             "state_dir": str(settings.state_dir),
+            "contracts": {
+                name: desired.contracts[name].meta.module
+                for name in sorted(service.meta.depends_contracts)
+                if name in desired.contracts
+            },
             "registry_ttl": settings.registry_ttl,
             "registry_sweep_interval": settings.registry_sweep_interval,
         },
@@ -361,6 +372,7 @@ def render_state(desired: DesiredState, *, redact: bool = True) -> dict[str, Any
         "bus_url": desired.bus_url,
         "bus_transport": desired.bus_transport,
         "contracts": contracts,
+        "sdk": desired.sdk.model_dump(mode="json"),
         "services": services,
     }
 
@@ -443,19 +455,34 @@ def _load_contracts(base_dir: Path) -> dict[str, DesiredContract]:
     return contracts
 
 
+def _load_deps_hash(base_dir: Path) -> str:
+    """计算根 ``uv.lock`` 的内容指纹。
+
+    依赖变更（加包、升版本）不改变任何源码指纹，但**会**改变产物内容，所以要进
+    ``generation``——否则 apply 认为无事可做，产物永远不会重建。锁文件缺失
+    （例如最小化测试工作区）时返回空串，不阻断编译。
+    """
+    try:
+        return hashlib.sha256((base_dir / "uv.lock").read_bytes()).hexdigest()
+    except OSError:
+        return ""
+
+
 def _load_sdk(base_dir: Path) -> DesiredSdk:
-    """计算 blue SDK 自身的指纹（版本 + ``src/blue/**/*.py`` 内容）。
+    """计算 blue 核心与 ``sdk/*`` 运行时包的指纹。
 
-    SDK 是每个服务的**隐式**运行时依赖：worker / runtime / transport / tool_context
-    都在里面，但服务包的 ``source_hash`` 只覆盖 ``services/<name>/``，所以 SDK 改了
-    调谐器察觉不到——服务会一直跑旧代码。这里把它显式纳入期望状态。
+    核心的 ``source_hash`` 只覆盖 ``src/blue/**`` + 根 pyproject；``sdk/<name>/``
+    各自用 ``sdk.infd`` 声明元数据（与 ``contract.infd`` 同构），按 **SDK 名**
+    记录在 ``packages`` 里，供 ``depends_sdk`` 精准重启与产物安装使用。
 
-    注意：**不能**用 :func:`scan_package`——那套是"服务包布局"（``pyproject.toml``
-    + 内部 ``src/``），而 SDK 目录本身就在 ``src/blue`` 下，套进去会一个文件都扫不到
-    （曾经就是这样：指纹只覆盖了根 ``pyproject.toml``，改代码全都不算变化）。
+    注意：**不能**用 :func:`scan_package` 扫核心——那套是"服务包布局"
+    （``pyproject.toml`` + 内部 ``src/``），而 SDK 目录本身就在 ``src/blue`` 下，
+    套进去会一个文件都扫不到（曾经就是这样：指纹只覆盖了根
+    ``pyproject.toml``，改代码全都不算变化）。``sdk/*`` 是标准包布局，可以用。
     """
     sdk_dir = base_dir / "src" / "blue"
-    if not sdk_dir.is_dir():
+    packages_root = (base_dir / "sdk").resolve()
+    if not sdk_dir.is_dir() and not packages_root.is_dir():
         return DesiredSdk()
     root_pyproject = base_dir / "pyproject.toml"
     digest = hashlib.sha256()
@@ -463,17 +490,63 @@ def _load_sdk(base_dir: Path) -> DesiredSdk:
         digest.update(b"pyproject.toml\0")
         digest.update(root_pyproject.read_bytes())
         digest.update(b"\0")
-    for path in sorted(sdk_dir.rglob("*.py"), key=lambda item: item.as_posix()):
-        digest.update(path.relative_to(sdk_dir).as_posix().encode("utf-8"))
-        digest.update(b"\0")
-        try:
-            digest.update(path.read_bytes())
-        except OSError:
-            digest.update(b"<missing>")
-        digest.update(b"\0")
+    if sdk_dir.is_dir():
+        for path in sorted(sdk_dir.rglob("*.py"), key=lambda item: item.as_posix()):
+            digest.update(path.relative_to(sdk_dir).as_posix().encode("utf-8"))
+            digest.update(b"\0")
+            try:
+                digest.update(path.read_bytes())
+            except OSError:
+                digest.update(b"<missing>")
+            digest.update(b"\0")
+
+    packages: dict[str, DesiredSdkPackage] = {}
+    if packages_root.is_dir():
+        for directory in sorted(packages_root.iterdir(), key=lambda item: item.name):
+            if not directory.is_dir():
+                continue
+            manifest = directory / "sdk.infd"
+            if not manifest.is_file():
+                raise ConfigError(
+                    f"SDK 目录 {directory.name!r} 缺少元数据文件：{manifest}"
+                )
+            result = _load_with_env(manifest, base_dir)
+            if result.has_errors:
+                raise ConfigError(_format_diagnostics(result.diagnostics, manifest))
+            raw_meta = result.value.get("sdk")
+            if not isinstance(raw_meta, dict):
+                raise ConfigError(f"{manifest} 缺少 sdk 元数据块")
+            try:
+                meta = SdkMeta.model_validate(raw_meta)
+            except ValidationError as error:
+                raise ConfigError(
+                    f"SDK {directory.name!r} 的 sdk 元数据校验失败：{error}"
+                ) from error
+            if meta.name != directory.name:
+                raise ConfigError(
+                    f"SDK 名不一致：目录为 {directory.name!r}，"
+                    f"{manifest} 中 sdk.name 为 {meta.name!r}"
+                )
+            pyproject = directory / "pyproject.toml"
+            if not pyproject.is_file():
+                raise ConfigError(f"SDK {meta.name!r} 缺少 pyproject.toml")
+            actual_package = read_package_name(pyproject)
+            if actual_package and actual_package != meta.package:
+                raise ConfigError(
+                    f"SDK {meta.name!r} 包名不一致：sdk.package 为 "
+                    f"{meta.package!r}，pyproject.toml 为 {actual_package!r}"
+                )
+            entries = scan_package(directory, extra_files=("sdk.infd",))
+            packages[meta.name] = DesiredSdkPackage(
+                meta=meta,
+                package_version=read_package_version(pyproject),
+                source_hash=digest_package(directory, entries),
+            )
+
     return DesiredSdk(
         package_version=read_package_version(root_pyproject),
         source_hash=digest.hexdigest(),
+        packages=packages,
     )
 
 
@@ -533,6 +606,19 @@ def _validate_contract_dependencies(
                 raise ConfigError(f"服务 {name!r} 依赖不存在的契约 {contract!r}")
 
 
+def _validate_sdk_dependencies(
+    services: dict[str, DesiredService], sdk: DesiredSdk
+) -> None:
+    for name, service in services.items():
+        seen: set[str] = set()
+        for dependency in service.meta.depends_sdk:
+            if dependency in seen:
+                raise ConfigError(f"服务 {name!r} 重复声明 SDK 依赖 {dependency!r}")
+            seen.add(dependency)
+            if dependency not in sdk.packages:
+                raise ConfigError(f"服务 {name!r} 依赖不存在的 SDK {dependency!r}")
+
+
 def _bus_endpoint(
     services: dict[str, DesiredService],
 ) -> tuple[str, Literal["rabbit", "memory"]]:
@@ -562,10 +648,12 @@ def _generation(
     services: dict[str, DesiredService],
     contracts: dict[str, DesiredContract],
     sdk: DesiredSdk,
+    deps_hash: str = "",
 ) -> str:
     payload = {
         "supervisor": supervisor.model_dump(mode="json"),
         "sdk": sdk.model_dump(mode="json"),
+        "deps_hash": deps_hash,
         "contracts": {
             name: {
                 "meta": contract.meta.model_dump(mode="json"),
@@ -622,11 +710,14 @@ SECRET_FILES = ("secrets.toml", "secrets.json")
 def _sandbox_patterns(workspace_root: Path) -> list[str]:
     services = (workspace_root / "services").resolve()
     contracts = (workspace_root / "contracts").resolve()
+    sdk = (workspace_root / "sdk").resolve()
     patterns = [
         str(services / "**"),
         "services/**",
         str(contracts / "**"),
         "contracts/**",
+        str(sdk / "**"),
+        "sdk/**",
     ]
     for name in SECRET_FILES:
         patterns.append(str(workspace_root / name))

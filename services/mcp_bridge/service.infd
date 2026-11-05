@@ -15,6 +15,7 @@ service {
   module = "blue_service_mcp_bridge"
   depends_on = ["bus", "registry"]
   depends_contracts = ["tool"]
+  depends_sdk = ["tool"]
   restart = "always"
   stop_timeout = 10.0
   startup_timeout = 60.0

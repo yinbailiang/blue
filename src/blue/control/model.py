@@ -9,11 +9,14 @@ from typing import Any, Literal
 from pydantic import BaseModel, ConfigDict, Field
 
 __all__ = [
+    "ActivationState",
     "ActualContract",
     "ActualService",
     "ActualState",
     "ContractMeta",
     "DesiredContract",
+    "DesiredSdk",
+    "DesiredSdkPackage",
     "DesiredService",
     "DesiredState",
     "ReadinessProbe",
@@ -44,6 +47,9 @@ class ServiceMeta(BaseModel):
     depends_on: tuple[str, ...] = Field(default=(), description="依赖的服务名")
     depends_contracts: tuple[str, ...] = Field(
         default=(), description="依赖的事件契约名"
+    )
+    depends_sdk: tuple[str, ...] = Field(
+        default=(), description="依赖的 SDK 运行时包名（sdk/* 目录名）"
     )
     restart: RestartPolicy = Field(default="on-failure", description="重启策略")
     stop_timeout: float = Field(default=10.0, gt=0, description="优雅停止超时（秒）")
@@ -82,6 +88,26 @@ class SupervisorSettings(BaseModel):
         default=2.0, gt=0, description="工具租约巡检间隔"
     )
     uv_frozen: bool = Field(default=True, description="uv run 是否使用 --frozen")
+    activation_timeout: float = Field(
+        default=120.0,
+        gt=0,
+        description="激活新世代后等全部服务 Ready 的上限（秒）；超时按失败处理",
+    )
+    generation_keep: int = Field(
+        default=5, ge=1, le=1000, description="gc 至少保留多少个最近世代"
+    )
+    generation_auto_rollback: bool = Field(
+        default=True, description="激活验证失败时自动回滚到上一个 stable 世代"
+    )
+    artifact_python: str = Field(
+        default="3.14", description="建 artifact venv 用的解释器（交给 uv 解析/下载）"
+    )
+    artifact_link_mode: str = Field(
+        default="hardlink", description="uv 安装产物时的 link mode"
+    )
+    artifact_warn_cross_device: bool = Field(
+        default=True, description="硬链接跨分区（会退化成拷贝）时是否告警"
+    )
 
 
 class DesiredService(BaseModel):
@@ -98,6 +124,16 @@ class DesiredService(BaseModel):
     """服务包内容指纹（版本声明 + 源码内容），用于判断是否需要重新加载。"""
     service_dir: Path
     config_path: Path
+    cwd: Path | None = None
+    """进程工作目录；``None`` 表示用 ``service_dir``（未被世代化时的旧行为）。
+
+    世代化之后固定为**项目根**：服务进程的相对路径语义与文件工具一致，而不是
+    "相对于自己被启动的那个目录"——后者曾经让 `read_file("AGENT.md")` 读到服务目录里。
+    """
+    artifact_hash: str = ""
+    """产物（artifact）指纹；空串表示还没构建产物，退回 ``uv run`` 启动。"""
+    artifact_python: Path | None = None
+    """产物 venv 里的解释器；给了就用它直接 ``-m`` 启动，不再经过 uv。"""
 
 
 class ContractMeta(BaseModel):
@@ -123,15 +159,37 @@ class DesiredContract(BaseModel):
     contract_path: Path
 
 
+class SdkMeta(BaseModel):
+    """``sdk.infd`` 中的运行时包元数据（与 ``ContractMeta`` 同构）。"""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    name: str = Field(pattern=r"^[a-z][a-z0-9_]*$", description="SDK 名 / 目录名")
+    package: str = Field(description="uv workspace 包名")
+    module: str = Field(description="Python 模块名")
+    description: str = Field(default="", description="说明")
+
+
+class DesiredSdkPackage(BaseModel):
+    """一个 workspace 运行时包（``sdk/*``）：元数据 + 版本 + 内容指纹。"""
+
+    meta: SdkMeta
+    package_version: str = ""
+    source_hash: str = ""
+
+
 class DesiredSdk(BaseModel):
     """blue SDK 自身的指纹：它是每个服务的隐式运行时依赖。
 
-    worker / runtime / transport / tool_context 都在 SDK 里，服务进程全都 import 它——
-    所以 SDK 一改，`source_hash`（只覆盖服务包）察觉不到，必须单独跟踪。
+    ``source_hash`` 只覆盖 ``blue`` 核心（每个服务都 import）；``packages`` 是按
+    服务按需安装的 workspace 运行时包（``sdk/<name>/sdk.infd`` 声明元数据，
+    如 ``tool`` → ``blue-tool-sdk``）——它们的变化只重启声明了 ``depends_sdk``
+    的服务。
     """
 
     package_version: str = ""
     source_hash: str = ""
+    packages: dict[str, DesiredSdkPackage] = Field(default_factory=dict)
 
 
 class DesiredState(BaseModel):
@@ -148,6 +206,12 @@ class DesiredState(BaseModel):
     sdk: DesiredSdk = Field(default_factory=DesiredSdk)
     bus_url: str
     bus_transport: Literal["rabbit", "memory"]
+    deps_hash: str = ""
+    """``uv.lock`` 的内容指纹。
+
+    依赖变了但配置与源码都没变时，``generation`` 必须跟着变——否则 apply 会认为
+    "无事可做"，产物也永远不会重建。它也进 ``artifact_hash``（产物闭包）。
+    """
 
 
 class ServiceStatus(StrEnum):
@@ -184,6 +248,8 @@ class ActualService(BaseModel):
     config_hash: str = ""
     package_version: str = ""
     source_hash: str = ""
+    artifact_hash: str = ""
+    """当前进程是从哪个产物启动的（空串 = 未经世代化，用工作区 `uv run` 启动）。"""
     config: dict[str, Any] = Field(default_factory=dict)
     """脱敏后的配置快照，供 ``blue plan --diff`` 做字段级对比。
 
@@ -211,6 +277,23 @@ class ActualSdk(BaseModel):
 
     package_version: str = ""
     source_hash: str = ""
+    packages: dict[str, DesiredSdkPackage] = Field(default_factory=dict)
+
+
+class ActivationState(BaseModel):
+    """一次世代激活的验证进度（调谐器维护，供 ``apply --wait`` 与 ``status`` 读取）。"""
+
+    phase: Literal["pending", "stable", "failed", "rolled_back"] = "pending"
+    generation_id: int | None = None
+    """正在验证的世代号。"""
+    previous_id: int | None = None
+    """回滚的目标世代号（``rolled_back`` 时有意义）。"""
+    started_at: float = 0.0
+    deadline: float = 0.0
+    """验证截止的绝对时间（epoch 秒）。"""
+    message: str = ""
+    """失败/回滚原因：哪些服务没就绪。"""
+    failures: list[str] = Field(default_factory=list[str])
 
 
 class ActualState(BaseModel):
@@ -228,3 +311,8 @@ class ActualState(BaseModel):
     contracts: dict[str, ActualContract] = Field(default_factory=dict)
     sdk: ActualSdk | None = None
     """旧快照没有这一段；缺省表示「无法判断」，首次升级会把所有服务重启一遍。"""
+    generation_id: int | None = None
+    """当前 ``current`` 指向的世代号（旧快照没有，按未世代化处理）。"""
+    last_stable_id: int | None = None
+    """最近一次验证通过的世代号，崩溃回退与自动回滚都用它。"""
+    activation: ActivationState | None = None

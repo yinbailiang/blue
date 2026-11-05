@@ -21,7 +21,7 @@ from infinity_bus.templates.request import request
 from tests.support import make_runtime, wait_until
 
 from blue.transport import MemoryFanout
-from blue.worker import ToolWorker
+from blue_tool_sdk import ToolWorker
 
 
 def test_worker_registers_and_serves_calls() -> None:

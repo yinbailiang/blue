@@ -207,3 +207,23 @@ def test_service_contract_dependencies_exist() -> None:
     for name, service in desired.services.items():
         for contract in service.meta.depends_contracts:
             assert contract in desired.contracts, f"{name} 依赖不存在契约 {contract}"
+
+
+def test_service_runtime_package_dependencies_match_imports() -> None:
+    """导入 ``blue_tool_sdk`` 的服务必须声明 ``depends_sdk``，反之亦然。
+
+    ``service_runtime_config.json`` 只投影 ``depends_contracts``；SDK 运行时包靠
+    ``depends_sdk`` 装进产物。两边不一致时，要么产物少装包（运行时报
+    ``ModuleNotFoundError``），要么白白多装一个包。
+    """
+    desired = load_desired(ROOT / "blue.infd")
+
+    assert "tool" in desired.sdk.packages
+    for name, service in desired.services.items():
+        src = ROOT / "services" / name / "src"
+        imports_sdk = any(
+            "blue_tool_sdk" in path.read_text(encoding="utf-8")
+            for path in src.rglob("*.py")
+        )
+        declared = "tool" in service.meta.depends_sdk
+        assert imports_sdk == declared, f"{name} 的 depends_sdk 与导入不一致"

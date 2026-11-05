@@ -18,9 +18,6 @@ from collections.abc import Sequence
 from typing import cast
 
 from blue_contracts_session import (
-    EVENTS as SESSION_EVENTS,
-)
-from blue_contracts_session import (
     SessionPromptEvent,
     SessionReplyEvent,
     SessionReplyResponse,
@@ -63,7 +60,7 @@ async def _run(
     timeout: float,
 ) -> int:
     """建立总线成员并按模式收发消息。"""
-    runtime = build_runtime("ui.chat", SESSION_EVENTS, url=bus_url)
+    runtime = build_runtime("ui.chat", url=bus_url)
     session = session_id or uuid.uuid4().hex
     await runtime.start()
     try:

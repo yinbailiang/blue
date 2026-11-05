@@ -29,8 +29,8 @@ from infinity_bus.templates.request import request
 from tests.support import MemoryRuntime, make_runtime
 
 from blue.messages import encode_messages
-from blue.tool_context import ToolContext, bind_runtime_scoped, use_context
 from blue.transport import MemoryFanout
+from blue_tool_sdk import ToolContext, bind_runtime_scoped, use_context
 
 
 @dataclass

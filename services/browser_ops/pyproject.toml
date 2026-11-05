@@ -5,6 +5,7 @@ description = "blue 外置工具：可交互的浏览器（WebDriver/geckodriver
 requires-python = ">=3.14"
 dependencies = [
     "blue",
+    "blue-tool-sdk",
     "httpx>=0.28",
     "pillow>=11",
     "pydantic>=2",
@@ -12,6 +13,7 @@ dependencies = [
 
 [tool.uv.sources]
 blue = { workspace = true }
+blue-tool-sdk = { workspace = true }
 
 [build-system]
 requires = ["uv_build>=0.9.0,<0.14"]

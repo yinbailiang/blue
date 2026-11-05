@@ -13,6 +13,7 @@ from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
 
+from blue.control.artifacts import ArtifactStore
 from blue.control.backoff import Backoff, should_restart
 from blue.control.desired import (
     load_desired,
@@ -21,9 +22,11 @@ from blue.control.desired import (
     topological_order,
     write_runtime_configs,
 )
+from blue.control.generations import Generation, GenerationStore
 from blue.control.health import readiness_target, wait_ready
 from blue.control.logs import LogManager
 from blue.control.model import (
+    ActivationState,
     ActualContract,
     ActualSdk,
     ActualService,
@@ -33,7 +36,7 @@ from blue.control.model import (
     DesiredState,
     ServiceStatus,
 )
-from blue.control.plan import restart_reasons
+from blue.control.plan import changed_packages, restart_reasons
 from blue.control.process import signal_tree
 from blue.control.runner import ProcessHandle, ProcessRunner
 from blue.control.state import StateStore
@@ -95,12 +98,40 @@ class Supervisor:
         blue_version: str = "",
     ) -> None:
         self._config_path = config_path.resolve()
-        self._desired = desired
         self._state = state
         self._logs = logs
         self._runner = runner
         self._clock = clock
         self._blue_version = blue_version
+        settings = desired.supervisor
+        self._generations = GenerationStore(settings.state_dir)
+        self._artifacts = ArtifactStore(
+            settings.state_dir,
+            project_root=desired.base_dir,
+            python=settings.artifact_python,
+            link_mode=settings.artifact_link_mode,
+            warn_cross_device=settings.artifact_warn_cross_device,
+        )
+        self._config_error: str | None = None
+        self._activation: ActivationState | None = None
+        self._activation_deadline = 0.0
+        self._active_id: int | None = None
+        # 世代优先于 blue.infd：只要 current 指向一个完好世代，就是它说了算
+        active = self._generations.current()
+        if active is not None:
+            try:
+                desired = active.to_desired(
+                    supervisor=settings,
+                    base_dir=desired.base_dir,
+                    artifacts=self._artifacts,
+                )
+            except BlueError as error:
+                # 回落到刚编译出来的配置：系统仍可用，但状态里必须留下原因
+                self._config_error = (
+                    f"世代 {active.id} 无法还原，已退回 blue.infd：{error}"
+                )
+                logger.error(self._config_error)
+        self._desired = desired
         self._backoff = Backoff(
             base=desired.supervisor.restart_backoff,
             maximum=desired.supervisor.restart_backoff_max,
@@ -115,7 +146,6 @@ class Supervisor:
         self._stop_event = asyncio.Event()
         self._loop_task: asyncio.Task[None] | None = None
         self._reload_requested = False
-        self._config_error: str | None = None
         self._dirty = True
         self._stopped = False
 
@@ -142,14 +172,19 @@ class Supervisor:
             cleaned = await self._state.cleanup_orphans(previous)
             if cleaned:
                 logger.info("已清理上一次遗留的服务进程：%s", ", ".join(cleaned))
-            if previous is not None:
-                for name in previous.services:
-                    if name not in self._desired.services:
-                        service_dir = self._desired.base_dir / "services" / name
-                        (service_dir / DEFAULT_RUNTIME_CONFIG).unlink(missing_ok=True)
-            changed = write_runtime_configs(self._desired)
-            if changed:
-                logger.info("已生成运行时配置：%s", ", ".join(changed))
+            self._recover_generation(previous)
+            if self._generations.current() is None:
+                # 尚未世代化（首次启动或从旧版本升上来）：沿用工作区配置
+                if previous is not None:
+                    for name in previous.services:
+                        if name not in self._desired.services:
+                            service_dir = self._desired.base_dir / "services" / name
+                            (service_dir / DEFAULT_RUNTIME_CONFIG).unlink(
+                                missing_ok=True
+                            )
+                changed = write_runtime_configs(self._desired)
+                if changed:
+                    logger.info("已生成运行时配置：%s", ", ".join(changed))
             self._write_state()
             self._loop_task = asyncio.create_task(self._loop(), name="blue.supervisor")
         except Exception:
@@ -246,17 +281,227 @@ class Supervisor:
             self._write_state()
             self._dirty = False
 
-    async def _reload_locked(self) -> bool:
-        try:
-            desired = load_desired(self._config_path)
-        except (ConfigError, BlueError) as error:
-            self._config_error = str(error)
-            self._dirty = True
-            logger.error("配置重载失败，保留上一份有效配置：%s", error)
-            return False
+        await self._check_activation(now)
 
-        if desired.supervisor.state_dir != self._desired.supervisor.state_dir:
-            self._config_error = "state_dir 变更需要重启 supervisor"
+    def _recover_generation(self, previous: ActualState | None) -> None:
+        """启动时判断上次激活有没有走完；没走完就退回上一个 stable 世代。
+
+        这就是 NixOS "上次启动失败就选旧的 boot entry" 的等价物：不需要人值守，
+        也不会停在一个既没验证通过、也没回滚的中间态上。
+
+        但 **execv 自重启**（apply 改到控制面代码时）与崩溃长得一样：`current`
+        指向的新世代还没稳定。区别在 PID：execv 保留 PID，而崩溃后由
+        ``blue up`` / 进程管理器拉起的进程一定有新 PID。因此同一个 PID 写下的
+        状态快照说明是自重启，应当继续验证而不是回滚。
+        """
+        current = self._generations.current()
+        if current is None:
+            return
+        if current.stable:
+            self._active_id = current.id
+            self._activation = ActivationState(
+                phase="stable",
+                generation_id=current.id,
+                started_at=self._started_at,
+            )
+            return
+        fallback = self._generations.latest_stable(exclude=current.id)
+        if self._is_execv_continuation(previous):
+            logger.info(
+                "检测到控制面 execv 自重启（pid=%s）：继续验证世代 %s，不回滚",
+                os.getpid(),
+                current.id,
+            )
+            self._active_id = current.id
+            self._begin_activation(
+                current, previous_id=fallback.id if fallback is not None else None
+            )
+            return
+        if fallback is None:
+            logger.warning(
+                "世代 %s 未验证通过，且没有更早的稳定世代可退；继续验证它", current.id
+            )
+            self._active_id = current.id
+            self._begin_activation(current, previous_id=None)
+            return
+        logger.warning(
+            "上次激活世代 %s 未完成，自动回退到世代 %s", current.id, fallback.id
+        )
+        self._generations.mark_failed(current, "activation interrupted")
+        self._generations.activate(fallback)
+        try:
+            self._desired = fallback.to_desired(
+                supervisor=self._desired.supervisor,
+                base_dir=self._desired.base_dir,
+                artifacts=self._artifacts,
+            )
+        except BlueError as error:
+            self._config_error = f"回退到世代 {fallback.id} 失败：{error}"
+            logger.error(self._config_error)
+            return
+        self._runtimes = {
+            name: _Runtime(desired=service)
+            for name, service in self._desired.services.items()
+        }
+        self._active_id = fallback.id
+        self._activation = ActivationState(
+            phase="stable",
+            generation_id=fallback.id,
+            previous_id=current.id,
+            started_at=self._started_at,
+            message=f"世代 {current.id} 上次激活未完成，已回退",
+        )
+
+    def _is_execv_continuation(self, previous: ActualState | None) -> bool:
+        """上一次状态是否由**同一个 PID** 写入：execv 保留 PID，崩溃重启不会。"""
+        return previous is not None and previous.supervisor_pid == os.getpid()
+
+    def _begin_activation(
+        self, generation: Generation | None, *, previous_id: int | None
+    ) -> None:
+        """登记一次"等待验证"的激活（到期未全绿就按失败处理）。"""
+        if generation is None:
+            self._activation = None
+            self._activation_deadline = 0.0
+            return
+        timeout = self._desired.supervisor.activation_timeout
+        now = time.time()
+        self._activation = ActivationState(
+            phase="pending",
+            generation_id=generation.id,
+            previous_id=previous_id,
+            started_at=now,
+            deadline=now + timeout,
+        )
+        self._activation_deadline = self._clock() + timeout
+        self._dirty = True
+        logger.info(
+            "开始验证世代 %s（上限 %.0fs，前一个世代 %s）",
+            generation.id,
+            timeout,
+            previous_id,
+        )
+
+    async def _check_activation(self, now: float) -> None:
+        """健康闸门：全部服务就绪才算激活成功，超时就回滚。"""
+        activation = self._activation
+        if activation is None or activation.phase != "pending":
+            return
+        generation = self._generations.current()
+        if generation is None or generation.id != activation.generation_id:
+            return
+        pending = sorted(
+            name
+            for name, runtime in self._runtimes.items()
+            if runtime.status is not ServiceStatus.READY
+        )
+        if not pending:
+            self._generations.mark_stable(generation)
+            activation.phase = "stable"
+            activation.message = ""
+            activation.failures = []
+            self._activation_deadline = 0.0
+            self._dirty = True
+            logger.info(
+                "世代 %s 已稳定：%s 个服务全部就绪", generation.id, len(self._runtimes)
+            )
+            return
+        activation.failures = pending
+        if now < self._activation_deadline:
+            return
+        self._dirty = True
+        await self._fail_activation(
+            generation,
+            f"未在 {self._desired.supervisor.activation_timeout:.0f}s 内就绪："
+            + "、".join(pending),
+        )
+
+    async def _fail_activation(self, generation: Generation, message: str) -> None:
+        """激活失败：标记并（按配置）自动回滚到上一个 stable 世代。"""
+        failures = list(self._activation.failures) if self._activation else []
+        self._generations.mark_failed(generation, message)
+        fallback = self._generations.latest_stable(exclude=generation.id)
+        logger.error("世代 %s 激活失败：%s", generation.id, message)
+        if not self._desired.supervisor.generation_auto_rollback or fallback is None:
+            self._activation = ActivationState(
+                phase="failed",
+                generation_id=generation.id,
+                started_at=time.time(),
+                message=message,
+                failures=failures,
+            )
+            self._activation_deadline = 0.0
+            return
+        logger.error("自动回滚：世代 %s → 世代 %s", generation.id, fallback.id)
+        self._generations.activate(fallback)
+        self._active_id = None  # 强制下一次重载重建运行时
+        reloaded = await self._reload_locked()
+        self._activation = ActivationState(
+            phase="rolled_back",
+            generation_id=generation.id,
+            previous_id=fallback.id,
+            started_at=time.time(),
+            message=message if reloaded else f"{message}（回滚重载失败，见日志）",
+            failures=failures,
+        )
+        self._activation_deadline = 0.0
+        self._dirty = True
+
+    async def _reload_locked(self) -> bool:
+        """按 ``current`` 指向的世代重建期望状态；尚未世代化时编译 ``blue.infd``。
+
+        ``blue.infd`` 编译失败**不**会打断正在运行的世代——那是世代机制的核心
+        承诺：配置改坏了，系统照旧跑，只是下一次 apply 无法构建。
+        """
+        generation = self._generations.current()
+        compiled: DesiredState | None = None
+        try:
+            compiled = load_desired(self._config_path)
+        except (ConfigError, BlueError) as error:
+            if generation is None:
+                self._config_error = str(error)
+                self._dirty = True
+                logger.error("配置重载失败，保留上一份有效配置：%s", error)
+                return False
+            self._config_error = f"blue.infd 编译失败（运行中的世代不受影响）：{error}"
+            logger.warning(self._config_error)
+
+        if compiled is not None:
+            settings = compiled.supervisor
+        else:
+            settings = self._desired.supervisor
+
+        if generation is not None:
+            try:
+                desired = generation.to_desired(
+                    supervisor=settings,
+                    base_dir=self._desired.base_dir,
+                    artifacts=self._artifacts,
+                )
+            except BlueError as error:
+                self._config_error = str(error)
+                self._dirty = True
+                logger.error("世代 %s 无法还原：%s", generation.id, error)
+                return False
+        else:
+            if compiled is None:
+                return False
+            desired = compiled
+            try:
+                write_runtime_configs(desired)
+            except OSError as error:
+                self._config_error = f"写入运行时配置失败：{error}"
+                self._dirty = True
+                logger.error("配置重载失败：%s", self._config_error)
+                return False
+
+        # 生效的控制面设置以期望状态为准（世代里冻结的那份优先），
+        # 但 state_dir 是运行期常量，改了只能重启 supervisor。
+        if desired.supervisor.state_dir != self._state.state_dir:
+            self._config_error = (
+                "state_dir 变更需要重启 supervisor："
+                f"运行中 {self._state.state_dir}，期望 {desired.supervisor.state_dir}"
+            )
             self._dirty = True
             logger.error("配置重载失败：%s", self._config_error)
             return False
@@ -281,15 +526,24 @@ class Supervisor:
             self._desired.sdk.source_hash,
         ) != (desired.sdk.package_version, desired.sdk.source_hash)
         if sdk_touched:
-            logger.info("blue SDK 已变化，全部服务将重启（worker/runtime 在 SDK 里）")
+            logger.info(
+                "blue SDK 核心已变化，全部服务将重启（runtime/transport 在核心里）"
+            )
 
-        try:
-            write_runtime_configs(desired)
-        except OSError as error:
-            self._config_error = f"写入运行时配置失败：{error}"
-            self._dirty = True
-            logger.error("配置重载失败：%s", self._config_error)
-            return False
+        packages_touched = changed_packages(
+            self._desired.sdk.packages, desired.sdk.packages
+        )
+        if packages_touched:
+            package_affected = sorted(
+                name
+                for name, service in desired.services.items()
+                if set(service.meta.depends_sdk) & packages_touched
+            )
+            logger.info(
+                "SDK 运行时包已变化：%s；将重启：%s",
+                ", ".join(sorted(packages_touched)),
+                ", ".join(package_affected) or "无",
+            )
 
         for name, service in desired.services.items():
             runtime = self._runtimes.get(name)
@@ -304,6 +558,7 @@ class Supervisor:
                 previous_version=runtime.desired.package_version,
                 changed_contracts=changed_contracts,
                 sdk_changed=sdk_touched,
+                changed_packages=packages_touched,
             )
             if reasons:
                 logger.info("将重启 %s：%s", name, "、".join(reasons))
@@ -322,7 +577,9 @@ class Supervisor:
             runtime.stop_requested = True
             if runtime.handle is not None:
                 await self._stop_runtime(runtime, ServiceStatus.STOPPING)
-            remove_runtime_config(runtime.desired)
+            if generation is None:
+                # 世代化之后配置文件属于历史世代，删掉会破坏回滚
+                remove_runtime_config(runtime.desired)
             del self._runtimes[name]
 
         self._desired = desired
@@ -330,9 +587,17 @@ class Supervisor:
             base=desired.supervisor.restart_backoff,
             maximum=desired.supervisor.restart_backoff_max,
         )
-        self._config_error = None
+        if compiled is not None:
+            self._config_error = None
         self._dirty = True
         self._wake.set()
+        if generation is not None and (
+            generation.id != self._active_id
+            or (self._activation is not None and self._activation.phase != "stable")
+        ):
+            # 换了世代要验证；同世代但上次验证失败（failed/rolled_back）也重试一次
+            self._begin_activation(generation, previous_id=self._active_id)
+        self._active_id = generation.id if generation is not None else None
         logger.info("配置已重载（generation=%s）", desired.generation)
         return True
 
@@ -343,6 +608,13 @@ class Supervisor:
             handle = await self._runner.start(service, instance_id=instance_id)
         except Exception as error:
             runtime.last_error = str(error)
+            if service.meta.restart == "never":
+                # 拉起就失败（例如 command 不存在）：restart=never 就不该反复重试
+                runtime.status = ServiceStatus.FAILED
+                runtime.restart_pending = False
+                self._dirty = True
+                logger.error("服务 %s 启动失败：%s", service.meta.name, error)
+                return
             runtime.status = ServiceStatus.BACKOFF
             runtime.consecutive_failures += 1
             runtime.next_start_at = now + self._backoff.delay(
@@ -534,8 +806,11 @@ class Supervisor:
                 config=redact_config(runtime.desired.config),
                 package_version=runtime.desired.package_version,
                 source_hash=runtime.desired.source_hash,
+                artifact_hash=runtime.desired.artifact_hash,
                 log_path=self._logs.path_for(name),
             )
+        current = self._generations.current()
+        latest_stable = self._generations.latest_stable()
         state = ActualState(
             generation=self._desired.generation,
             supervisor_pid=os.getpid(),
@@ -543,9 +818,13 @@ class Supervisor:
             updated_at=time.time(),
             config_error=self._config_error,
             services=services,
+            generation_id=current.id if current is not None else None,
+            last_stable_id=latest_stable.id if latest_stable is not None else None,
+            activation=self._activation,
             sdk=ActualSdk(
                 package_version=self._desired.sdk.package_version,
                 source_hash=self._desired.sdk.source_hash,
+                packages=self._desired.sdk.packages,
             ),
             contracts={
                 name: ActualContract(

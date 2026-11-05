@@ -24,8 +24,9 @@ from urllib.parse import urlparse
 import httpx
 from pydantic import BaseModel, ConfigDict, Field
 
-from blue.runtime import load_runtime_config, run_tool
+from blue.runtime import load_runtime_config
 from blue_service_web_search.parser import RawHit, parse_bing, unwrap_redirect
+from blue_tool_sdk import run_tool
 
 logger = logging.getLogger(__name__)
 

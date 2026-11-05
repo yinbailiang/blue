@@ -27,9 +27,6 @@ import sys
 from collections.abc import Sequence
 
 from blue_contracts_tool import (
-    EVENTS as TOOL_EVENTS,
-)
-from blue_contracts_tool import (
     CatalogQueryEvent,
     CatalogQueryResponse,
     CatalogReplyEvent,
@@ -75,7 +72,7 @@ def build_server(
     :param settings: 白名单 / 超时 / 握手信息。
     :param bus_url: 总线地址；缺省读 ``BLUE_BUS_URL``。
     """
-    runtime = build_runtime(MEMBER_ID, TOOL_EVENTS, url=bus_url)
+    runtime = build_runtime(MEMBER_ID, url=bus_url)
     return McpStdioServer(runtime=runtime, settings=settings)
 
 
@@ -112,7 +109,7 @@ def main(argv: Sequence[str] | None = None) -> int:
 
 async def _print_tools(bus_url: str | None, timeout: float) -> int:
     """把目录里可暴露的工具打到 stderr（stdout 留给协议）。"""
-    runtime = build_runtime(MEMBER_ID, TOOL_EVENTS, url=bus_url)
+    runtime = build_runtime(MEMBER_ID, url=bus_url)
     await runtime.start()
     try:
         response = await request(

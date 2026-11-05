@@ -29,9 +29,7 @@ from infinity_agent import ToolDefinition, ToolFunction
 from infinity_bus import EventBus
 
 from blue.control.backoff import Backoff
-from blue.subscribers.tool_call import ToolCallHandler
 from blue.transport import BusRuntime
-from blue.worker import ToolLease, ToolRegistrar
 from blue_service_mcp_bridge.client import (
     McpCallError,
     McpConnector,
@@ -50,6 +48,7 @@ from blue_service_mcp_bridge.config import (
     worker_id,
 )
 from blue_service_mcp_bridge.schema import convert_input_schema
+from blue_tool_sdk import ToolCallHandler, ToolLease, ToolRegistrar
 
 logger = logging.getLogger(__name__)
 

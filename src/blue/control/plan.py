@@ -15,6 +15,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 from difflib import unified_diff
 from typing import Any, Literal, cast
@@ -24,6 +25,7 @@ from infinity_data.emit import yaml_dump
 from blue.control.desired import redact_config
 from blue.control.model import (
     ActualState,
+    DesiredSdkPackage,
     DesiredService,
     DesiredState,
     ServiceMeta,
@@ -33,11 +35,15 @@ from blue.control.model import (
 __all__ = [
     "ContractChange",
     "PlanResult",
+    "SdkChange",
     "ServiceChange",
     "changed_contracts",
+    "changed_packages",
+    "changed_sdk_packages",
     "config_diff",
     "plan",
     "restart_reasons",
+    "sdk_changes",
 ]
 
 Action = Literal["create", "restart", "remove", "keep"]
@@ -78,6 +84,17 @@ class ContractChange:
 
 
 @dataclass(frozen=True)
+class SdkChange:
+    """单个 SDK 运行时包（``sdk/*``）的变更与受影响的服务。"""
+
+    name: str
+    action: Literal["create", "remove", "change"]
+    before: str = ""
+    after: str = ""
+    affected: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
 class PlanResult:
     """一次 apply 的完整预览。"""
 
@@ -85,6 +102,7 @@ class PlanResult:
     actual_generation: str | None
     services: tuple[ServiceChange, ...]
     contracts: tuple[ContractChange, ...]
+    sdk: tuple[SdkChange, ...] = ()
     note: str = ""
 
     @property
@@ -159,6 +177,7 @@ def restart_reasons(
     previous_version: str,
     changed_contracts: set[str],
     sdk_changed: bool = False,
+    changed_packages: set[str] | None = None,
 ) -> tuple[str, ...]:
     """判断一个服务为什么需要（重新）启动；返回空元组表示不用动。
 
@@ -179,13 +198,21 @@ def restart_reasons(
     if affected:
         reasons.append(f"依赖契约变化：{', '.join(affected)}")
     if sdk_changed:
-        # SDK 是每个服务的隐式运行时依赖（worker/runtime/transport 都在里面）
+        # blue 核心是每个服务的隐式运行时依赖（runtime/transport 都在里面）
         reasons.append("SDK 变化")
+    affected_packages = sorted(
+        set(current.meta.depends_sdk) & (changed_packages or set())
+    )
+    if affected_packages:
+        reasons.append(f"依赖 SDK 变化：{', '.join(affected_packages)}")
     return tuple(reasons)
 
 
 def sdk_changed(desired: DesiredState, actual: ActualState | None) -> bool:
-    """blue SDK 自身是否变了（它不进 depends_contracts，但每个服务都依赖它）。
+    """blue **核心**是否变了（它不进 depends_contracts，但每个服务都依赖它）。
+
+    ``sdk/*`` 运行时包不在这个判据里：它们只影响声明了 ``depends_sdk``
+    的服务，由 :func:`changed_sdk_packages` 单独判断。
 
     ``actual.sdk is None`` 说明快照是老格式写的——此时无法判断，按"变了"处理，
     宁可多重启一次也不要让服务悄悄跑旧代码。
@@ -196,6 +223,78 @@ def sdk_changed(desired: DesiredState, actual: ActualState | None) -> bool:
         actual.sdk.package_version,
         actual.sdk.source_hash,
     ) != (desired.sdk.package_version, desired.sdk.source_hash)
+
+
+def changed_packages(
+    previous: Mapping[str, DesiredSdkPackage] | None,
+    current: Mapping[str, DesiredSdkPackage],
+) -> set[str]:
+    """返回发生变化的 ``sdk/*`` 运行时包名。
+
+    :param previous: 上一份包指纹；``None`` 表示老快照/新增，按全部包都变了处理
+    """
+    if previous is None:
+        return set(current)
+    changes: set[str] = set()
+    for name, package in current.items():
+        old = previous.get(name)
+        if old is None or (
+            old.package_version,
+            old.source_hash,
+        ) != (package.package_version, package.source_hash):
+            changes.add(name)
+    changes.update(set(previous) - set(current))
+    return changes
+
+
+def changed_sdk_packages(desired: DesiredState, actual: ActualState | None) -> set[str]:
+    """从实际状态快照判断哪些运行时包变了。"""
+    return {change.name for change in sdk_changes(desired, actual)}
+
+
+def sdk_changes(
+    desired: DesiredState, actual: ActualState | None
+) -> tuple[SdkChange, ...]:
+    """返回 SDK 运行时包的变更（新增/删除/指纹变化）。
+
+    与契约变更一样，SDK 包自身不单独生效；真正重启的是
+    ``depends_sdk`` 里声明了它的服务（见 :func:`restart_reasons`）。
+    """
+    previous = actual.sdk.packages if actual is not None and actual.sdk else {}
+    affected = {
+        name: tuple(
+            sorted(
+                service_name
+                for service_name, service in desired.services.items()
+                if name in service.meta.depends_sdk
+            )
+        )
+        for name in set(previous) | set(desired.sdk.packages)
+    }
+    changes: list[SdkChange] = []
+    for name in sorted(set(previous) | set(desired.sdk.packages)):
+        old = previous.get(name)
+        new = desired.sdk.packages.get(name)
+        if old is None and new is not None:
+            changes.append(
+                SdkChange(name, "create", "", new.source_hash, affected[name])
+            )
+        elif new is None and old is not None:
+            changes.append(
+                SdkChange(name, "remove", old.source_hash, "", affected[name])
+            )
+        elif (
+            old is not None
+            and new is not None
+            and (old.package_version, old.source_hash)
+            != (new.package_version, new.source_hash)
+        ):
+            changes.append(
+                SdkChange(
+                    name, "change", old.source_hash, new.source_hash, affected[name]
+                )
+            )
+    return tuple(changes)
 
 
 def changed_contracts(
@@ -233,6 +332,8 @@ def plan(desired: DesiredState, actual: ActualState | None) -> PlanResult:
     services: list[ServiceChange] = []
 
     sdk_touched = sdk_changed(desired, actual)
+    sdk_package_changes = sdk_changes(desired, actual)
+    packages_touched = {change.name for change in sdk_package_changes}
     for name, service in sorted(desired.services.items()):
         previous = actual.services.get(name) if actual is not None else None
         if previous is None:
@@ -249,6 +350,7 @@ def plan(desired: DesiredState, actual: ActualState | None) -> PlanResult:
                 previous_version=previous.package_version,
                 changed_contracts=touched,
                 sdk_changed=sdk_touched,
+                changed_packages=packages_touched,
             )
         )
         if previous.status in _UNHEALTHY:
@@ -308,5 +410,6 @@ def plan(desired: DesiredState, actual: ActualState | None) -> PlanResult:
         actual_generation=actual.generation if actual is not None else None,
         services=tuple(services),
         contracts=contracts,
+        sdk=sdk_package_changes,
         note=note,
     )
