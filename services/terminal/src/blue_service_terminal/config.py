@@ -49,6 +49,11 @@ class TerminalConfig(BaseModel):
     cjk_font_path: str | None = Field(
         default=None, description="宽字符（中日韩）回退字体；null 表示自动探测"
     )
+    symbol_font_path: str | None = Field(
+        default=None,
+        description="符号回退字体（Nerd Font）：私用区图标（nvim 状态栏、Powerline）"
+        "靠它才画得出来；null 表示自动探测",
+    )
     isolate_rc: bool = Field(
         default=True,
         description="不加载用户的 shell rc（bash --norc / zsh --no-rcs），"

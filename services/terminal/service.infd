@@ -6,6 +6,7 @@
   rows: <int, range(5, 200)> = 30
   scrollback: <int, range(0, 10000)> = 2000
   font_path: <path?, any(?, extension("ttf", "otf", "ttc"))> = null
+  symbol_font_path: <path?, any(?, extension("ttf", "otf", "ttc"))> = null
   font_size: <int, range(8, 40)> = 15
   idle_ttl: <float, positive> = 1800.0
   background: <str, regex("(#?([0-9a-fA-F]{3}|[0-9a-fA-F]{6})|rgb:([0-9a-fA-F]{1,4}/){2}[0-9a-fA-F]{1,4})")> = "#0b1020"

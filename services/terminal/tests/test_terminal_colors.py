@@ -107,10 +107,19 @@ def _render(
     cells: list[list[CellStyle]] | None = None,
     background: str = DEFAULT_BACKGROUND,
     palette: dict[str, str] | None = None,
+    symbol_path: str | None = None,
 ) -> tuple[Image.Image, FrameGeometry]:
-    """渲染一张小图，返回图像与几何（用于按格子取像素）。"""
-    main_path, cjk_path = resolve_fonts("", "")
-    fonts = FontSet(main_path=main_path, cjk_path=cjk_path, size=15)
+    """渲染一张小图，返回图像与几何（用于按格子取像素）。
+
+    ``symbol_path=None`` 用自动探测到的符号字体，传 ``""`` 表示不用符号回退。
+    """
+    main_path, cjk_path, auto_symbol = resolve_fonts("", "")
+    fonts = FontSet(
+        main_path=main_path,
+        cjk_path=cjk_path,
+        symbol_path=auto_symbol if symbol_path is None else symbol_path,
+        size=15,
+    )
     geometry = geometry_for(cols=cols, rows=rows, font_path=main_path, font_size=15)
     blank = [[CellStyle(char=" ") for _ in range(cols)] for _ in range(rows)]
     content = cells if cells is not None else blank
@@ -118,6 +127,35 @@ def _render(
         content, geometry, fonts=fonts, background=background, palette=palette
     )
     return Image.open(io.BytesIO(png)).convert("RGB"), geometry
+
+
+def _cell_pixels(
+    image: Image.Image, geometry: FrameGeometry, col: int = 0, row: int = 0
+) -> bytes:
+    """截出某个格子的像素，用于比较"画出来的是什么"。"""
+    left = geometry.padding + col * geometry.cell_width
+    top = geometry.padding + row * geometry.cell_height
+    box = (left, top, left + geometry.cell_width, top + geometry.cell_height)
+    return image.crop(box).tobytes()
+
+
+def test_private_use_icon_uses_symbol_font() -> None:
+    r"""私用区图标（Nerd Font / Powerline）必须用符号字体画，不能是空心方块。
+
+    判据：同一个字符「有符号字体」和「没有符号字体」渲染出的像素必须不同——
+    相同就说明它退化成了 ``.notdef``。nvim 状态栏的 ``\uf487`` / ``\ue0b2``
+    都是这个坑。
+    """
+    _, _, symbol_path = resolve_fonts("", "")
+    if not symbol_path:
+        pytest.skip("本机没有 Nerd Font 符号字体")
+
+    cells = [[CellStyle(char="\uf487")]]
+
+    with_symbol, geometry = _render(cells=cells, symbol_path=None)
+    without_symbol, _ = _render(cells=cells, symbol_path="")
+
+    assert _cell_pixels(with_symbol, geometry) != _cell_pixels(without_symbol, geometry)
 
 
 def test_render_uses_configured_background() -> None:

@@ -101,9 +101,14 @@ def _fonts() -> FontSet:
     """当前字体组合（延迟解析，找不到就用内置字体）。"""
     global _fonts_cache
     if _fonts_cache is None:
-        main_path, cjk_path = resolve_fonts(_config.font_path, _config.cjk_font_path)
+        main_path, cjk_path, symbol_path = resolve_fonts(
+            _config.font_path, _config.cjk_font_path, _config.symbol_font_path
+        )
         _fonts_cache = FontSet(
-            main_path=main_path, cjk_path=cjk_path, size=_config.font_size
+            main_path=main_path,
+            cjk_path=cjk_path,
+            symbol_path=symbol_path,
+            size=_config.font_size,
         )
     return _fonts_cache
 

@@ -88,19 +88,38 @@ _CJK_GLOBS = (
     "*noto-fonts-cjk*/share/fonts/opentype/noto-cjk/NotoSansCJK-Regular.ttc",
 )
 
+_CANDIDATE_SYMBOL_FONTS = (
+    "/usr/share/fonts/truetype/NerdFonts/Symbols/SymbolsNerdFontMono-Regular.ttf",
+)
+"""符号回退字体：覆盖私用区（PUA）图标。"""
+
+_SYMBOL_GLOBS = (
+    # Nerd Font 的符号字体优先，退而求其次用带图标的等宽 Nerd 字体
+    "*nerd-fonts*/share/fonts/truetype/NerdFonts/Symbols/SymbolsNerdFontMono-Regular.ttf",
+    "*nerd-fonts-fira-code*/share/fonts/truetype/NerdFonts/FiraCode/FiraCodeNerdFontMono-Regular.ttf",
+)
+"""nvim / lualine 状态栏、Powerline 分隔符都画在私用区（U+E000–U+F8FF），
+普通等宽字体没有这些字形，会渲染成空心方块。"""
+
 
 def resolve_fonts(
-    configured: str | None = None, configured_cjk: str | None = None
-) -> tuple[str, str]:
-    """返回 ``(等宽主字体, CJK 回退字体)``；找不到时给空串（调用方回退内置字体）。
+    configured: str | None = None,
+    configured_cjk: str | None = None,
+    configured_symbol: str | None = None,
+) -> tuple[str, str, str]:
+    """返回 ``(等宽主字体, CJK 回退字体, 符号回退字体)``；找不到时给空串。
 
-    ``configured`` 为 ``None``（infd 里的 ``<path?>`` 没配）表示自动探测。
+    三个都不配（``None``，即 infd 里的 ``<path?>``）表示自动探测。
     """
-    return _pick(
-        configured or "",
-        _CANDIDATE_FONTS,
-        ("*dejavu*/share/fonts/truetype/DejaVuSansMono.ttf",),
-    ), _pick(configured_cjk or "", _CANDIDATE_CJK_FONTS, _CJK_GLOBS)
+    return (
+        _pick(
+            configured or "",
+            _CANDIDATE_FONTS,
+            ("*dejavu*/share/fonts/truetype/DejaVuSansMono.ttf",),
+        ),
+        _pick(configured_cjk or "", _CANDIDATE_CJK_FONTS, _CJK_GLOBS),
+        _pick(configured_symbol or "", _CANDIDATE_SYMBOL_FONTS, _SYMBOL_GLOBS),
+    )
 
 
 def _pick(configured: str, candidates: tuple[str, ...], globs: tuple[str, ...]) -> str:
@@ -123,11 +142,12 @@ def _pick(configured: str, candidates: tuple[str, ...], globs: tuple[str, ...]) 
 
 @dataclass(frozen=True)
 class FontSet:
-    """渲染用的字体组合：拉丁走等宽主字体，宽字符走 CJK 字体。"""
+    """渲染用的字体组合：拉丁走等宽主字体，宽字符走 CJK，私用区图标走符号字体。"""
 
     main_path: str
     cjk_path: str
     size: int
+    symbol_path: str = ""
 
     def main(self) -> ImageFont.FreeTypeFont | ImageFont.ImageFont:
         """主字体。"""
@@ -139,6 +159,12 @@ class FontSet:
             return None
         return _cjk_font(self.cjk_path, self.size)
 
+    def symbol(self) -> ImageFont.FreeTypeFont | ImageFont.ImageFont | None:
+        """符号字体：画私用区图标（没有就返回 ``None``，退回主字体画空心方块）。"""
+        if not self.symbol_path:
+            return None
+        return _symbol_font(self.symbol_path, self.size)
+
 
 @lru_cache(maxsize=8)
 def _font(path: str, size: int) -> ImageFont.FreeTypeFont | ImageFont.ImageFont:
@@ -149,6 +175,17 @@ def _font(path: str, size: int) -> ImageFont.FreeTypeFont | ImageFont.ImageFont:
         except OSError:
             pass
     return ImageFont.load_default(size=size)
+
+
+@lru_cache(maxsize=8)
+def _symbol_font(path: str, size: int) -> ImageFont.FreeTypeFont | None:
+    """加载符号字体（Nerd Font）：私用区图标靠它才画得出来。"""
+    if not path:
+        return None
+    try:
+        return ImageFont.truetype(path, size)
+    except OSError:
+        return None
 
 
 @lru_cache(maxsize=8)
@@ -192,6 +229,34 @@ def geometry_for(
     )
 
 
+def _is_private_use(char: str) -> bool:
+    """私用区码点：Nerd Font 图标与 Powerline 分隔符都落在这里。"""
+    if len(char) != 1:
+        return False
+    code = ord(char)
+    return (
+        0xE000 <= code <= 0xF8FF
+        or 0xF0000 <= code <= 0xFFFFD
+        or 0x100000 <= code <= 0x10FFFD
+    )
+
+
+def _choose_font(
+    char: str,
+    *,
+    main: ImageFont.FreeTypeFont | ImageFont.ImageFont,
+    cjk: ImageFont.FreeTypeFont | ImageFont.ImageFont | None,
+    symbol: ImageFont.FreeTypeFont | ImageFont.ImageFont | None,
+) -> ImageFont.FreeTypeFont | ImageFont.ImageFont:
+    """按字符挑字体：宽字符 → CJK，私用区 → 符号字体，其余 → 主字体。"""
+    if len(char) == 1:
+        if wcwidth.wcwidth(char) == 2 and cjk is not None:
+            return cjk
+        if symbol is not None and _is_private_use(char):
+            return symbol
+    return main
+
+
 def render_screen(
     cells: list[list[CellStyle]],
     geometry: FrameGeometry,
@@ -212,6 +277,7 @@ def render_screen(
     """
     font = fonts.main()
     cjk = fonts.cjk()
+    symbol = fonts.symbol()
     colors = ansi_palette(palette)
     image = Image.new("RGB", (geometry.width, geometry.height), background)
     draw = ImageDraw.Draw(image)
@@ -270,8 +336,7 @@ def render_screen(
                     fill=CURSOR_BG,
                 )
                 foreground_color = CURSOR_FG
-            wide = len(cell.char) == 1 and wcwidth.wcwidth(cell.char) == 2
-            chosen = cjk if (wide and cjk is not None) else font
+            chosen = _choose_font(cell.char, main=font, cjk=cjk, symbol=symbol)
             draw.text((left, top), cell.char, font=chosen, fill=foreground_color)
 
     buffer = io.BytesIO()

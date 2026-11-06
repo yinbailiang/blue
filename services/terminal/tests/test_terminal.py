@@ -192,8 +192,10 @@ def test_render_produces_png_of_expected_size() -> None:
     """渲染出来的 PNG 尺寸与几何一致，且带 PNG 魔数。"""
     from blue_service_terminal.session import CellStyle
 
-    main_path, cjk_path = resolve_fonts("", "")
-    fonts = FontSet(main_path=main_path, cjk_path=cjk_path, size=15)
+    main_path, cjk_path, symbol_path = resolve_fonts("", "")
+    fonts = FontSet(
+        main_path=main_path, cjk_path=cjk_path, symbol_path=symbol_path, size=15
+    )
     geometry = geometry_for(cols=40, rows=10, font_path=main_path, font_size=15)
     cells = [
         [CellStyle(char=("中文" if row == 0 and col < 2 else "x")) for col in range(40)]
