@@ -172,6 +172,8 @@ def _runtime_config_content(service: DesiredService, desired: DesiredState) -> s
             # 服务据此把自己的停机排空超时压在这个预算内——supervisor 到点就 SIGKILL，
             # 排空超时若比它大，未 ack 的消息会被 broker 重投（at-least-once）。
             "stop_timeout": service.meta.stop_timeout,
+            # 事件去重（业务不必自己写幂等）；去重库落在 state_dir/dedupe 下
+            "idempotency": True,
         },
     }
     return (

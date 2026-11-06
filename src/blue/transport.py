@@ -14,7 +14,7 @@ from __future__ import annotations
 import asyncio
 from abc import ABC, abstractmethod
 from collections.abc import Iterable
-from typing import Literal
+from typing import Literal, Protocol, runtime_checkable
 
 from infinity_bus import (
     Event,
@@ -24,9 +24,12 @@ from infinity_bus import (
     EventHandlerRegistry,
     EventQueue,
     EventRegistry,
+    MiddlewareChain,
     ShutdownConfig,
 )
-from infinity_bus.templates.queues import RabbitFanoutQueue
+from infinity_bus.templates import IdempotencyRecorder, RabbitFanoutQueue
+
+from blue.idempotency import IdempotencyMiddleware
 
 __all__ = [
     "BusRuntime",
@@ -58,6 +61,23 @@ def shutdown_config_for(drain_budget: float) -> ShutdownConfig:
     )
 
 
+@runtime_checkable
+class _ManagedRecorder(Protocol):
+    """带生命周期的幂等记录器（``SqliteIdempotencyRecorder`` 这类）。
+
+    ``IdempotencyRecorder`` 协议只约定 ``is_processed`` / ``mark_processed``，
+    内存版没有开闭钩子——所以这里单独探测，不能无脑调 ``start()``。
+    """
+
+    async def start(self) -> None:
+        """建立连接 / 建表。"""
+        ...
+
+    async def close(self) -> None:
+        """释放连接。"""
+        ...
+
+
 class BusRuntime(ABC):
     """总线成员运行时：统一事件注册、处理器注册与生命周期。
 
@@ -70,6 +90,7 @@ class BusRuntime(ABC):
         member_id: str,
         events: Iterable[type[EventDeclaration]],
         drain_timeout: float | None = None,
+        idempotency: IdempotencyRecorder | None = None,
     ) -> None:
         if not member_id.strip():
             raise ValueError("member_id 不能为空")
@@ -80,6 +101,7 @@ class BusRuntime(ABC):
         self._handlers = EventHandlerRegistry()
         self._bus: EventBus | None = None
         self._drain_timeout = drain_timeout
+        self._idempotency = idempotency
 
     def _shutdown_config(self) -> ShutdownConfig:
         """停机超时配置；未指定预算时沿用库默认值。"""
@@ -119,12 +141,22 @@ class BusRuntime(ABC):
         """打开队列并启动总线（幂等）。"""
         if self._bus is not None:
             return
+        chain = MiddlewareChain()
+        if self._idempotency is not None:
+            if isinstance(self._idempotency, _ManagedRecorder):
+                await self._idempotency.start()
+            await chain.add(
+                IdempotencyMiddleware(
+                    self._idempotency, consumer=self._member_id, handlers=self._handlers
+                )
+            )
         queue = await self._open_queue()
         bus = EventBus(
             self._events,
             self._handlers,
             queue=queue,
             shutdown=self._shutdown_config(),
+            middleware_chain=chain,
         )
         self._bus = bus
         try:
@@ -142,6 +174,10 @@ class BusRuntime(ABC):
                 await bus.stop()
         finally:
             await self._close_queue()
+            if self._idempotency is not None and isinstance(
+                self._idempotency, _ManagedRecorder
+            ):
+                await self._idempotency.close()
 
     @abstractmethod
     async def _open_queue(self) -> EventQueue:
@@ -163,9 +199,13 @@ class RabbitRuntime(BusRuntime):
         events: Iterable[type[EventDeclaration]],
         strategy: Literal["restart", "offline"] = "restart",
         drain_timeout: float | None = None,
+        idempotency: IdempotencyRecorder | None = None,
     ) -> None:
         super().__init__(
-            member_id=member_id, events=events, drain_timeout=drain_timeout
+            member_id=member_id,
+            events=events,
+            drain_timeout=drain_timeout,
+            idempotency=idempotency,
         )
         self._url = url
         self._strategy: Literal["restart", "offline"] = strategy

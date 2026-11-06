@@ -21,6 +21,7 @@ from pathlib import Path
 from typing import Any, Literal, TypeVar, cast
 
 from infinity_bus import EventDeclaration
+from infinity_bus.templates import SqliteIdempotencyRecorder
 from pydantic import BaseModel, ConfigDict, Field
 
 from blue.errors import RuntimeConfigError
@@ -151,6 +152,10 @@ class InfraConfig(BaseModel):
         default=10.0,
         gt=0,
         description="supervisor 给本服务的优雅停止预算（秒）；到点即 SIGKILL",
+    )
+    idempotency: bool = Field(
+        default=True,
+        description="是否启用事件去重（业务不必自己写幂等）",
     )
     registry_sweep_interval: float = Field(
         default=2.0, gt=0, description="工具租约巡检间隔（秒）"
@@ -375,6 +380,20 @@ def shutdown_drain_timeout() -> float:
     return max(1.0, budget - 2.0)
 
 
+def idempotency_recorder() -> SqliteIdempotencyRecorder | None:
+    """按配置创建事件去重记录器；关闭时返回 ``None``。
+
+    库存在 ``state_dir`` 下、按服务名分文件：去重表跟着服务走，``restart`` 之后
+    还能认出「这条已经处理过」——而进程内集合做不到，重复恰恰发生在重启之后。
+    """
+    infra = load_infra_config()
+    if not infra.idempotency:
+        return None
+    directory = infra.state_dir.expanduser().resolve() / "dedupe"
+    directory.mkdir(parents=True, exist_ok=True)
+    return SqliteIdempotencyRecorder(str(directory / f"{service_name()}.sqlite"))
+
+
 def build_runtime(
     role: str | None = None,
     events: Iterable[type[EventDeclaration]] | None = None,
@@ -405,6 +424,7 @@ def build_runtime(
         events=declarations,
         strategy=strategy,
         drain_timeout=shutdown_drain_timeout(),
+        idempotency=idempotency_recorder(),
     )
 
 
