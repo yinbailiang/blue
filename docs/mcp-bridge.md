@@ -226,5 +226,3 @@ tools/call now → {"content": [{"type": "text", "text": "{\n  \"iso\": \"2026-1
 tools/call run_shell → {"code": -32602, "message": "工具 'run_shell' 未在 expose 白名单中"}
 exit code → 0（stdout 只有协议帧，日志全在 stderr）
 ```
-
-
