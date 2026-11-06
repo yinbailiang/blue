@@ -394,13 +394,19 @@ def idempotency_recorder() -> SqliteIdempotencyRecorder | None:
     return SqliteIdempotencyRecorder(str(directory / f"{service_name()}.sqlite"))
 
 
+SHUTDOWN_INTENT_FILENAME = "shutdown-intent.json"
+"""下线意图文件名：supervisor 在 down 前写，服务停机时读一次即删。"""
+
+
 def shutdown_intent_path() -> Path:
     """下线意图文件路径：supervisor 在 ``blue down`` 前写，服务停机时读一次即删。
 
     用文件而不是信号传递「这次是下线」——文件写完后 supervisor 才发 ``SIGTERM``，
     可见性由内核保证，不依赖两个信号在事件循环里的处理顺序。
     """
-    return load_infra_config().state_dir.expanduser().resolve() / "shutdown-intent.json"
+    return (
+        load_infra_config().state_dir.expanduser().resolve() / SHUTDOWN_INTENT_FILENAME
+    )
 
 
 def build_runtime(
@@ -419,9 +425,10 @@ def build_runtime(
     ``strategy`` 决定停机时的队列语义，默认 ``restart``：停机只停消费、保留绑定
     与积压，重启后**补投**——重启期间发布的消息不会丢。
 
-    真正下线（``blue down``）时 supervisor 会先给本进程发 ``SIGUSR2``，运行时
-    收到后把策略切成 ``offline``（解绑 + 排空，不留积压），见
-    :meth:`RabbitRuntime.set_shutdown_strategy`。
+    真正下线（``blue down``）时 supervisor 会先写一份下线意图文件
+    （见 :func:`shutdown_intent_path`），运行时在 ``bus.stop()`` 之前读到它就把策略
+    切成 ``offline``（解绑 + 排空，不留积压）。用文件而不是信号：文件写完才发
+    ``SIGTERM``，可见性由内核保证，不必赌两个信号的处理顺序。
 
     ``role`` 缺省取服务名；``events`` 缺省按服务配置里的 ``depends_contracts``
     自动扫描各契约包的 ``EVENTS``——服务代码不再手写事件列表。传入 ``events``

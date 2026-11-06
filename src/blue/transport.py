@@ -242,7 +242,7 @@ class RabbitRuntime(BusRuntime):
         return queue
 
     def set_shutdown_strategy(self, strategy: Literal["restart", "offline"]) -> None:
-        """切换停机策略（``blue down`` 前由 supervisor 经 ``SIGUSR2`` 触发）。
+        """切换停机策略（``blue down`` 前由 supervisor 写下线意图文件触发）。
 
         ``infinity_bus`` 没有提供运行时切换——``RabbitFanoutQueue`` 在构造时就把
         ``_strategy`` 固定了，而 :meth:`EventQueue.join` 只在停机那一刻读它。所以

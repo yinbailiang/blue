@@ -42,10 +42,11 @@ from blue.control.process import signal_tree
 from blue.control.runner import ProcessHandle, ProcessRunner
 from blue.control.state import StateStore
 from blue.errors import BlueError, ConfigError
-from blue.runtime import DEFAULT_RUNTIME_CONFIG, RUNTIME_CONFIG_VERSION
-
-INTENT_FILENAME = "shutdown-intent.json"
-"""下线意图文件名：supervisor 在 down 前写，服务停机时读一次即删。"""
+from blue.runtime import (
+    DEFAULT_RUNTIME_CONFIG,
+    RUNTIME_CONFIG_VERSION,
+    SHUTDOWN_INTENT_FILENAME,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -213,7 +214,7 @@ class Supervisor:
         返回是否写成功。写失败不要紧：服务会按 ``restart`` 处理——积压留下而不是
         丢消息，这个降级方向是安全的。
         """
-        path = self._desired.supervisor.state_dir / INTENT_FILENAME
+        path = self._desired.supervisor.state_dir / SHUTDOWN_INTENT_FILENAME
         try:
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(
