@@ -72,6 +72,12 @@ _QUERY = re.compile(
 )
 """程序发来的终端查询。终端必须应答，否则程序会等到超时（nvim 的 E1568）。"""
 
+_PARTIAL_QUERY = re.compile(rb"\x1b(?:\[[0-9;?]*|\][0-9;]*)?$")
+"""末尾可能是被切开的查询前缀：留到下一个 chunk 拼起来再匹配。"""
+
+MAX_PENDING_QUERY = 64
+"""跨块残片的长度上限：我们的查询最长 7 字节，更长的必然是噪声。"""
+
 _SGR_COLON = re.compile(rb"\x1b\[([0-9;:]*:[0-9;:]*)m")
 """含冒号的 SGR（ISO-8613-6 的 ``38:2::r:g:b`` 写法）。"""
 
@@ -241,6 +247,8 @@ class TerminalSession:
         self.foreground = foreground
         self.respond_to_queries = respond_to_queries
         self._raw: deque[int] = deque(maxlen=RAW_TAIL_BYTES)
+        # 上一块末尾可能是被切开的查询前缀，拼到下一块再匹配
+        self._query_pending = b""
         self._screen = pyte.HistoryScreen(cols, rows, history=scrollback)
         self._stream = pyte.ByteStream(self._screen)
         self._read_task: asyncio.Task[None] | None = None
@@ -332,20 +340,29 @@ class TerminalSession:
             self._answer_queries(chunk)
 
     def _answer_queries(self, chunk: bytes) -> None:
-        """应答程序发出的终端查询；不应答会让 nvim 之类等到超时报 E1568。"""
+        """应答程序发出的终端查询；不应答会让 nvim 之类等到超时报 E1568。
+
+        ``os.read`` **不按转义序列对齐**：``ESC ] 11 ; ? BEL`` 完全可能被切成两个
+        chunk（实测能稳定复现）。所以上一块末尾的残片要留到这一块拼起来再匹配，
+        否则那条查询一条也匹配不到——nvim 就报 E1568。
+        """
         if not self.respond_to_queries:
             return
+        data = self._query_pending + chunk
+        self._query_pending = b""
         replies = [
             reply
-            for match in _QUERY.finditer(chunk)
+            for match in _QUERY.finditer(data)
             if (reply := self._query_reply(match))
         ]
-        if not replies:
-            return
-        try:
-            self._write_bytes(b"".join(replies))
-        except TimeoutError, SessionNotFoundError:
-            logger.debug("终端 %s 的查询应答写入失败（已忽略）", self.session_id)
+        if replies:
+            try:
+                self._write_bytes(b"".join(replies))
+            except TimeoutError, SessionNotFoundError:
+                logger.debug("终端 %s 的查询应答写入失败（已忽略）", self.session_id)
+        partial = _PARTIAL_QUERY.search(data)
+        if partial is not None and len(partial.group(0)) <= MAX_PENDING_QUERY:
+            self._query_pending = partial.group(0)
 
     def _query_reply(self, match: re.Match[bytes]) -> bytes:
         """按查询类型给出应答；不认识的返回空字节。"""
