@@ -14,6 +14,7 @@ from blue.control.artifacts import (
     ArtifactRef,
     ArtifactStore,
     artifact_hash,
+    editable_installs,
     venv_site_packages,
 )
 from blue.control.model import (
@@ -423,3 +424,83 @@ def test_manifest_is_json_readable(tmp_path: Path, fake_uv: _FakeUv) -> None:
             "interpreter",
         ]
     )
+
+
+def _mark_editable(site: Path, name: str, target: Path) -> None:
+    """写一份 PEP 610 的 editable 记录（真实 uv/pip 装 editable 时就是这么落盘的）。"""
+    dist_info = site / f"{name}-6.2.0.dist-info"
+    dist_info.mkdir(parents=True, exist_ok=True)
+    (dist_info / "direct_url.json").write_text(
+        json.dumps({"url": target.as_uri(), "dir_info": {"editable": True}}),
+        encoding="utf-8",
+    )
+
+
+def test_editable_install_outside_workspace_is_detected(tmp_path: Path) -> None:
+    """工作区外的 editable 依赖必须被扫出来——它的内容没法固化进产物。"""
+    venv = _workspace_venv(tmp_path)
+    site = venv_site_packages(venv)
+    upstream = tmp_path.parent / "upstream_src"
+    upstream.mkdir(exist_ok=True)
+    _mark_editable(site, "infinity_bus", upstream)
+
+    found = editable_installs(site, project_root=tmp_path)
+
+    assert found == [("infinity_bus", upstream)]
+
+
+def test_editable_install_inside_workspace_is_allowed(tmp_path: Path) -> None:
+    """工作区成员也是 editable 安装，但它们以 wheel 装进产物，不该拦。"""
+    venv = _workspace_venv(tmp_path)
+    site = venv_site_packages(venv)
+    _mark_editable(site, "blue_tool_sdk", tmp_path / "sdk" / "tool")
+
+    assert editable_installs(site, project_root=tmp_path) == []
+
+
+def test_egg_link_counts_as_editable(tmp_path: Path) -> None:
+    """老式 setuptools 的 ``.egg-link`` 同样是 editable 标记，不能漏。"""
+    venv = _workspace_venv(tmp_path)
+    site = venv_site_packages(venv)
+    upstream = tmp_path.parent / "legacy_src"
+    upstream.mkdir(exist_ok=True)
+    (site / "legacy.egg-link").write_text(f"{upstream}\n.\n", encoding="utf-8")
+
+    assert editable_installs(site, project_root=tmp_path) == [("legacy", upstream)]
+
+
+def test_reject_editable_installs_names_the_package_and_the_fix(tmp_path: Path) -> None:
+    """报错要能直接照着做：包名、路径、两条处理办法都要在里面。"""
+    venv = _workspace_venv(tmp_path)
+    site = venv_site_packages(venv)
+    upstream = tmp_path.parent / "upstream_src"
+    upstream.mkdir(exist_ok=True)
+    _mark_editable(site, "infinity_bus", upstream)
+
+    with pytest.raises(SupervisorError) as caught:
+        _store(tmp_path).reject_editable_installs()
+
+    message = str(caught.value)
+    assert "infinity_bus" in message
+    assert str(upstream) in message
+    assert "uv sync" in message and "uv build" in message
+
+
+def test_ensure_base_rejects_editable_install(tmp_path: Path) -> None:
+    """克隆 base 之前就失败——不给"少一个模块的 base"落盘的机会。"""
+    venv = _workspace_venv(tmp_path)
+    site = venv_site_packages(venv)
+    upstream = tmp_path.parent / "upstream_src"
+    upstream.mkdir(exist_ok=True)
+    _mark_editable(site, "infinity_bus", upstream)
+
+    store = _store(tmp_path)
+    with pytest.raises(SupervisorError, match="editable 安装"):
+        store.ensure_base(_desired(tmp_path))
+    # 失败得干净：base 目录一个都不该留下
+    assert not list((tmp_path / ".blue" / "artifacts" / "_base").glob("*"))
+
+
+def test_reject_editable_installs_tolerates_missing_venv(tmp_path: Path) -> None:
+    """没有开发用 .venv 时不该在这里报错（该由 _workspace_venv 说出更准的话）。"""
+    _store(tmp_path).reject_editable_installs()

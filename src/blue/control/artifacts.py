@@ -22,6 +22,8 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import cast
+from urllib.parse import urlparse
+from urllib.request import url2pathname
 
 from blue.control.model import DesiredService, DesiredState
 from blue.errors import SupervisorError
@@ -30,6 +32,7 @@ __all__ = [
     "ArtifactRef",
     "ArtifactStore",
     "artifact_hash",
+    "editable_installs",
     "venv_site_packages",
 ]
 
@@ -46,11 +49,15 @@ _SKIP_SITE_PACKAGES = frozenset({"pip", "setuptools", "wheel", "__pycache__"})
 """这些不该进共享 base：产物用 ``python -m`` 启动，不需要打包工具。"""
 
 _SKIP_PREFIXES = ("blue", "_virtualenv")
+
 """workspace 包在开发用 venv 里是 ``*.pth`` 指针 + dist-info，绝不能进 base。
 
 它们必须以 wheel 形式装进每个产物，否则产物会"借用"工作区源码——那正是我们要
 消灭的可变依赖。
 """
+
+_DIRECT_URL_RECORD = "direct_url.json"
+"""PEP 610 的安装来源记录；``dir_info.editable`` 是"这是 editable 安装"的权威判据。"""
 
 
 @dataclass(frozen=True)
@@ -216,13 +223,46 @@ class ArtifactStore:
         self._build(service, desired, ref)
         return ref
 
+    def reject_editable_installs(self, site_packages: Path | None = None) -> None:
+        """拒绝工作区之外的 editable 安装——它们的内容无法被产物固化。
+
+        ``site_packages`` 缺省时扫描开发用 ``.venv``；该 venv 不存在就直接放行
+        （此时并没有东西可扫，真需要它时 :meth:`_workspace_venv` 会给出更准的报错）。
+
+        :raises SupervisorError: 存在工作区外的 editable 安装
+        """
+        if site_packages is None:
+            workspace_venv = self._project_root / ".venv"
+            if not (workspace_venv / "lib").is_dir():
+                return
+            site_packages = venv_site_packages(workspace_venv)
+        found = editable_installs(site_packages, project_root=self._project_root)
+        if not found:
+            return
+        lines = [
+            "检测到工作区之外的 editable 安装，产物无法固化它们的代码：",
+            *(f"  - {name} → {target}" for name, target in found),
+            "",
+            "editable 依赖在 base 里只有两种下场，都不能接受：",
+            "  1. .pth 指针被跳过 → base 缺模块，服务启动即 ImportError；",
+            "  2. 保留指针 → 产物跟着上游源码漂移，artifact_hash 与内容脱钩。",
+            "",
+            "处理办法（二选一）：",
+            "  - 已发版：删掉 [tool.uv.sources] 的 path 条目，再 uv sync；",
+            "  - 未发版：uv build 出 wheel，放进 .blue/wheels 走 --find-links。",
+        ]
+        raise SupervisorError("\n".join(lines))
+
     def ensure_base(self, desired: DesiredState) -> Path:
         """确保共享依赖 base 存在；返回它的 ``site-packages`` 目录。
 
         base 由开发用 ``.venv`` 硬链接克隆而来（排除 workspace 包），按
         ``uv.lock`` 指纹命名：依赖不变就一直复用，变了就克隆一份新的。
 
-        :raises SupervisorError: ``.venv`` 缺失或克隆失败
+        克隆前先扫一遍 editable 安装：工作区之外的 editable 依赖无法固化，宁可
+        在这里失败，也不要让 base 里悄悄少一个模块。
+
+        :raises SupervisorError: ``.venv`` 缺失、含工作区外 editable 安装或克隆失败
         """
         key = desired.deps_hash or "nolock"
         base = self.base_root / key
@@ -232,6 +272,7 @@ class ArtifactStore:
 
         workspace_venv = self._workspace_venv()
         source = venv_site_packages(workspace_venv)
+        self.reject_editable_installs(source)
         self._warn_if_cross_device(source, self.base_root)
         staging = base.with_name(f"{base.name}.tmp-{os.getpid()}")
         shutil.rmtree(staging, ignore_errors=True)
@@ -458,6 +499,98 @@ def _skip_site_packages_entry(name: str) -> bool:
     if name.startswith(_SKIP_PREFIXES):
         return True
     return name.endswith(".pth")
+
+
+def editable_installs(
+    site_packages: Path, *, project_root: Path
+) -> list[tuple[str, Path]]:
+    """扫描 ``site-packages``，返回**工作区之外**的 editable 安装。
+
+    判据是 PEP 610 的 ``<dist-info>/direct_url.json``（``dir_info.editable = true``），
+    外加老式 setuptools 的 ``*.egg-link``——这两个是"这里是 editable 安装"的明确
+    记录。**不**按 ``.pth`` 文件名去猜：各家工具的命名不一样，而普通 ``.pth``
+    本身也是合法文件。
+
+    工作区内的 editable 安装不算问题：uv workspace 成员会以 **wheel** 形式装进每个
+    产物，:func:`_skip_site_packages_entry` 也保证它们的指针不落进共享 base。
+
+    工作区**之外**的 editable 依赖则无法固化，而且两种下场都不可接受：
+
+    1. 它的 ``.pth`` 指针被跳过 → base 里没有这个模块，服务启动即 ``ImportError``；
+    2. 保留指针 → 产物跟着上游工作区源码漂移，``artifact_hash`` 与实际内容脱钩。
+
+    所以调用方应当直接失败，而不是让"少一个模块"静默发生。
+
+    :param site_packages: 开发用 venv 的 ``site-packages`` 目录
+    :param project_root: 项目根；落在这个目录内的 editable 安装视为工作区成员
+    :return: ``[(包名, 目标目录), ...]``，按包名排序
+    """
+    found: list[tuple[str, Path]] = []
+    if not site_packages.is_dir():
+        return found
+    for dist_info in sorted(site_packages.glob("*.dist-info")):
+        record = dist_info / _DIRECT_URL_RECORD
+        try:
+            data = json.loads(record.read_text(encoding="utf-8"))
+        except OSError, ValueError:
+            continue
+        if not isinstance(data, dict):
+            continue
+        payload = cast(dict[str, object], data)
+        dir_info = payload.get("dir_info")
+        if not isinstance(dir_info, dict):
+            continue
+        if not cast(dict[str, object], dir_info).get("editable"):
+            continue
+        target = _url_to_path(str(payload.get("url") or ""))
+        if target is None or _is_within(target, project_root):
+            continue
+        found.append((_distribution_name(dist_info), target))
+    for egg_link in sorted(site_packages.glob("*.egg-link")):
+        target = _egg_link_target(egg_link)
+        if target is None or _is_within(target, project_root):
+            continue
+        found.append((egg_link.name.removesuffix(".egg-link"), target))
+    found.sort()
+    return found
+
+
+def _distribution_name(dist_info: Path) -> str:
+    """``infinity_bus-6.2.0.dist-info`` → ``infinity_bus``。
+
+    版本号里不会出现 ``-``（PEP 440 的本地版本用 ``+``），所以从右切一次即可，
+    不会把 ``infinity-bus`` 这种带横线的包名切坏。
+    """
+    return dist_info.name.removesuffix(".dist-info").rsplit("-", 1)[0]
+
+
+def _url_to_path(url: str) -> Path | None:
+    """PEP 610 的 ``file://`` URL → 本地路径；非本地 URL 返回 ``None``。"""
+    parsed = urlparse(url)
+    if parsed.scheme != "file":
+        return None
+    return Path(url2pathname(parsed.path))
+
+
+def _egg_link_target(egg_link: Path) -> Path | None:
+    """``*.egg-link`` 的首行是源码目录（setuptools 的旧式 editable 标记）。"""
+    try:
+        lines = egg_link.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return None
+    for line in lines:
+        if line.strip():
+            return Path(line.strip())
+    return None
+
+
+def _is_within(path: Path, root: Path) -> bool:
+    """``path`` 是否落在 ``root`` 之内（解析符号链接后比较）。"""
+    try:
+        path.resolve().relative_to(root.resolve())
+    except OSError, ValueError:
+        return False
+    return True
 
 
 def _install_targets(service: DesiredService, desired: DesiredState) -> list[str]:

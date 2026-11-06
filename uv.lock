@@ -266,7 +266,7 @@ dev = [
 requires-dist = [
     { name = "infinity-agent", specifier = ">=0.3.0" },
     { name = "infinity-agent-kit", specifier = ">=1.0.0" },
-    { name = "infinity-bus", extras = ["templates"], specifier = ">=6.0.0" },
+    { name = "infinity-bus", extras = ["templates"], specifier = ">=6.2.0" },
     { name = "infinity-data", extras = ["tool"], specifier = ">=3.3.0" },
 ]
 
@@ -993,14 +993,14 @@ wheels = [
 
 [[package]]
 name = "infinity-bus"
-version = "6.0.0"
+version = "6.2.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "pydantic" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/99/10/68d40c62323d83ff9ae9c3311d0776a25df80ac6d13d28c783d09a914142/infinity_bus-6.0.0.tar.gz", hash = "sha256:cd6c8385941ef4cfbf6c5496860f904e9300d649dd65eac89e1b58e5428d0da6", size = 68966, upload-time = "2026-10-12T06:31:15.674Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/73/53/e7a5ca6d9db84676762059d39c66bc0ce872f8333d998237f934c4da801c/infinity_bus-6.2.0.tar.gz", hash = "sha256:c95c71c1ee5cb402961ee1e113a85adb3a703c6975574111176f8ddd7a853ca0", size = 76523, upload-time = "2026-11-06T15:02:14.702Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/69/4f/06b397f60791945b2dd7f472a8ae061232cc4599f7b28185c39f6796926b/infinity_bus-6.0.0-py3-none-any.whl", hash = "sha256:21876f4a1cdd095d03ad25edd132a4407c180c7127e8ab9c75da27d2e1315f67", size = 78173, upload-time = "2026-10-12T06:31:14.35Z" },
+    { url = "https://files.pythonhosted.org/packages/31/66/45df179b42a516a58c10163880e6edd382ce9c5a0a9f3ebd9481ffcb972c/infinity_bus-6.2.0-py3-none-any.whl", hash = "sha256:abc41509b6f97a5fb0c36deec07a52fe6ad8a083acbdb0b8134ddcc1c84d5221", size = 84978, upload-time = "2026-11-06T15:02:13.431Z" },
 ]
 
 [package.optional-dependencies]

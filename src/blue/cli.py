@@ -363,6 +363,9 @@ def _prepare_generation(
     desired = load_desired(config_path)
     artifacts = _artifact_store(desired)
     if build:
+        # 先扫 editable：工作区外的 editable 依赖无法固化进产物，宁可在这里拒绝
+        # apply，也不要让 base 里悄悄少一个模块、等 18 个服务一起 ImportError。
+        artifacts.reject_editable_installs()
         _build_artifacts(desired, artifacts)
     generation = _generation_store(desired).create(
         desired,

@@ -13,8 +13,37 @@ from pathlib import Path
 import pytest
 from infinity_bus import EventDeclaration, EventQueue
 
-from blue.idempotency import SqliteDedupeRecorder
 from blue.transport import BusRuntime
+
+
+class _SpyRecorder:
+    """记录 start/close 次数的假记录器（扮演库的 SqliteIdempotencyRecorder）。"""
+
+    def __init__(self) -> None:
+        self.started = 0
+        self.closed = 0
+
+    async def start(self) -> None:
+        """计数 +1。"""
+        self.started += 1
+
+    async def close(self) -> None:
+        """计数 +1。"""
+        self.closed += 1
+
+    async def is_processed(self, consumer: str, event_id: str) -> bool:
+        """永远返回「未处理」（本测试不关心去重语义）。"""
+        return False
+
+    async def mark_processed(self, consumer: str, event_id: str) -> None:
+        """空实现。"""
+
+    async def claim(self, consumer: str, event_id: str) -> bool:
+        """永远认领成功（本测试只关心生命周期）。"""
+        return True
+
+    async def release(self, consumer: str, event_id: str) -> None:
+        """空实现。"""
 
 
 class _BrokenRuntime(BusRuntime):
@@ -25,7 +54,7 @@ class _BrokenRuntime(BusRuntime):
         *,
         member_id: str,
         events: Iterable[type[EventDeclaration]],
-        idempotency: SqliteDedupeRecorder,
+        idempotency: _SpyRecorder,
     ) -> None:
         super().__init__(member_id=member_id, events=events, idempotency=idempotency)
 
@@ -38,16 +67,16 @@ class _BrokenRuntime(BusRuntime):
 
 
 def test_start_failure_closes_dedupe_recorder(tmp_path: Path) -> None:
-    """``start()`` 失败后去重连接必须已关闭（用公开行为断言，不摸私有字段）。"""
+    """``start()`` 失败后去重连接必须已关闭（否则下次打开要回放 WAL）。"""
 
     async def run() -> None:
-        recorder = SqliteDedupeRecorder(tmp_path / "dedupe.sqlite")
+        recorder = _SpyRecorder()
         runtime = _BrokenRuntime(member_id="m", events=[], idempotency=recorder)
 
         with pytest.raises(RuntimeError, match="broker"):
             await runtime.start()
 
-        with pytest.raises(RuntimeError, match="start"):
-            await recorder.is_processed("m", "evt-1")
+        assert recorder.started == 1, "记录器应当先于队列被打开"
+        assert recorder.closed == 1, "启动失败也必须关掉记录器"
 
     asyncio.run(run())

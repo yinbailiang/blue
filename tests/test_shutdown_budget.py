@@ -99,7 +99,12 @@ def test_running_handler_survives_shutdown() -> None:
 
 
 def test_tasks_timeout_gets_the_bulk_of_budget() -> None:
-    """大头给 ``tasks_timeout``（等处理器），``queue.join`` 只留零头（等派发）。"""
+    """大头给 ``tasks_timeout``：``join()`` 只等「事件全部启动」，等收尾的是它。
+
+    6.1 起 ``task_done()``（= ack）在该事件**所有处理器任务都获得执行权**之后就发，
+    所以 ``queue.join()`` 与处理器跑多久无关，只需一个零头；真正等处理器收尾的是
+    ``tasks_timeout``。这条方向跟着库的 ack 语义走（见 ``shutdown_config_for`` 注释）。
+    """
     config = shutdown_config_for(8.0)
 
     assert config.tasks_timeout > config.queue_timeout_max

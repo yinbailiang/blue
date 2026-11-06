@@ -28,10 +28,19 @@ from blue.transport import SHUTDOWN_INTENT_TTL, RabbitRuntime
 
 
 class _FakeQueue:
-    """只带 ``_strategy`` 字段的假队列（模拟 RabbitFanoutQueue 的内部实现）。"""
+    """带公开 ``strategy`` / ``set_strategy()`` 的假队列（对齐 6.2 的队列 API）。"""
 
     def __init__(self) -> None:
         self._strategy = "restart"
+
+    @property
+    def strategy(self) -> str:
+        """当前停机策略。"""
+        return self._strategy
+
+    def set_strategy(self, strategy: str) -> None:
+        """切换停机策略。"""
+        self._strategy = strategy
 
 
 def _runtime(member: str, intent: Path) -> RabbitRuntime:
@@ -46,7 +55,8 @@ def _runtime(member: str, intent: Path) -> RabbitRuntime:
 
 
 def _strategy_of(runtime: RabbitRuntime) -> str:
-    return cast(str, vars(cast(Any, runtime)._queue)["_strategy"])
+    """读假队列的公开 ``strategy``（与 blue 实际走的是同一条路径）。"""
+    return cast(str, cast(Any, runtime)._queue.strategy)
 
 
 def _write_intent(path: Path, *, ts: float | None = None) -> None:
@@ -91,12 +101,12 @@ def test_set_shutdown_strategy_updates_queue_field() -> None:
     assert vars(queue)["_strategy"] == "offline"
 
 
-def test_real_queue_still_exposes_strategy_field() -> None:
-    """守卫：切策略依赖库的私有字段 ``_strategy``，库改名字必须让测试变红。
+def test_real_queue_exposes_public_strategy_api() -> None:
+    """守卫：切策略用的是库的公开接口，库改名/移除必须让测试变红。
 
-    上面几条用的是 ``_FakeQueue``，它自带 ``_strategy``，所以只能验证"改字段"这个
-    动作，验证不了"库还有这个字段"。这里拿真的 ``RabbitFanoutQueue``（不连 broker，
-    只构造）再确认一遍；库升级改名时这条会失败，而不是线上静默退回 ``restart``。
+    上面几条用的是 ``_FakeQueue``，它自带 ``_strategy``（模拟 6.0 的老实现），只能
+    验证降级路径。这里拿真的 ``RabbitFanoutQueue``（不连 broker，只构造）确认公开
+    API 还在；库改了名这条会失败，而不是线上静默退回 ``restart``。
     """
     queue = RabbitFanoutQueue(
         None, None, None, None, "guard.member", EventCodec(), "restart"
@@ -106,13 +116,14 @@ def test_real_queue_still_exposes_strategy_field() -> None:
     )
     cast(Any, runtime)._queue = queue
 
-    assert hasattr(queue, "_strategy"), (
-        "库不再暴露 _strategy：set_shutdown_strategy 会静默失效"
+    assert hasattr(queue, "set_strategy"), (
+        "库不再暴露 set_strategy：运行时切换停机策略会静默失效"
     )
+    assert queue.strategy == "restart"
 
     runtime.set_shutdown_strategy("offline")
 
-    assert cast(str, vars(queue)["_strategy"]) == "offline"
+    assert queue.strategy == "offline"
 
 
 def test_memory_runtime_accepts_strategy_switch() -> None:

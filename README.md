@@ -735,12 +735,21 @@ rabbitmqctl -n blue@<host> -p blue list_queues name consumers messages message_b
 
   | 总线超时 | 等的是什么 |
   |---|---|
-  | `queue_timeout_*` | `queue.join()`：已投递的消息**派发完**（只占预算零头） |
+  | `queue_timeout_*` | `queue.join()`：**事件全部派发完成**（= 每个事件的处理器任务都拿到执行权），只占零头 |
   | `tasks_timeout` | `_wait_all_tasks_done()`：**正在跑的处理器**收尾（占预算大头） |
 
-  两个不能反：`task_done()`（= `basic_ack`）是在派发之后就调的，等处理器收尾的是
-  `tasks_timeout`；把它压到 1 秒等于让在跑的处理器被取消，而它的消息早已 ack——
-  **不会重投，是静默丢掉**。
+  ack 的时机决定了这个方向：`task_done()`（= `basic_ack`）在「该事件所有处理器任务都
+  获得执行权」之后就发（`_DispatchFence`），所以 `join()` 与处理器跑多久无关——只等
+  「启动」；真正等收尾的是 `tasks_timeout`。**这条方向跟着库的 ack 语义走**（历史上
+  翻过两次），改库语义时必须同步改 `shutdown_config_for()`，
+  `tests/test_shutdown_budget.py` 里的方向断言就是哨兵。
+- **派发放弃时不 ack**：停机时还有处理器从未获得执行权的事件，总线走
+  `queue.task_abandoned()`——不 ack，持久队列在通道关闭时重投（真正的 at-least-once）。
+  中间件同时收到 `on_dispatch_abandoned` 清掉派发跟踪；认领只写在处理器启动时，没起来
+  的处理器本来就没有记录可撤回（见「事件去重」）。
+- **失败不再触发重投**：ack 在「启动」时就发了，处理器之后再失败也不会重投——
+  失败由 `TaskErrorEvent` 上报。代价是没有 nack/DLQ：需要重试就在业务侧做
+  （`release` + 重发重试事件）。
 - **按依赖分层倒序停，层内并发**：`dependency_levels()` 把服务按 `depends_on`
   算成层级，停机从高层往低层走，同一层之间没有依赖关系，一起停（`asyncio.gather`）。
   依赖别人的先停、被别人依赖的后停——bus 永远在最后一层，所以前面那些服务收尾时
@@ -757,18 +766,35 @@ rabbitmqctl -n blue@<host> -p blue list_queues name consumers messages message_b
   所以开局只记 info（含波次与上界）；某一波真的只剩不足该层最慢服务的 `stop_timeout`
   时才 warning——那才是"预算花完了、这一波要打折停"。
 
-## 事件去重（业务不必自己写幂等）
+## 事件去重：保证「执行一次」，不插手执行结果
 
-at-least-once 下事件可能重复投递（崩溃 / 排空超时 / `restart` 补投）。总线中间件按
-`(消费方 member_id, 处理器类名, event.id)` 记账，成功才标记、失败留着重试。
+at-least-once 下事件可能重复投递（崩溃重连 / `restart` 补投）。中间件按
+`(消费方, 处理器, event.id)` 记账：一条事件最多被同一个处理器执行一次。
 
-- 去重库：`state_dir/dedupe/<service>.sqlite`，跨重启有效（进程内集合做不到——
-  重复恰恰发生在重启之后）；
+- **认领写在处理器启动时**（`on_task_start`），`before_dispatch` 只查不写。于是
+  「派发之后、启动之前」崩溃（supervisor 到点 SIGKILL、掉电）不会留下认领，broker
+  重投后照常派发，事件不丢。反过来，认领若写在派发时，这个窗口里的事件会被自己的
+  认领挡住：既不执行、也不再 ack，变成持久队列上的毒消息。
+- **重复投递要 ack**：`before_dispatch` 把空列表交给核心层，由它确认消息。不确认的话
+  持久队列上会留下永不 ack 的消息——每次重连重投一次，还占着 prefetch 配额。唯一例外
+  是「原任务还在本进程排队等执行权」：这条重复保持未确认，等原任务启动（有认领）或
+  放弃（无认领）之后，下一次投递自然会被判成重复。
+- **失败不自动重试**：认领在启动时就写死了，重投回来会被挡掉。失败由 `TaskErrorEvent`
+  上报；要重试得另配机制（`release` + 显式重发重试事件），目前**没有做**。
+- **粒度是 per-handler**：`consumer = "{member_id}:{稳定键}"`，稳定键默认
+  `模块.类名`，可用处理器的 `dedupe_key` 属性覆盖（同类多实例、或类名会重命名时）。
+  不能用 `EventHandlerRegistry` 的 handler id —— 那是每次注册新生成的 uuid，
+  重启后去重表全对不上。拼键用 `blue.idempotency.consumer_key()`。
+- **停机放弃派发不需要撤回**：总线触发 `on_dispatch_abandoned`，中间件只清内存跟踪。
+  没起来的处理器没有认领，已启动的处理器保留认领；重投后只补跑没起来的那些，已经跑过
+  的不会再跑一遍（这是上游事件级 `claim` 拿不到、blue 本地补上的精度）。
+- 存储：库的 `SqliteIdempotencyRecorder`（`state_dir/dedupe/<service>.sqlite`），
+  跨重启有效——进程内集合做不到，重复恰恰发生在重启之后；
 - 保留期：`supervisor.idempotency_retention`（默认 7 天）+ 每
-  `idempotency_sweep_interval`（默认 600 秒）顺带清理一次。不清就是只增不减；
+  `idempotency_sweep_interval`（默认 600 秒）顺带清理一次。不清就是只增不减
+  （实测单个服务一天 5 万行）；
 - 关掉：`supervisor.idempotency = false`（排查"某条事件没被处理"时的第一步）；
-- 写放大：默认 sqlite 参数（rollback journal + `synchronous=FULL`）单条约 13ms，
-  去重是「每事件 × 每处理器」各一次，所以这里用 WAL + `synchronous=NORMAL`（0.02ms）。
+- 写放大：库开 WAL + `synchronous=NORMAL`，实测 13ms/事件 → 0.02ms。
   代价是掉电可能丢最后几个事务——最坏等于「该事件被重复执行一次」，也就是没有去重
   时的行为。
 

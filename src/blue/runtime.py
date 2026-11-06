@@ -22,10 +22,10 @@ from pathlib import Path
 from typing import Any, Literal, TypeVar, cast
 
 from infinity_bus import EventDeclaration
+from infinity_bus.templates import SqliteIdempotencyRecorder
 from pydantic import BaseModel, ConfigDict, Field
 
 from blue.errors import RuntimeConfigError
-from blue.idempotency import SqliteDedupeRecorder
 from blue.lifecycle import LifecycleService, serve_forever
 from blue.transport import RabbitRuntime
 
@@ -403,7 +403,7 @@ def shutdown_drain_timeout() -> float:
     return drain_budget_for(load_infra_config().stop_timeout)
 
 
-def idempotency_recorder() -> SqliteDedupeRecorder | None:
+def idempotency_recorder() -> SqliteIdempotencyRecorder | None:
     """按配置创建事件去重记录器；关闭时返回 ``None``。
 
     库存在 ``state_dir/dedupe`` 下、按服务名分文件：去重表跟着服务走，``restart``
@@ -414,10 +414,10 @@ def idempotency_recorder() -> SqliteDedupeRecorder | None:
         return None
     directory = infra.state_dir.expanduser().resolve() / "dedupe"
     directory.mkdir(parents=True, exist_ok=True)
-    return SqliteDedupeRecorder(
-        directory / f"{service_name()}.sqlite",
-        retention=infra.idempotency_retention,
-        sweep_interval=infra.idempotency_sweep_interval,
+    return SqliteIdempotencyRecorder(
+        str(directory / f"{service_name()}.sqlite"),
+        retention_seconds=infra.idempotency_retention,
+        sweep_interval_seconds=infra.idempotency_sweep_interval,
     )
 
 

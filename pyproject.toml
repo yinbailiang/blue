@@ -7,7 +7,7 @@ requires-python = ">=3.14"
 dependencies = [
     "infinity-agent>=0.3.0",
     "infinity-agent-kit>=1.0.0",
-    "infinity-bus[templates]>=6.0.0",
+    "infinity-bus[templates]>=6.2.0",
     "infinity-data[tool]>=3.3.0",
 ]
 

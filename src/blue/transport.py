@@ -67,19 +67,20 @@ def shutdown_config_for(drain_budget: float) -> ShutdownConfig:
 
     两个超时管的是**不同的事**，不能按字面"排空"去分配：
 
-    - ``queue_timeout_*`` 限的是 ``EventBus.stop()`` 里的 ``queue.join()``，而库的
-      ``task_done()``（= ``basic_ack``）是在 ``_dispatch_loop`` 派发完就调的，所以
-      join 等的是「已投递的消息**派发**完」——通常几十毫秒，与处理器快慢无关；
-    - ``tasks_timeout`` 才是 ``_wait_all_tasks_done()`` 等**正在跑的处理器**收尾的
-      时限。给少了，处理器被取消，而它的消息早在派发时就 ack 了——事件不会被重投，
-      是**静默丢掉**。
+    - ``queue_timeout_*`` 限的是 ``EventBus.stop()`` 里的 ``queue.join()``。
+      ``task_done()``（= ``basic_ack``）在该事件**所有处理器任务都获得执行权**之后就发
+      （6.1 起由 ``_DispatchFence`` 保证），所以 join 等的是「事件全部**启动**」——
+      通常几十毫秒，与处理器跑多久无关，只占预算零头；没起来的那些走
+      ``task_abandoned`` 直接不再等。
+    - ``tasks_timeout`` 才是等**正在跑的处理器收尾**的时限，占预算大头。
 
-    所以大头必须给 ``tasks_timeout``：``drain_budget`` 减去 queue 的小零头，剩下的
-    全给在跑的任务。上一版把整份预算给了 queue、只给 tasks 留 1 秒，实测让一个 3 秒
-    的处理器在停机时被砍（而库默认给 15 秒）。
+    两段是**串行**的，所以和必须 ≤ ``drain_budget``；后者应当已小于 supervisor 的
+    ``stop_timeout``（见 :func:`blue.runtime.drain_budget_for`）。
 
-    ``drain_budget`` 应当已小于 supervisor 的 ``stop_timeout``（见
-    :func:`blue.runtime.drain_budget_for`）。
+    > 这条方向**跟着库的 ack 语义走**，历史上翻过两次：6.0「派发即 ack」→ tasks 大头；
+    > 中间版本「全部处理器结束才 ack」→ queue 大头；6.1+「处理器启动即 ack」→ 回到
+    > tasks 大头。改库的 ack 语义必须同步改这里，
+    > ``tests/test_shutdown_budget.py`` 里那条方向断言就是哨兵。
     """
     total = max(0.1, drain_budget)
     queue_share = min(QUEUE_DRAIN_MAX, total * QUEUE_DRAIN_SHARE)
@@ -304,6 +305,9 @@ class RabbitRuntime(BusRuntime):
             url=self._url,
             registry=self._events,
             strategy=self._strategy,
+            # join 内部排空的上限：必须与总线侧 queue_timeout 对齐，否则库那层
+            # 硬编码的 15 秒会先于/晚于 supervisor 的 SIGKILL 到点，两边说法不一。
+            drain_timeout=self._drain_timeout or 15.0,
         )
         self._queue = queue
         return queue
@@ -311,16 +315,15 @@ class RabbitRuntime(BusRuntime):
     def set_shutdown_strategy(self, strategy: Literal["restart", "offline"]) -> None:
         """切换停机策略（``blue down`` 前由 supervisor 写下线意图文件触发）。
 
-        ``infinity_bus`` 没有提供运行时切换——``RabbitFanoutQueue`` 在构造时就把
-        ``_strategy`` 固定了，而 :meth:`EventQueue.join` 只在停机那一刻读它。所以
-        直接改那个字段即可生效。库升级要复核字段名，这里用 ``hasattr`` 探测，
-        缺失就保持原策略而不是崩掉。
+        队列在构造时就把策略固定了，而 ``join()`` 只在停机那一刻读它 —— 所以运行期
+        切换是安全的。走库的公开接口 ``RabbitFanoutQueue.set_strategy()``
+        （``infinity_bus`` 6.2 起；6.1 只能摸私有字段，所以 pin 到了 6.2）。
         """
         queue = self._queue
-        if queue is None or not hasattr(queue, "_strategy"):
-            logger.warning("队列不支持运行时切换策略，保持 %s", self._strategy)
+        if queue is None:
+            logger.warning("队列尚未建立，无法切换停机策略；保持 %s", self._strategy)
             return
-        setattr(queue, "_strategy", strategy)  # noqa: B010 - 库未暴露公开接口
+        queue.set_strategy(strategy)
         self._strategy = strategy
 
     async def _close_queue(self) -> None:
@@ -387,8 +390,8 @@ class MemoryMemberQueue(EventQueue):
         """取出本成员收件箱中的下一条事件。"""
         return await self._inbox.get()
 
-    def task_done(self) -> None:
-        """标记一条事件处理完成。"""
+    def task_done(self, event: Event | None = None) -> None:
+        """标记一条事件处理完成（进程内不按身份定位，``event`` 只为对齐协议）。"""
         self._inbox.task_done()
 
     def qsize(self) -> int:

@@ -110,6 +110,20 @@ artifact_hash = sha256(
 `websockets>=14.0 needs to be downloaded from a registry`。把第三方依赖固定成一份
 base、按 `uv.lock` 指纹命名，既避开联网解析，又保证同一世代内所有服务依赖版本一致。
 
+### 4.2.1 工作区外的 editable 依赖一律拒绝
+
+base 是**开发用 `.venv` 的硬链接克隆**，所以 `.venv` 里装成 `editable` 的包是个陷阱：
+`_skip_site_packages_entry` 会跳过所有 `*.pth`，editable 包在 base 里就只剩 dist-info
+（模块消失 → 服务启动即 `ImportError`）；而保留指针又等于让产物跟着上游源码漂移，
+`artifact_hash` 与实际内容脱钩。
+
+因此克隆前先扫一遍：按 PEP 610 的 `<dist-info>/direct_url.json`（`dir_info.editable`）
+与老式 `*.egg-link` 认定 editable 安装，**落在项目根之内**的放行（uv workspace 成员会
+以 wheel 装进每个产物），**之外**的直接 `SupervisorError`，`blue apply` 在 build 阶段
+就失败——不会留下"少一个模块"的 base。这也解释了 `uv sync` 为什么必须是
+`uv sync --all-packages`：服务的依赖（pillow / pyte / uvicorn…）也要在 `.venv` 里，
+否则 base 会缺它们。
+
 ### 4.3 硬链接跨分区要告警
 
 `uv pip install` 的默认 link mode 与 base 克隆都依赖硬链接。**跨文件系统时 uv 会

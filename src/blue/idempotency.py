@@ -1,36 +1,47 @@
-"""事件去重中间件：把「幂等」从业务处理器里抽出来。
+"""事件去重中间件：在处理器**获得执行权的那一刻**做一次性认领。
 
-at-least-once 语义下（未 ack 断连重投 / ``restart`` 补投）事件可能被重复投递。事件
-自带唯一 ``Event.id``（uuid4 hex）作去重键。
+at-least-once 语义下（未 ack 断连重投 / ``restart`` 补投）事件可能被重复投递，事件自带
+唯一 ``Event.id``（uuid4 hex）作去重键。
 
-这里用**中间件**而不是库里的 :class:`~infinity_bus.templates.IdempotentHandler`，
-原因有三：
+**认领写在哪，决定了崩溃时会发生什么**：``before_dispatch`` 只查不写，``on_task_start``
+才落库。于是——
 
-1. **业务零改动**——不用让每个 handler 改成继承幂等基类；
-2. **去重键必须是稳定的**——库的 ``IdempotentHandler`` 由调用方注入 ``consumer``，
-   如果拿 ``handler_id`` 当键会踩坑：``EventHandlerRegistry.register`` 每次注册都
-   生成新的 ``uuid4().hex``，重启后去重表全对不上。这里改用**处理器类名**（稳定）；
-3. 记录时机与 ``IdempotentHandler`` 保持一致：**成功才标记**。失败 / 取消 / 停机
-   跳过都不标记，留给 at-least-once 重投重试——这正好回答了「异常怎么办」。
+- 认领落库时处理器已经拿到执行权；此后成功、失败、超时还是被取消，都与去重无关
+  ——那是执行语义（重试 / 补偿）的事。
+- 派发之后、启动之前崩溃（supervisor 到点 SIGKILL、掉电），库里没有任何记录，broker
+  重投后照常派发，事件不会丢。反过来，认领若写在 ``before_dispatch``，这个窗口里的事件
+  会被自己的认领挡住：既不执行、又不会 ack，变成持久队列上的毒消息。
+- 处理器身份必须**跨重启稳定**——``EventHandlerRegistry.register()`` 返回的
+  ``handler_id`` 是每次注册新生成的 uuid，重启后与去重表对不上，绝不能拿它当键；这里用
+  「模块.类名」，并允许处理器用 ``dedupe_key`` 属性显式覆盖（同类多实例、或类名会重命名
+  时用）。
 
-存储用的是本模块的 :class:`SqliteDedupeRecorder`（不是库里的
-``SqliteIdempotencyRecorder``），原因见它自己的 docstring：库版本每条都 fsync、
-且没有清理策略，实测给派发路径加了 13ms/事件、一天涨 5 万行。
+由此有两条必须知道的后果：
+
+1. **失败不自动重试**：认领在启动时就写死了，重投回来会被挡掉。失败由
+   ``TaskErrorEvent`` 上报；要重试得另配机制（``release`` + 显式重发重试事件）。
+2. **重复投递必须被 ack 掉**：``before_dispatch`` 把空列表交给核心层，由它确认消息。
+   不确认的话，持久队列上会留下永不 ack 的消息——每次重连重投一次，还占着 prefetch
+   配额。同一进程内还有原始任务排队等执行权时例外：这条重复保持未确认，因为原任务若
+   在启动前被放弃，事件还得靠它重投。
+
+认领粒度是 **per-handler**：上游 ``claim(consumer, event_id)`` 是事件级的，把处理器身份
+编进 ``consumer``（见 :func:`consumer_key`）才能在 blue 侧拿到「只补跑没起来的那个」的
+精度——重投时已启动的处理器有认领、没启动的没有，两边自然分开。
+
+存储交给库的 :class:`~infinity_bus.templates.SqliteIdempotencyRecorder`（WAL + 保留期
+清理），blue 不再自己实现一份。
 """
 
 from __future__ import annotations
 
-import asyncio
-import sqlite3
-import time
-from datetime import UTC, datetime, timedelta
-from pathlib import Path
 from typing import Any
 
 from infinity_bus import (
     BeforePublishNext,
     DispatchNext,
     Event,
+    EventHandler,
     EventHandlerRegistry,
     EventRegistry,
     Middleware,
@@ -40,148 +51,52 @@ from infinity_bus import (
 from infinity_bus.templates import IdempotencyRecorder
 from pydantic import BaseModel
 
-__all__ = ["IdempotencyMiddleware", "SqliteDedupeRecorder"]
-
-DEFAULT_RETENTION = 7 * 24 * 3600.0
-"""去重记录默认保留 7 天——远大于任何重投窗口，同时给磁盘一个上界。"""
-
-DEFAULT_SWEEP_INTERVAL = 600.0
-"""清理巡检间隔（秒）：每这么久最多清一次，不把扫表摊到每条事件上。"""
+__all__ = ["IdempotencyMiddleware", "consumer_key", "handler_dedupe_key"]
 
 
-class SqliteDedupeRecorder:
-    """SQLite 去重表：跨进程/跨重启，带保留期清理与 WAL。
+def handler_dedupe_key(handler: EventHandler) -> str:
+    """处理器的**稳定**去重键：显式 ``dedupe_key`` 优先，否则「模块.类名」。
 
-    为什么不用库里的 ``SqliteIdempotencyRecorder``：
+    为什么不用 ``handler.handler_id``：那是 ``EventHandlerRegistry.register()`` 每次
+    生成的 ``uuid4().hex``，进程重启就换一个——去重表里的旧记录永远匹配不上，
+    跨重启去重会静默失效。
 
-    1. **写放大**：它每条 ``mark_processed`` 都 commit，默认 rollback journal +
-       ``synchronous=FULL``，实测单条 6.5ms；去重是「每事件 × 每处理器」各一次，
-       等于在派发路径上插了个 fsync。换 ``journal_mode=WAL`` +
-       ``synchronous=NORMAL`` 后同一操作 0.02ms（差三个数量级）。
-    2. **只增不减**：它没有清理策略，实测 webui 一天 5.2 万行 / 9.9MB。去重的有效
-       窗口只是「重投可能发生的那段时间」（几分钟到几小时），留一周是上限而非需要。
+    需要区分的场景（同一个类注册多个实例）在处理器上声明 ``dedupe_key`` 即可：
 
-    ``synchronous=NORMAL`` 在 WAL 下意味着掉电可能丢最后几个事务。对去重表这是
-    **可接受的降级**：少一条记录最坏等于「该事件被重复执行一次」，也就是没有去重
-    时的行为；而丢记录不会造成错误结果（处理器本身仍是幂等安全的那一侧）。
-
-    表结构与 ``ts`` 格式与库版本完全一致（``processed_log(consumer, event_id, ts)``，
-    ``ts`` 为 UTC ISO 8601），所以库里已有的去重文件可以直接接着用。
+    ```python
+    class OutboxHandler(EventHandler):
+        dedupe_key = "outbox:session"   # 实例级也可以：self.dedupe_key = ...
+    ```
     """
+    explicit = getattr(handler, "dedupe_key", None)
+    if isinstance(explicit, str) and explicit:
+        return explicit
+    cls = type(handler)
+    return f"{cls.__module__}.{cls.__qualname__}"
 
-    def __init__(
-        self,
-        db_path: Path | str,
-        *,
-        retention: float = DEFAULT_RETENTION,
-        sweep_interval: float = DEFAULT_SWEEP_INTERVAL,
-    ) -> None:
-        """指定去重库路径、保留期与清理巡检间隔。
 
-        :param db_path: SQLite 文件路径（``:memory:`` 也可，用于测试）
-        :param retention: 记录保留秒数；超出即删除
-        :param sweep_interval: 两次清理之间的最小间隔（秒）
-        """
-        self._db_path = str(db_path)
-        self._retention = retention
-        self._sweep_interval = sweep_interval
-        self._conn: sqlite3.Connection | None = None
-        self._lock = asyncio.Lock()
-        self._last_sweep = 0.0
+def consumer_key(consumer: str, handler: EventHandler) -> str:
+    """该处理器在成员 ``consumer`` 上的认领键：``"{member_id}:{稳定键}"``。
 
-    async def start(self) -> None:
-        """建连接、开 WAL、建表，并做一次清理（幂等）。"""
-        async with self._lock:
-            if self._conn is not None:
-                return
-            self._conn = await asyncio.to_thread(self._open)
-            await asyncio.to_thread(self._sweep, self._require_conn(), time.monotonic())
-            self._last_sweep = time.monotonic()
-
-    def _open(self) -> sqlite3.Connection:
-        """建连接并设置本连接/本库的持久化参数。"""
-        conn = sqlite3.connect(self._db_path, check_same_thread=False)
-        # journal_mode 落在库文件上（持久），synchronous 是连接级、必须每条连接设
-        conn.execute("PRAGMA journal_mode=WAL")
-        conn.execute("PRAGMA synchronous=NORMAL")
-        conn.execute("PRAGMA journal_size_limit=67108864")
-        conn.execute(
-            "CREATE TABLE IF NOT EXISTS processed_log ("
-            " consumer TEXT NOT NULL,"
-            " event_id TEXT NOT NULL,"
-            " ts TEXT NOT NULL,"
-            " PRIMARY KEY (consumer, event_id))"
-        )
-        conn.commit()
-        return conn
-
-    async def is_processed(self, consumer: str, event_id: str) -> bool:
-        """``(consumer, event_id)`` 是否已处理。"""
-        async with self._lock:
-            conn = self._require_conn()
-            return await asyncio.to_thread(self._select, conn, consumer, event_id)
-
-    @staticmethod
-    def _select(conn: sqlite3.Connection, consumer: str, event_id: str) -> bool:
-        cursor = conn.execute(
-            "SELECT 1 FROM processed_log WHERE consumer=? AND event_id=?",
-            (consumer, event_id),
-        )
-        return cursor.fetchone() is not None
-
-    async def mark_processed(self, consumer: str, event_id: str) -> None:
-        """标记已处理（重复标记安全），并按巡检间隔顺带清理过期记录。"""
-        async with self._lock:
-            conn = self._require_conn()
-            await asyncio.to_thread(self._insert, conn, consumer, event_id)
-            now = time.monotonic()
-            if self._retention > 0 and now - self._last_sweep >= self._sweep_interval:
-                await asyncio.to_thread(self._sweep, conn, now)
-                self._last_sweep = now
-
-    @staticmethod
-    def _insert(conn: sqlite3.Connection, consumer: str, event_id: str) -> None:
-        conn.execute(
-            "INSERT OR IGNORE INTO processed_log (consumer, event_id, ts)"
-            " VALUES (?, ?, ?)",
-            (consumer, event_id, datetime.now(UTC).isoformat()),
-        )
-        conn.commit()
-
-    def _sweep(self, conn: sqlite3.Connection, now: float) -> None:
-        """删掉超过保留期的记录（``ts`` 是 ISO 8601 UTC，字典序即时间序）。"""
-        if self._retention <= 0:
-            return
-        cutoff = (datetime.now(UTC) - timedelta(seconds=self._retention)).isoformat()
-        conn.execute("DELETE FROM processed_log WHERE ts < ?", (cutoff,))
-        conn.commit()
-
-    async def close(self) -> None:
-        """关闭连接（幂等）。"""
-        async with self._lock:
-            conn, self._conn = self._conn, None
-            if conn is not None:
-                await asyncio.to_thread(conn.close)
-
-    def _require_conn(self) -> sqlite3.Connection:
-        """取已建立的连接。
-
-        :raises RuntimeError: 还没 ``await start()``
-        """
-        if self._conn is None:
-            raise RuntimeError("去重记录器尚未 start()")
-        return self._conn
+    认领表主键是 ``(consumer, event_id)``，把处理器身份编进 ``consumer`` 才有
+    per-handler 精度。业务侧要手动 ``release``（见模块 docstring 的重试说明）时，
+    也用这个函数拼键，别自己拼字符串。
+    """
+    return f"{consumer}:{handler_dedupe_key(handler)}"
 
 
 class IdempotencyMiddleware(Middleware):
-    """按「消费方 + 处理器」维度丢弃重复投递的事件。
+    """按「消费方 + 处理器」维度保证事件**只被执行一次**。
 
-    去重粒度是 ``(consumer, 处理器类名, event.id)``：
+    状态机（只记「已派发、还没拿到执行权」的事件，两类出口都会清，不泄漏）：
 
-    - ``consumer`` 为总线成员 ID（``member_id``）——fanout 广播下各成员各自记录，
-      互不串扰；
-    - 带上处理器类名，是因为一个事件可能被同一成员的多个处理器订阅：A 成功、B 失败
-      时，重投只该补跑 B，而不是把 A 再跑一遍。
+    - ``before_dispatch``：先查库（已经执行过的重复），再查 ``_dispatched``（本进程内
+      还在排队等执行权的重复），只把没见过的处理器交给 ``next``。**认领不在这里落库**
+      ——此时崩溃不该留下任何痕迹。若一个都不剩，仍把空列表交给 ``next``，让核心层
+      ack 这条重复；只有「原任务还在飞」时才保持未确认。
+    - ``on_task_start``：处理器真正获得执行权，这时才 ``claim`` 落库并清掉跟踪条目。
+    - ``on_dispatch_abandoned``：只清内存跟踪。没起来的处理器本来就没有认领（无需
+      ``release``），已启动的处理器保留认领（重投不该再跑一遍）。
     """
 
     def __init__(
@@ -191,9 +106,17 @@ class IdempotencyMiddleware(Middleware):
         consumer: str,
         handlers: EventHandlerRegistry,
     ) -> None:
+        """``consumer`` 是本成员标识（fanout 广播下各成员各自认领，互不串扰）。"""
         self._recorder = recorder
         self._consumer = consumer
         self._handlers = handlers
+        # event.id → {handler_id: 认领键}：已交给处理器、但还没获得执行权
+        self._dispatched: dict[str, dict[str, str]] = {}
+
+    @property
+    def tracked_events(self) -> int:
+        """还有未结清跟踪状态的事件数（派发中 / 等待启动）——观测与测试用。"""
+        return len(self._dispatched)
 
     async def before_publish(
         self,
@@ -217,39 +140,49 @@ class IdempotencyMiddleware(Middleware):
         handler_ids: list[str],
         next: DispatchNext,
     ) -> None:
-        """把「已处理过」的处理器从本次派发里剔掉。
-
-        只放行没处理过的；全部处理过就不调 ``next``——事件至此终止，重复投递被丢弃。
-        """
-        remaining: list[str] = []
+        """派发没执行过的处理器；全是重复就把空列表交给核心层（让它 ack）。"""
+        in_flight = self._dispatched.get(event.id, {})
+        pending: dict[str, str] = {}
+        keep: list[str] = []
+        awaiting_in_flight = False
         for handler_id in handler_ids:
-            if not await self._recorder.is_processed(self._key(handler_id), event.id):
-                remaining.append(handler_id)
-        if remaining:
-            await next(event, remaining)
+            handler = self._handlers.get(handler_id)
+            if handler is None:
+                continue
+            key = consumer_key(self._consumer, handler)
+            if handler_id in in_flight:
+                # 本进程内同一条事件的重复投递（连接抖动后 broker 重投）：原任务还在
+                # 排队等执行权。这条重复不能 ack —— 原任务若在启动前被放弃，事件还
+                # 得靠它重投；等它真的启动或放弃之后，下一次投递自然会被判成重复。
+                awaiting_in_flight = True
+                continue
+            if await self._recorder.is_processed(key, event.id):
+                continue
+            pending[handler_id] = key
+            keep.append(handler_id)
+        if pending:
+            self._dispatched.setdefault(event.id, {}).update(pending)
+        if keep:
+            await next(event, keep)
+        elif not awaiting_in_flight:
+            # 全是已执行过的重复（或没有处理器接手）：空列表走到核心层，由它 ack。
+            await next(event, [])
 
-    async def on_task_done(self, record: TaskRecord) -> None:
-        """只有真正成功才记账。
-
-        失败（``error``）/ 取消（``cancelled``）/ 停机跳过（``skipped``）都不标记，
-        这样 broker 重投时还会再跑一次——重试语义由此保留。
-
-        钩子异常会被总线逐中间件隔离记录，不影响任务结果。
-        """
-        if record.outcome != "success":
+    async def on_task_start(self, record: TaskRecord) -> None:
+        """处理器拿到执行权 → 这时才把认领写进库（崩溃窗口里没有记录可残留）。"""
+        pending = self._dispatched.get(record.event.id)
+        if pending is None:
             return
-        await self._recorder.mark_processed(
-            self._key(record.handler_id, record.handler_name), record.event.id
-        )
+        key = pending.pop(record.handler_id, None)
+        if not pending:
+            self._dispatched.pop(record.event.id, None)
+        if key is not None:
+            await self._recorder.claim(key, record.event.id)
 
-    def _key(self, handler_id: str, handler_name: str | None = None) -> str:
-        """去重键：``消费方:处理器类名``。"""
-        name = handler_name if handler_name is not None else self._name_of(handler_id)
-        return f"{self._consumer}:{name}"
+    async def on_dispatch_abandoned(self, event: Event) -> None:
+        """派发被放弃：清掉内存跟踪即可。
 
-    def _name_of(self, handler_id: str) -> str:
-        """从注册表反查处理器类名；查不到就退回去重键本身（此时仅内存内有效）。"""
-        handler = self._handlers.get(handler_id)
-        if handler is None:
-            return handler_id
-        return handler.__class__.__name__
+        认领只在处理器启动时写，没起来的那些处理器**没有**认领需要撤回；已启动的
+        处理器保留认领——它们已经拿到执行权，重投不该再跑一遍。
+        """
+        self._dispatched.pop(event.id, None)
