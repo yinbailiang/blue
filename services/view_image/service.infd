@@ -1,5 +1,5 @@
 ~ServiceTemplate {
-  workdir: <str?> = null
+  workdir: <path?> = null
   max_edge: <int, range(320, 4096)> = 1568
   max_bytes: <int, range(1024, 134217728)> = 33554432
 }

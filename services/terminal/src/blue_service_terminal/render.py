@@ -89,13 +89,18 @@ _CJK_GLOBS = (
 )
 
 
-def resolve_fonts(configured: str, configured_cjk: str = "") -> tuple[str, str]:
-    """返回 ``(等宽主字体, CJK 回退字体)``；找不到时给空串（调用方回退内置字体）。"""
+def resolve_fonts(
+    configured: str | None = None, configured_cjk: str | None = None
+) -> tuple[str, str]:
+    """返回 ``(等宽主字体, CJK 回退字体)``；找不到时给空串（调用方回退内置字体）。
+
+    ``configured`` 为 ``None``（infd 里的 ``<path?>`` 没配）表示自动探测。
+    """
     return _pick(
-        configured,
+        configured or "",
         _CANDIDATE_FONTS,
         ("*dejavu*/share/fonts/truetype/DejaVuSansMono.ttf",),
-    ), _pick(configured_cjk, _CANDIDATE_CJK_FONTS, _CJK_GLOBS)
+    ), _pick(configured_cjk or "", _CANDIDATE_CJK_FONTS, _CJK_GLOBS)
 
 
 def _pick(configured: str, candidates: tuple[str, ...], globs: tuple[str, ...]) -> str:

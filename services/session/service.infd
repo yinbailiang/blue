@@ -1,5 +1,5 @@
 ~ServiceTemplate {
-  database_path: str = "sessions.db"
+  database_path: <path, extension("db")> = p"sessions.db"
   max_sessions: <int, range(1, 100000)> = 512
   idle_ttl: <float, positive> = 7200.0
   prune_enabled: bool = false

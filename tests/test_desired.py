@@ -8,7 +8,7 @@
 from __future__ import annotations
 
 import json
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 import pytest
 
@@ -33,12 +33,37 @@ def test_render_state_is_json_serialisable(desired: DesiredState) -> None:
     json.dumps(rendered, ensure_ascii=False)
 
 
-def test_decimal_config_is_rendered_as_float(desired: DesiredState) -> None:
-    """Decimal 转成 float：保留数值语义，不是字符串 ``"1800.0"``。"""
+def test_decimal_config_is_rendered_as_number(desired: DesiredState) -> None:
+    """Decimal 投影成 JSON 数字：保留数值语义，不是字符串 ``"1800.0"``。
+
+    整值按 emit 层语义落成 ``int``（避免 ``1.0`` 这种噪声），所以这里只要求
+    "是数字"——绑死 float 是在测实现细节，不是测语义。
+    """
     config = render_state(desired, redact=False)["services"]["agent"]["config"]
 
-    assert isinstance(config["tool_timeout"], float)
-    assert config["tool_timeout"] == 1800.0
+    assert isinstance(config["tool_timeout"], int | float)
+    assert not isinstance(config["tool_timeout"], str)
+    assert config["tool_timeout"] == 1800
+
+
+def test_path_config_is_projected_to_posix_string(desired: DesiredState) -> None:
+    """``p"..."`` 的路径要投影成 POSIX 字符串，不能原样留在返回值里。
+
+    盯的是「``PurePosixPath`` 不是 ``Path`` 子类」这个坑：infd 的 ``p"..."``
+    产出的正是 ``PurePosixPath``，手写 ``isinstance(v, Path)`` 会直接漏掉它，
+    于是 ``blue render`` / 指纹计算在序列化那一刻炸掉。投影统一交给 emit 层
+    （``EmitConfig`` 默认 ``full_path=False`` → POSIX 字符串）。
+    """
+    service = desired.services["terminal"]
+    patched = service.model_copy(
+        update={"config": {"workdir": PurePosixPath("/tmp/x")}}
+    )
+    state = desired.model_copy(update={"services": {"terminal": patched}})
+
+    rendered = render_state(state, redact=False)["services"]["terminal"]["config"]
+
+    assert rendered["workdir"] == "/tmp/x"
+    assert isinstance(rendered["workdir"], str)
 
 
 def test_redacted_render_state_is_json_serialisable(desired: DesiredState) -> None:

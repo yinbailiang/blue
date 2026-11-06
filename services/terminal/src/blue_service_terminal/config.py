@@ -43,9 +43,11 @@ class TerminalConfig(BaseModel):
     cols: int = Field(default=100, ge=20, le=400, description="默认列数")
     rows: int = Field(default=30, ge=5, le=200, description="默认行数")
     scrollback: int = Field(default=2000, ge=0, le=10_000, description="保留的历史行数")
-    font_path: str = Field(default="", description="渲染字体路径；空表示自动探测")
-    cjk_font_path: str = Field(
-        default="", description="宽字符（中日韩）回退字体；空表示自动探测"
+    font_path: str | None = Field(
+        default=None, description="渲染字体路径；null 表示自动探测"
+    )
+    cjk_font_path: str | None = Field(
+        default=None, description="宽字符（中日韩）回退字体；null 表示自动探测"
     )
     isolate_rc: bool = Field(
         default=True,

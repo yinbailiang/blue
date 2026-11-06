@@ -32,7 +32,7 @@
 !from p"services/mcp_bridge/service.infd" import ServiceTemplate as McpBridgeService
 
 supervisor {
-  state_dir: str = ".blue"
+  state_dir: path = p".blue"
   reconcile_interval: <float, positive> = 2.0
   shutdown_timeout: <float, positive> = 10.0
   log_max_bytes: <int, positive> = 10485760

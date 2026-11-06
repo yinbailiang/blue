@@ -6,7 +6,7 @@
   mode: in("managed", "external") = "managed"
   rabbitmq_bin: str = "rabbitmq-server"
   rabbitmqctl_bin: str = "rabbitmqctl"
-  data_dir: str = "rabbitmq"
+  data_dir: path = p"rabbitmq"
   vhost: str = "blue"
   user: str = "guest"
   queue_expires_ms: <int, range(0, 604800000)> = 1800000

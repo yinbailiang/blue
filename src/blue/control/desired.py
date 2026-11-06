@@ -20,11 +20,11 @@ import logging
 import os
 import tomllib
 from collections.abc import Iterable
-from decimal import Decimal
 from pathlib import Path
 from typing import Any, Literal, cast
 
 from infinity_data import CompilationResult, SandboxConfig, Severity, load
+from infinity_data.emit import EmitConfig, to_json
 from pydantic import ValidationError
 
 from blue.control.model import (
@@ -83,7 +83,10 @@ def load_desired(path: str | Path = DEFAULT_CONFIG_PATH) -> DesiredState:
     if result.has_errors:
         raise ConfigError(_format_diagnostics(result.diagnostics, config_path))
 
-    value = result.value
+    # 编译产物里可能是 Decimal / PurePosixPath（infd 的 ``p"..."``）。在入口就用
+    # emit 投影成 JSON 原生值，下游（pydantic 校验、渲染、写盘、算指纹）只见一种形态。
+    # 别在各处再手写 isinstance 兜底——``PurePosixPath`` 不是 ``Path`` 子类，极易漏。
+    value = cast(dict[str, Any], json.loads(_project(result.value)))
     supervisor = _load_supervisor(value.get("supervisor"), base_dir)
     contracts = _load_contracts(base_dir)
 
@@ -169,12 +172,9 @@ def _runtime_config_content(service: DesiredService, desired: DesiredState) -> s
         },
     }
     return (
-        json.dumps(
+        to_json(
             payload,
-            ensure_ascii=False,
-            indent=2,
-            sort_keys=True,
-            default=_json_default,
+            config=EmitConfig(indent=2, sort_keys=True, ensure_ascii=False),
         )
         + "\n"
     )
@@ -759,23 +759,27 @@ def _format_diagnostics(diagnostics: list[Any], path: Path) -> str:
     return f"配置编译失败：{path}\n" + "\n".join(lines)
 
 
+_COMPACT_EMIT = EmitConfig(indent=None, sort_keys=True, ensure_ascii=False)
+"""指纹用：紧凑、排序、不转义（同一份配置必须逐字节稳定）。"""
+
+
+def _project(value: object) -> str:
+    """把配置值投影成 JSON 文本。
+
+    ``path → POSIX 字符串``、``Decimal → 数字`` 都是 emit 层的职责
+    （``EmitConfig.full_path / full_float`` 默认即有损投影），这里不自己写转换。
+    """
+    return to_json(value, config=_COMPACT_EMIT)
+
+
 def _hash_json(value: object) -> str:
+    # 投影交给 emit（path → 字符串、Decimal → 数字），紧凑格式自己定，
+    # 保证与历史指纹逐字节一致，不因换实现而重启全部服务
+    projected = json.loads(_project(value))
     canonical = json.dumps(
-        value,
-        ensure_ascii=False,
-        sort_keys=True,
-        separators=(",", ":"),
-        default=_json_default,
+        projected, ensure_ascii=False, sort_keys=True, separators=(",", ":")
     )
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
-
-
-def _json_default(value: object) -> object:
-    if isinstance(value, Decimal):
-        return float(value)
-    if isinstance(value, Path):
-        return str(value)
-    raise TypeError(f"无法序列化类型：{type(value).__name__}")
 
 
 def _atomic_write(path: Path, content: str) -> None:
@@ -808,23 +812,13 @@ def redact_config(config: dict[str, Any]) -> dict[str, Any]:
 
 
 def _json_safe(value: object) -> object:
-    """把配置值里的非 JSON 原生对象换成 JSON 原生类型。
+    """把配置值投影成 JSON 原生类型（供 ``render_state`` 打印）。
 
-    规则与 :func:`_json_default` 保持一致：``Decimal`` → ``float``（保留数值语义，
-    而不是变成字符串 ``"30.0"``）、``Path`` → ``str``、元组 → 列表。
+    转换语义交给 emit 层（见 :func:`_project`）：``path → POSIX 字符串``、
+    ``Decimal → 数字``、元组 → 列表。这里不再自己写 isinstance 链——之前手写时
+    漏了「``PurePosixPath`` 不是 ``Path`` 子类」这件事。
     """
-    if isinstance(value, dict):
-        mapping = cast(dict[object, object], value)
-        return {str(key): _json_safe(item) for key, item in mapping.items()}
-    if isinstance(value, list):
-        return [_json_safe(item) for item in cast(list[object], value)]
-    if isinstance(value, tuple):
-        return [_json_safe(item) for item in cast(tuple[object, ...], value)]
-    if isinstance(value, Decimal):
-        return float(value)
-    if isinstance(value, Path):
-        return str(value)
-    return value
+    return json.loads(_project(value))
 
 
 def _redact(value: object) -> object:
