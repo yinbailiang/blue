@@ -75,6 +75,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     build=not bool(args.no_build),
                     smoke=not bool(args.no_smoke),
                     expect=args.expect,
+                    expect_desired=args.expect_desired,
                 )
             case "activate":
                 return _activate(
@@ -374,7 +375,12 @@ def _git_revision(base_dir: Path) -> str:
 
 
 def _prepare_generation(
-    config_path: str, *, reason: str, build: bool, expect: str | None = None
+    config_path: str,
+    *,
+    reason: str,
+    build: bool,
+    expect: str | None = None,
+    expect_desired: str | None = None,
 ) -> tuple[DesiredState, Generation]:
     """编译 → 构建产物 → 冻结世代目录（**不激活**）。
 
@@ -382,12 +388,18 @@ def _prepare_generation(
     ``blue plan`` 里看到的那个世代。校验放在**构建之前**——世界变了就直接退出，
     连产物都不动。只锁起点：执行完落在哪一代不归它管。
 
+    ``expect_desired`` 锁另一半：本次算出来的 ``desired.generation`` 必须仍是
+    ``plan`` 里显示的"期望"值。只锁 ``current`` 拦不住"两次 plan 之间改了源码"
+    ——那时 current 没动、要构建的内容却变了。
+
     构建与冻结期间持有 :class:`MaintenanceLock`：``gc`` 会拿同一把锁，否则它可能
     删掉正在构建的 wheel 目录（构建中的产物还没有 manifest）。
     """
     desired = load_desired(config_path)
     if expect is not None:
         _generation_store(desired).assert_current(expect)
+    if expect_desired is not None:
+        _assert_expected_desired(desired, expect_desired)
     artifacts = _artifact_store(desired)
     lock = MaintenanceLock(desired.supervisor.state_dir)
     if not lock.acquire():
@@ -412,6 +424,28 @@ def _prepare_generation(
     finally:
         lock.release()
     return desired, generation
+
+
+def _assert_expected_desired(desired: DesiredState, expect: str) -> None:
+    """断言本次要构建的内容仍是预览时那一份。
+
+    ``plan`` 那行会打印两个指纹：``当前 A → 期望 B``。``--expect`` 锁 A，这里锁 B。
+    只锁 A 拦不住"两次 plan 之间改了源码"——current 没动，要构建的东西已经不是 B。
+
+    :param expect: 世代内容指纹，允许只写前缀（和 ``git`` 一样）
+    :raises BlueError: 空值，或内容已经变了
+    """
+    wanted = expect.strip()
+    if not wanted:
+        raise BlueError("--expect-desired 不能为空")
+    actual = desired.generation
+    if actual.startswith(wanted):
+        return
+    raise BlueError(
+        f"要构建的内容已经变了：期望 {wanted}，实际 {actual[:12]}\n"
+        "plan 之后又改过源码或配置：重新执行 blue plan 确认这是你要的，再 apply。\n"
+        "（--expect-desired 只锁内容；要连起点一起锁，再加 --expect <当前值>）"
+    )
 
 
 def _notify_supervisor(desired: DesiredState, state: StateStore) -> bool:
@@ -525,19 +559,25 @@ def _apply(
     build: bool = True,
     smoke: bool = True,
     expect: str | None = None,
+    expect_desired: str | None = None,
 ) -> int:
     """三阶段 apply：构建 → 原子切换 → 健康验证（+ 冒烟）。
 
     ``--staged`` 只到"世代目录已就绪"为止（等价 NixOS 的 ``nixos-rebuild boot``），
     用 ``blue activate <N>`` 才真正切换。
 
-    ``--expect`` 把本次 apply 钉在预览时那个世代上：``current`` 变了就拒绝执行。
+    ``--expect`` 锁起点（``current`` 没动过），``--expect-desired`` 锁内容（要构建的
+    东西仍是 plan 里显示的那份）。两个一起用就是"世界没动、内容也没动”。
 
     控制面代码变化会触发 execv 自重启：那种情况下**默认也要等验证结果**
     （``supervisor.await_control_change``），否则"命令返回 0 但其实没起来"。
     """
     desired, generation = _prepare_generation(
-        config_path, reason="apply", build=build, expect=expect
+        config_path,
+        reason="apply",
+        build=build,
+        expect=expect,
+        expect_desired=expect_desired,
     )
     store = _generation_store(desired)
     state = StateStore(desired.supervisor.state_dir)
@@ -1565,6 +1605,13 @@ def build_parser() -> argparse.ArgumentParser:
         metavar="GENERATION",
         help="断言 current 仍是这个世代（内容指纹可只写前缀；传 plan 显示的当前值）；"
         "只锁起点：current 变了就拒绝，不承诺执行完落在哪个世代",
+    )
+    apply_parser.add_argument(
+        "--expect-desired",
+        default=None,
+        metavar="GENERATION",
+        help="断言本次要构建的内容指纹（传 plan 显示的期望值，可只写前缀）；"
+        "plan 之后改过源码就拒绝",
     )
 
     activate_parser = subparsers.add_parser("activate", help="激活一个已存在的世代")

@@ -366,7 +366,8 @@ class GenerationStore:
         raise BlueError(
             f"当前世代已变化：期望 {wanted}，实际 {current.generation[:12]}"
             f"（世代 {current.id:04d}）\n"
-            "预览是在另一时刻算的，请重新执行 blue plan 再决定要不要 apply。"
+            "预览是在另一时刻算的，请重新执行 blue plan 再决定要不要 apply。\n"
+            "（--expect 比的是 current；要锁“将要构建的内容”，用 --expect-desired）"
         )
 
     def latest_stable(self, *, exclude: int | None = None) -> Generation | None:

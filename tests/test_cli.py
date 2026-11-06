@@ -746,6 +746,52 @@ def test_gc_keeps_current_generation(
     assert "将删除世代 2 个" in capsys.readouterr().out
 
 
+def test_expect_desired_accepts_matching_prefix(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``--expect-desired`` 传 plan 里的"期望"值就放行，前缀也行。"""
+    config = _config(tmp_path)
+    _stub_artifacts(monkeypatch)
+    lock = _lock(tmp_path, monkeypatch)
+    fingerprint = load_desired(config).generation
+    try:
+        assert (
+            main(
+                [
+                    "--config",
+                    str(config),
+                    "apply",
+                    "--expect-desired",
+                    fingerprint[:12],
+                ]
+            )
+            == 0
+        )
+    finally:
+        lock.release()
+
+
+def test_expect_desired_refuses_when_content_moved(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """plan 之后改了源码：current 没动，但 ``--expect-desired`` 必须拦住。"""
+    config = _config(tmp_path)
+    _stub_artifacts(monkeypatch)
+    lock = _lock(tmp_path, monkeypatch)
+    preview = load_desired(config).generation
+    _rewrite_value(config, "changed-after-plan")
+    try:
+        code = main(["--config", str(config), "apply", "--expect-desired", preview])
+        assert code == 2
+        assert main(["--config", str(config), "apply", "--expect-desired", "  "]) == 2
+    finally:
+        lock.release()
+
+    err = capsys.readouterr().err
+    assert "要构建的内容已经变了" in err
+    assert "不能为空" in err
+
+
 def test_gc_skips_when_apply_is_building(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:

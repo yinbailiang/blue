@@ -655,6 +655,7 @@ verify → 等全部服务 Ready；超时/失败 → 自动翻回上一个 stabl
 | `blue apply` | 三阶段全流程；内容没变则直接复用当前世代 |
 | `blue apply --staged` | 只冻结世代、不切换（等价 `nixos-rebuild boot`） |
 | `blue apply --expect <指纹>` | 断言 `current` 仍是 `plan` 里显示的那个（可只写前缀）；变了就拒绝，不承诺执行完落在哪个世代 |
+| `blue apply --expect-desired <指纹>` | 断言要构建的内容仍是 `plan` 里显示的"期望"值；plan 之后改过源码就拒绝（两个一起用 = 起点和内容都没动） |
 | `blue activate <N>` | 激活一个已存在的世代 |
 | `blue rollback` | 回到上一个 stable 世代（整机） |
 | `blue rollback --service agent` | 只把某个服务的产物+配置换回旧世代（生成新世代，历史保持线性） |
