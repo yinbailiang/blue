@@ -106,6 +106,8 @@ agent = AgentService(
   compact_rules = [
     # read_file 的正文在历史里没有价值（要细节时再读一次），只留路径
     { tool = "read_file", drop = ["content"] },
+    # run_shell 的 command 与前面 tool_call 的 arguments 完全重复，历史里不必再存一份
+    { tool = "run_shell", drop = ["command"] },
   ],
 )
 
