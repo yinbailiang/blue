@@ -3,19 +3,18 @@
 from __future__ import annotations
 
 import asyncio
-import fcntl
 import os
 import signal
 import time
 from contextlib import suppress
 from pathlib import Path
-from typing import TextIO
 
 from pydantic import BaseModel, ConfigDict, ValidationError
 
 from blue.control.model import ActualState
 from blue.control.process import signal_tree
 from blue.errors import SupervisorError
+from blue.lockfile import FileLock
 
 __all__ = ["MAINTENANCE_LOCK", "LockInfo", "MaintenanceLock", "StateStore"]
 
@@ -56,8 +55,12 @@ class MaintenanceLock:
     """
 
     def __init__(self, state_dir: Path) -> None:
-        self.path = state_dir / MAINTENANCE_LOCK
-        self._handle: TextIO | None = None
+        self._lock = FileLock(state_dir / MAINTENANCE_LOCK)
+
+    @property
+    def path(self) -> Path:
+        """锁文件路径。"""
+        return self._lock.path
 
     def acquire(self, *, wait: float = 0.0, interval: float = 0.05) -> bool:
         """尝试取锁。
@@ -66,35 +69,14 @@ class MaintenanceLock:
         :param interval: 轮询间隔（秒）
         :return: 是否拿到了锁
         """
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        handle = self.path.open("a+", encoding="utf-8")
-        deadline = time.monotonic() + wait
-        while True:
-            try:
-                fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-            except BlockingIOError:
-                if time.monotonic() >= deadline:
-                    handle.close()
-                    return False
-                time.sleep(interval)
-                continue
-            handle.seek(0)
-            handle.truncate()
-            handle.write(f"pid={os.getpid()}\n")
-            handle.flush()
-            self._handle = handle
-            return True
+        if not self._lock.acquire(wait=wait, interval=interval):
+            return False
+        self._lock.write(f"pid={os.getpid()}\n")
+        return True
 
     def release(self) -> None:
         """释放锁；没拿到过或已释放时什么也不做。"""
-        handle = self._handle
-        self._handle = None
-        if handle is None:
-            return
-        with suppress(OSError):
-            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
-        with suppress(OSError):
-            handle.close()
+        self._lock.release()
 
 
 class StateStore:
@@ -103,9 +85,8 @@ class StateStore:
     def __init__(self, state_dir: Path) -> None:
         self._state_dir = state_dir
         self._state_path = state_dir / "state.json"
-        self._lock_path = state_dir / "supervisor.lock"
+        self._lock = FileLock(state_dir / "supervisor.lock")
         self._log_dir = state_dir / "logs"
-        self._lock_handle: TextIO | None = None
 
     @property
     def state_dir(self) -> Path:
@@ -120,7 +101,7 @@ class StateStore:
     @property
     def lock_path(self) -> Path:
         """单实例锁文件。"""
-        return self._lock_path
+        return self._lock.path
 
     @property
     def log_dir(self) -> Path:
@@ -149,53 +130,39 @@ class StateStore:
         :raises SupervisorError: 已有 supervisor 持有锁。
         """
         self.ensure_dirs()
-        handle = self._lock_path.open("a+", encoding="utf-8")
-        try:
-            fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError as error:
-            handle.seek(0)
-            existing = handle.read().strip()
-            handle.close()
+        if not self._lock.acquire():
+            existing = self._lock.holder()
             raise SupervisorError(
-                f"已有 supervisor 正在运行（{self._lock_path}）："
+                f"已有 supervisor 正在运行（{self._lock.path}）："
                 f"{existing or '未知进程'}"
-            ) from error
+            )
 
-        info = LockInfo(
-            pid=os.getpid(),
-            started_at=time.time(),
-            generation=generation,
-            blue_version=blue_version,
-            sdk_hash=sdk_hash,
-            config_version=config_version,
-        )
-        handle.seek(0)
-        handle.truncate()
-        handle.write(info.model_dump_json())
-        handle.flush()
-        os.fsync(handle.fileno())
-        handle.seek(0)
-        self._lock_handle = handle
+        try:
+            info = LockInfo(
+                pid=os.getpid(),
+                started_at=time.time(),
+                generation=generation,
+                blue_version=blue_version,
+                sdk_hash=sdk_hash,
+                config_version=config_version,
+            )
+            self._lock.write(info.model_dump_json(), fsync=True)
+        except Exception:
+            self._lock.release()
+            raise
         return info
 
     def release(self) -> None:
         """释放单实例锁。"""
-        handle = self._lock_handle
-        self._lock_handle = None
-        if handle is None:
-            return
-        with suppress(OSError):
-            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
-        with suppress(OSError):
-            handle.close()
+        self._lock.release()
 
     def read_lock_info(self) -> LockInfo | None:
         """读取锁文件中的 supervisor 信息；文件缺失或损坏返回 ``None``。"""
-        if not self._lock_path.is_file():
+        if not self._lock.path.is_file():
             return None
         try:
             return LockInfo.model_validate_json(
-                self._lock_path.read_text(encoding="utf-8")
+                self._lock.path.read_text(encoding="utf-8")
             )
         except OSError, ValidationError:
             return None
