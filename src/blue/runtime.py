@@ -394,6 +394,15 @@ def idempotency_recorder() -> SqliteIdempotencyRecorder | None:
     return SqliteIdempotencyRecorder(str(directory / f"{service_name()}.sqlite"))
 
 
+def shutdown_intent_path() -> Path:
+    """下线意图文件路径：supervisor 在 ``blue down`` 前写，服务停机时读一次即删。
+
+    用文件而不是信号传递「这次是下线」——文件写完后 supervisor 才发 ``SIGTERM``，
+    可见性由内核保证，不依赖两个信号在事件循环里的处理顺序。
+    """
+    return load_infra_config().state_dir.expanduser().resolve() / "shutdown-intent.json"
+
+
 def build_runtime(
     role: str | None = None,
     events: Iterable[type[EventDeclaration]] | None = None,
@@ -429,6 +438,7 @@ def build_runtime(
         strategy=strategy,
         drain_timeout=shutdown_drain_timeout(),
         idempotency=idempotency_recorder(),
+        intent_path=shutdown_intent_path(),
     )
 
 

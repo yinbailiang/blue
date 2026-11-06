@@ -245,10 +245,10 @@ async def _run_supervisor(desired: DesiredState) -> None:
     finally:
         # down 与自重启要区别对待：自重启（SIGUSR1）属于「重启」，积压该保留给
         # 新进程补投；只有真正的下线才预告 offline（解绑 + 排空，不留积压）。
-        if not reexec and supervisor.request_offline_shutdown():
-            # 给各服务的事件循环一次机会处理 SIGUSR2，再发 SIGTERM；
-            # 否则两个信号挤在一轮里，停机策略可能来不及切换。
-            await asyncio.sleep(0.2)
+        if not reexec:
+            # 写「下线意图」文件：各服务停机时会读到并切 offline（解绑 + 排空）。
+            # 文件写完后才发 SIGTERM，不存在两个信号抢跑的时序问题。
+            supervisor.request_offline_shutdown()
         await supervisor.stop()
     if reexec:
         _exec_self(desired)

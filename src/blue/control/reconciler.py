@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 import signal
@@ -42,6 +43,9 @@ from blue.control.runner import ProcessHandle, ProcessRunner
 from blue.control.state import StateStore
 from blue.errors import BlueError, ConfigError
 from blue.runtime import DEFAULT_RUNTIME_CONFIG, RUNTIME_CONFIG_VERSION
+
+INTENT_FILENAME = "shutdown-intent.json"
+"""下线意图文件名：supervisor 在 down 前写，服务停机时读一次即删。"""
 
 logger = logging.getLogger(__name__)
 
@@ -196,26 +200,29 @@ class Supervisor:
             self._desired.generation,
         )
 
-    def request_offline_shutdown(self) -> int:
-        """给所有在跑的服务发 ``SIGUSR2``：预告「这次是下线，不是重启」。
+    def request_offline_shutdown(self) -> bool:
+        """写「下线意图」文件，让各服务在停机时切到 ``offline``。
 
-        服务侧的 ``RabbitRuntime`` 收到后把停机策略从 ``restart`` 切成 ``offline``
-        （解绑 + 排空），于是 ``blue down`` 之后不会留下积压消息；普通重启不发这个
-        信号，保持 ``restart`` 的「保留积压、启动后补投」语义。
+        用文件而不是信号：``write_text`` 返回后才发 ``SIGTERM``，服务一定能读到；
+        两个信号则要靠事件循环的处理顺序，早一轮晚一轮都会让切换失效。
 
-        返回成功发出的信号数量（给调用方判断是否需要等一小会儿）。
+        服务读到后把策略从 ``restart`` 切成 ``offline``（解绑 + 排空），于是
+        ``blue down`` 之后不留积压；普通重启不写这个文件，保持 ``restart`` 的
+        「保留积压、启动后补投」语义。
+
+        返回是否写成功。写失败不要紧：服务会按 ``restart`` 处理——积压留下而不是
+        丢消息，这个降级方向是安全的。
         """
-        sent = 0
-        for runtime in self._runtimes.values():
-            handle = runtime.handle
-            if handle is None or handle.process.returncode is not None:
-                continue
-            try:
-                os.kill(handle.process.pid, signal.SIGUSR2)
-            except ProcessLookupError, PermissionError:
-                continue
-            sent += 1
-        return sent
+        path = self._desired.supervisor.state_dir / INTENT_FILENAME
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(
+                json.dumps({"mode": "offline", "ts": time.time()}), encoding="utf-8"
+            )
+        except OSError:
+            logger.warning("写下线意图失败，本次 down 按 restart 处理（积压保留）")
+            return False
+        return True
 
     async def stop(self) -> None:
         """请求调谐循环退出，并等待全部服务停止。"""

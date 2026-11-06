@@ -12,11 +12,13 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
-import signal
 from abc import ABC, abstractmethod
 from collections.abc import Iterable
-from typing import Literal, Protocol, runtime_checkable
+from contextlib import suppress
+from pathlib import Path
+from typing import Literal, Protocol, cast, runtime_checkable
 
 from infinity_bus import (
     Event,
@@ -95,6 +97,7 @@ class BusRuntime(ABC):
         events: Iterable[type[EventDeclaration]],
         drain_timeout: float | None = None,
         idempotency: IdempotencyRecorder | None = None,
+        intent_path: Path | None = None,
     ) -> None:
         if not member_id.strip():
             raise ValueError("member_id 不能为空")
@@ -106,6 +109,7 @@ class BusRuntime(ABC):
         self._bus: EventBus | None = None
         self._drain_timeout = drain_timeout
         self._idempotency = idempotency
+        self._intent_path = intent_path
 
     def _shutdown_config(self) -> ShutdownConfig:
         """停机超时配置；未指定预算时沿用库默认值。"""
@@ -117,24 +121,9 @@ class BusRuntime(ABC):
         """切换停机策略；默认实现什么也不做（内存运行时没有队列策略）。"""
         _ = strategy
 
-    def _install_offline_signal(self) -> None:
-        """把 ``SIGUSR2`` 当作「这次是下线，不是重启」的预告。
-
-        supervisor 在 ``blue down`` 时先发 ``SIGUSR2``、稍候再发 ``SIGTERM``；普通
-        重启（apply / crash 拉起）不发这个信号，于是保持 ``restart``——积压留着，
-        重启后补投。
-        """
-        try:
-            asyncio.get_running_loop().add_signal_handler(
-                signal.SIGUSR2, self._on_offline_signal
-            )
-        except NotImplementedError, RuntimeError, ValueError:
-            # 非主线程 / 平台不支持：维持默认策略即可
-            logger.debug("无法注册 SIGUSR2 处理器，停机策略保持不变")
-
-    def _on_offline_signal(self) -> None:
-        logger.info("收到 SIGUSR2：本次停机走 offline（解绑并排空，不留积压）")
-        self.set_shutdown_strategy("offline")
+    def _before_bus_stop(self) -> None:
+        """停机前的钩子；基类无需切换（内存运行时没有队列策略）。"""
+        logger.debug("%s 停机前无需切换队列策略", self._member_id)
 
     @property
     def member_id(self) -> str:
@@ -186,7 +175,6 @@ class BusRuntime(ABC):
             middleware_chain=chain,
         )
         self._bus = bus
-        self._install_offline_signal()
         try:
             await bus.start()
         except Exception:
@@ -199,6 +187,8 @@ class BusRuntime(ABC):
         bus, self._bus = self._bus, None
         try:
             if bus is not None:
+                # 必须在 bus.stop() 之前判定：停机策略只在 join() 那一刻被读取
+                self._before_bus_stop()
                 await bus.stop()
         finally:
             await self._close_queue()
@@ -228,12 +218,14 @@ class RabbitRuntime(BusRuntime):
         strategy: Literal["restart", "offline"] = "restart",
         drain_timeout: float | None = None,
         idempotency: IdempotencyRecorder | None = None,
+        intent_path: Path | None = None,
     ) -> None:
         super().__init__(
             member_id=member_id,
             events=events,
             drain_timeout=drain_timeout,
             idempotency=idempotency,
+            intent_path=intent_path,
         )
         self._url = url
         self._strategy: Literal["restart", "offline"] = strategy
@@ -263,6 +255,25 @@ class RabbitRuntime(BusRuntime):
             return
         setattr(queue, "_strategy", strategy)  # noqa: B010 - 库未暴露公开接口
         self._strategy = strategy
+
+    def _before_bus_stop(self) -> None:
+        """停机前读 supervisor 留下的意图文件，决定本次是否切 ``offline``。"""
+        path = self._intent_path
+        if path is None or not path.exists():
+            return
+        try:
+            raw = json.loads(path.read_text(encoding="utf-8"))
+        except OSError, ValueError:
+            logger.warning("下线意图无法解析，按默认策略 %s 处理", self._strategy)
+            return
+        with suppress(OSError):
+            path.unlink()  # 一次性：留着会污染下一次普通重启
+        if (
+            isinstance(raw, dict)
+            and cast(dict[str, object], raw).get("mode") == "offline"
+        ):
+            logger.info("读到下线意图：本次停机走 offline（解绑并排空，不留积压）")
+            self.set_shutdown_strategy("offline")
 
     async def _close_queue(self) -> None:
         queue, self._queue = self._queue, None

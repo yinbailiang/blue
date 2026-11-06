@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import inspect
+from pathlib import Path
 from typing import Any, cast
 
 from blue.runtime import build_runtime
@@ -61,3 +62,56 @@ def test_memory_runtime_accepts_strategy_switch() -> None:
     runtime = MemoryRuntime(member_id="m", events=[], hub=MemoryFanout())
 
     runtime.set_shutdown_strategy("offline")  # 不应抛异常
+
+
+def test_intent_file_switches_to_offline(tmp_path: Path) -> None:
+    """读到下线意图就切 offline，而且文件读完即删（一次性）。"""
+    intent = tmp_path / "shutdown-intent.json"
+    intent.write_text('{"mode": "offline"}', encoding="utf-8")
+    runtime = RabbitRuntime(
+        url="amqp://guest:guest@localhost/",
+        member_id="m",
+        events=[],
+        intent_path=intent,
+    )
+    queue = _FakeQueue()
+    cast(Any, runtime)._queue = queue
+
+    cast(Any, runtime)._before_bus_stop()
+
+    assert vars(queue)["_strategy"] == "offline"
+    assert not intent.exists(), "意图是一次性的，读完必须删掉，否则污染下次重启"
+
+
+def test_missing_intent_file_keeps_restart(tmp_path: Path) -> None:
+    """没有意图文件（普通重启）时必须保持 restart。"""
+    runtime = RabbitRuntime(
+        url="amqp://guest:guest@localhost/",
+        member_id="m",
+        events=[],
+        intent_path=tmp_path / "absent.json",
+    )
+    queue = _FakeQueue()
+    cast(Any, runtime)._queue = queue
+
+    cast(Any, runtime)._before_bus_stop()
+
+    assert vars(queue)["_strategy"] == "restart"
+
+
+def test_non_offline_intent_keeps_restart(tmp_path: Path) -> None:
+    """文件存在但写的不是 offline 时，不能被误切。"""
+    intent = tmp_path / "shutdown-intent.json"
+    intent.write_text('{"mode": "restart"}', encoding="utf-8")
+    runtime = RabbitRuntime(
+        url="amqp://guest:guest@localhost/",
+        member_id="m",
+        events=[],
+        intent_path=intent,
+    )
+    queue = _FakeQueue()
+    cast(Any, runtime)._queue = queue
+
+    cast(Any, runtime)._before_bus_stop()
+
+    assert vars(queue)["_strategy"] == "restart"
