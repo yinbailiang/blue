@@ -153,10 +153,13 @@ contracts/tool/
 supervisor {
   state_dir: str = ".blue"
   reconcile_interval: <float, positive> = 2.0
-  shutdown_timeout: <float, positive> = 10.0
+  shutdown_timeout: <float, positive> = 60.0   # 整场停机墙钟，见「优雅停机」
   restart_backoff: <float, positive> = 0.5
   restart_max_attempts: <int, range(1, 100)> = 10
   registry_ttl: <float, positive> = 15.0
+  idempotency: bool = true                      # 事件去重总开关，见「事件去重」
+  idempotency_retention: <float, positive> = 604800.0
+  idempotency_sweep_interval: <float, positive> = 600.0
 }
 
 bus = BusService(mode = "managed", vhost = "blue", password = $bus_password)
@@ -189,7 +192,7 @@ service {
   depends_contracts = ["tool"]  # 依赖的事件契约名（自动注册其 EVENTS）
   depends_sdk = ["tool"]        # 依赖的 SDK 运行时包名（sdk/<name>/sdk.infd）
   restart = "always"            # always / on-failure / never
-  stop_timeout = 5.0
+  stop_timeout = 30.0           # 本服务的优雅停止预算（supervisor 到点 SIGKILL）
   startup_timeout = 30.0
   readiness = "process"         # process / tcp / none
   ready_tcp = null              # bus 可省略，从 url/proxy_listen 推导
@@ -711,6 +714,63 @@ rabbitmqctl -n blue@<host> -p blue list_queues name consumers messages message_b
 
 **0 消费者 + 大量消息**的 durable 队列就是血栓，`delete_queue` 即可回收。实测一次
 清掉 172 个孤儿队列、释放 51.8 GB（增长从 55 MB/20s 降到 1 MB/20s）。
+
+## 优雅停机：什么会丢、什么会重投
+
+停机策略分两种，由**谁发起**决定，不是配置项：
+
+| 场景 | 策略 | 队列后果 |
+|---|---|---|
+| 普通重启（`apply` / 崩溃拉起 / 自重启） | `restart` | 只停消费，绑定与积压保留 → 启动后**补投** |
+| 真正下线（`blue down` / Ctrl-C） | `offline` | 解绑 + 排空 → 离线期不再入队，**不留积压** |
+
+- **意图用文件传，不用信号**：supervisor 在停之前按服务写
+  `state_dir/shutdown-intent/<service>.json`，写完才发 `SIGTERM`。一个服务一份
+  ——共享一份时第一个停机的服务读完即删，其余全按 `restart` 留着积压。
+- **残留的意图会被清掉**：supervisor 启动时清 `shutdown-intent/`，服务侧也只认
+  `SHUTDOWN_INTENT_TTL`（300 秒）内的文件。上一次 down 被强杀留下的文件如果被当真，
+  下一次普通重启就会解绑队列、丢掉本该补投的积压。
+- **预算怎么分**：服务的 ``stop_timeout`` 是 supervisor 给它的优雅停止预算，服务据此
+  把自己的排空预算（`stop_timeout - min(2, 一半)`）交给总线的 `ShutdownConfig`：
+
+  | 总线超时 | 等的是什么 |
+  |---|---|
+  | `queue_timeout_*` | `queue.join()`：已投递的消息**派发完**（只占预算零头） |
+  | `tasks_timeout` | `_wait_all_tasks_done()`：**正在跑的处理器**收尾（占预算大头） |
+
+  两个不能反：`task_done()`（= `basic_ack`）是在派发之后就调的，等处理器收尾的是
+  `tasks_timeout`；把它压到 1 秒等于让在跑的处理器被取消，而它的消息早已 ack——
+  **不会重投，是静默丢掉**。
+- **按依赖分层倒序停，层内并发**：`dependency_levels()` 把服务按 `depends_on`
+  算成层级，停机从高层往低层走，同一层之间没有依赖关系，一起停（`asyncio.gather`）。
+  依赖别人的先停、被别人依赖的后停——bus 永远在最后一层，所以前面那些服务收尾时
+  总还在，能正常 ack。
+
+  | 配置 | 含义 | 本仓库的值 |
+  |---|---|---|
+  | `service.stop_timeout` | **单个服务**的优雅停止预算（到点 SIGKILL） | 30 秒 |
+  | `supervisor.shutdown_timeout` | **整场停机**的墙钟预算 | 60 秒 |
+
+  最坏时长因此是「**层数 × 单服务 30s**」而不是「服务数 × 30s」：本仓库 4 层
+  （webui → agent 那层 → 12 个工具/会话 → bus），上界 120 秒；实际停机通常 2~3 秒。
+- **告警只在真的被压缩时打**：层数 × 30s 超过 60s 是常态（服务退出远快于预算），
+  所以开局只记 info（含波次与上界）；某一波真的只剩不足该层最慢服务的 `stop_timeout`
+  时才 warning——那才是"预算花完了、这一波要打折停"。
+
+## 事件去重（业务不必自己写幂等）
+
+at-least-once 下事件可能重复投递（崩溃 / 排空超时 / `restart` 补投）。总线中间件按
+`(消费方 member_id, 处理器类名, event.id)` 记账，成功才标记、失败留着重试。
+
+- 去重库：`state_dir/dedupe/<service>.sqlite`，跨重启有效（进程内集合做不到——
+  重复恰恰发生在重启之后）；
+- 保留期：`supervisor.idempotency_retention`（默认 7 天）+ 每
+  `idempotency_sweep_interval`（默认 600 秒）顺带清理一次。不清就是只增不减；
+- 关掉：`supervisor.idempotency = false`（排查"某条事件没被处理"时的第一步）；
+- 写放大：默认 sqlite 参数（rollback journal + `synchronous=FULL`）单条约 13ms，
+  去重是「每事件 × 每处理器」各一次，所以这里用 WAL + `synchronous=NORMAL`（0.02ms）。
+  代价是掉电可能丢最后几个事务——最坏等于「该事件被重复执行一次」，也就是没有去重
+  时的行为。
 
 ## 新增服务
 
