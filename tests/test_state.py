@@ -13,7 +13,7 @@ from pathlib import Path
 import pytest
 
 from blue.control.model import ActualService, ActualState, ServiceStatus
-from blue.control.state import StateStore
+from blue.control.state import MaintenanceLock, StateStore
 from blue.errors import SupervisorError
 
 
@@ -75,6 +75,32 @@ def test_second_acquire_fails_while_held(tmp_path: Path) -> None:
             second.acquire(generation="gen-2")
     finally:
         first.release()
+
+
+def test_maintenance_lock_is_exclusive(tmp_path: Path) -> None:
+    """构建与回收共用一把锁：持有期间别人拿不到，释放后立刻能拿。"""
+    first = MaintenanceLock(tmp_path / ".blue")
+    second = MaintenanceLock(tmp_path / ".blue")
+
+    assert first.acquire() is True
+    assert second.acquire() is False
+    assert second.acquire(wait=0.2) is False
+
+    first.release()
+
+    assert second.acquire() is True
+    second.release()
+
+
+def test_maintenance_lock_release_is_idempotent(tmp_path: Path) -> None:
+    """没拿到锁 / 重复释放都不该抛——调用方总是写在 ``finally`` 里。"""
+    lock = MaintenanceLock(tmp_path / ".blue")
+
+    lock.release()
+
+    assert lock.acquire() is True
+    lock.release()
+    lock.release()
 
 
 def test_lock_records_versions(tmp_path: Path) -> None:

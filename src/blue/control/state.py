@@ -17,7 +17,10 @@ from blue.control.model import ActualState
 from blue.control.process import signal_tree
 from blue.errors import SupervisorError
 
-__all__ = ["LockInfo", "StateStore"]
+__all__ = ["MAINTENANCE_LOCK", "LockInfo", "MaintenanceLock", "StateStore"]
+
+MAINTENANCE_LOCK = "maintenance.lock"
+"""``apply``（构建）与 ``gc``（回收）互斥用的锁文件名。"""
 
 
 class LockInfo(BaseModel):
@@ -39,6 +42,59 @@ class LockInfo(BaseModel):
     代码变了就必须让 supervisor **重启自己**（execv）：它自己的 Python 进程里装的是
     旧代码，SIGHUP 重载配置也换不掉正在跑的实现。
     """
+
+
+class MaintenanceLock:
+    """把「构建产物」与「回收产物」串起来的独占文件锁。
+
+    为什么非要锁：wheel 目录是**构建期输入**，而 gc 的判据是"有没有被**已完成**
+    的产物引用"——构建中的产物还没写 manifest。``blue gc`` 撞上一次慢构建，轻则
+    删掉正在被 ``uv pip install --find-links`` 用的 wheel，重则删掉刚建好、还没
+    被新世代引用上的产物。一句"请勿并发"拦不住 cron 里的 gc，所以用 flock 拦住。
+
+    锁文件与 ``supervisor.lock`` 分开：后者是调谐器的单实例锁，常驻持有，不能共用。
+    """
+
+    def __init__(self, state_dir: Path) -> None:
+        self.path = state_dir / MAINTENANCE_LOCK
+        self._handle: TextIO | None = None
+
+    def acquire(self, *, wait: float = 0.0, interval: float = 0.05) -> bool:
+        """尝试取锁。
+
+        :param wait: 最多等多久（秒）；``0`` 表示现在就给结果，不阻塞
+        :param interval: 轮询间隔（秒）
+        :return: 是否拿到了锁
+        """
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        handle = self.path.open("a+", encoding="utf-8")
+        deadline = time.monotonic() + wait
+        while True:
+            try:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                if time.monotonic() >= deadline:
+                    handle.close()
+                    return False
+                time.sleep(interval)
+                continue
+            handle.seek(0)
+            handle.truncate()
+            handle.write(f"pid={os.getpid()}\n")
+            handle.flush()
+            self._handle = handle
+            return True
+
+    def release(self) -> None:
+        """释放锁；没拿到过或已释放时什么也不做。"""
+        handle = self._handle
+        self._handle = None
+        if handle is None:
+            return
+        with suppress(OSError):
+            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+        with suppress(OSError):
+            handle.close()
 
 
 class StateStore:

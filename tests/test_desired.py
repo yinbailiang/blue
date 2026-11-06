@@ -76,6 +76,25 @@ def test_redacted_render_state_is_json_serialisable(desired: DesiredState) -> No
     assert rendered["services"]["agent"]["config"]["api_key"] == "***"
 
 
+def test_meta_env_is_redacted(desired: DesiredState) -> None:
+    """``meta.env`` 的值默认打码：键名不可信（``FOO=secret`` 也合法）。
+
+    服务清单会原样进 ``blue render`` / 世代快照，而 ``_redact`` 只认"密钥味儿"的
+    字段名——``env`` 整块会漏过去，将来真把密钥写进 env 就会明文输出。
+    """
+    service = desired.services["terminal"]
+    patched = service.model_copy(
+        update={"meta": service.meta.model_copy(update={"env": {"FOO": "s3cret"}})}
+    )
+    state = desired.model_copy(update={"services": {"terminal": patched}})
+
+    masked = render_state(state)["services"]["terminal"]["meta"]["env"]
+    plain = render_state(state, redact=False)["services"]["terminal"]["meta"]["env"]
+
+    assert masked == {"FOO": "***"}
+    assert plain == {"FOO": "s3cret"}
+
+
 def _infra_of(service: str, desired: DesiredState) -> dict[str, object]:
     """取某个服务运行配置里的 ``infra`` 段。"""
     payload = json.loads(runtime_config_content(desired.services[service], desired))

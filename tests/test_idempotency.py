@@ -637,6 +637,8 @@ def test_vacuum_databases_dry_run_then_shrink(tmp_path: Path) -> None:
 
     report = vacuum_databases(tmp_path, dry_run=True)
     assert report.files == 1 and report.reclaimed > 0 and not report.skipped
+    assert report.total_bytes == before
+    assert report.free_pages > 0
     assert path.stat().st_size == before
 
     report = vacuum_databases(tmp_path, dry_run=False)
@@ -648,4 +650,7 @@ def test_vacuum_databases_without_files(tmp_path: Path) -> None:
     """没有去重库时给一个空报告，不报错。"""
     report = vacuum_databases(tmp_path, dry_run=True)
 
-    assert report.files == 0 and report.reclaimed == 0 and not report.skipped
+    assert report.files == 0
+    assert report.reclaimed == 0
+    assert report.total_bytes == 0 and report.free_pages == 0
+    assert not report.skipped

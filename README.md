@@ -659,7 +659,7 @@ verify → 等全部服务 Ready；超时/失败 → 自动翻回上一个 stabl
 | `blue rollback` | 回到上一个 stable 世代（整机） |
 | `blue rollback --service agent` | 只把某个服务的产物+配置换回旧世代（生成新世代，历史保持线性） |
 | `blue generations` | 列出全部世代、当前指针与状态（`*` 为当前） |
-| `blue gc --keep N` | 回收老世代、无引用产物与 wheel 目录；`--dry-run` 先看要删什么，`--vacuum-dedupe` 顺手压去重库 |
+| `blue gc --keep N` | 回收老世代、无引用产物与 wheel 目录；`--dry-run` 先看要删什么，`--vacuum-dedupe` 顺手压去重库（与 `apply` 互斥，撞上就跳过） |
 
 六条容易踩的规则：
 
@@ -794,7 +794,8 @@ rabbitmqctl -n blue@<host> -p blue list_queues name consumers messages message_b
 ## 事件去重：保证「执行一次」，不插手执行结果
 
 at-least-once 下事件可能重复投递（崩溃重连 / `restart` 补投）。中间件按
-`(消费方, 处理器, event.id)` 记账：一条事件最多被同一个处理器执行一次。
+`(消费方, 处理器, event.id)` 记账：**在保留期内**，一条事件最多被同一个处理器执行一次
+（超过 `idempotency_retention` 的极端重投会重新执行——去重表已经不记得它了）。
 
 - **认领写在处理器启动时**（`on_task_start`），`before_dispatch` 只查不写。于是
   「派发之后、启动之前」崩溃（supervisor 到点 SIGKILL、掉电）不会留下认领，broker

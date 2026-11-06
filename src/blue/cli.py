@@ -37,7 +37,7 @@ from blue.control.model import ActualState, ServiceStatus
 from blue.control.reconciler import Supervisor
 from blue.control.runner import ProcessRunner
 from blue.control.smoke import SmokeReport, run_smoke
-from blue.control.state import LockInfo, StateStore
+from blue.control.state import LockInfo, MaintenanceLock, StateStore
 from blue.errors import BlueError
 from blue.idempotency import vacuum_databases
 from blue.runtime import RUNTIME_CONFIG_VERSION
@@ -52,6 +52,9 @@ __all__ = [
     "needs_self_restart",
     "wait_for_activation",
 ]
+
+MAINTENANCE_WAIT = 300.0
+"""``apply`` 等构建锁的上限（秒）：``gc`` 一般是秒级返回，等 5 分钟足够暴露卡死。"""
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -378,22 +381,36 @@ def _prepare_generation(
     ``expect`` 是预览与执行之间的一致性断言：它要求 ``current`` 仍是你在
     ``blue plan`` 里看到的那个世代。校验放在**构建之前**——世界变了就直接退出，
     连产物都不动。只锁起点：执行完落在哪一代不归它管。
+
+    构建与冻结期间持有 :class:`MaintenanceLock`：``gc`` 会拿同一把锁，否则它可能
+    删掉正在构建的 wheel 目录（构建中的产物还没有 manifest）。
     """
     desired = load_desired(config_path)
     if expect is not None:
         _generation_store(desired).assert_current(expect)
     artifacts = _artifact_store(desired)
-    if build:
-        # 先扫 editable：工作区外的 editable 依赖无法固化进产物，宁可在这里拒绝
-        # apply，也不要让 base 里悄悄少一个模块、等 18 个服务一起 ImportError。
-        artifacts.reject_editable_installs()
-        _build_artifacts(desired, artifacts)
-    generation = _generation_store(desired).create(
-        desired,
-        artifacts,
-        reason=reason,
-        created_by=_git_revision(desired.base_dir),
-    )
+    lock = MaintenanceLock(desired.supervisor.state_dir)
+    if not lock.acquire():
+        print("另一个 apply / gc 正在跑，等它结束……", file=sys.stderr)
+        if not lock.acquire(wait=MAINTENANCE_WAIT):
+            raise BlueError(
+                "等不到构建锁：另一个 apply / gc 已经跑了"
+                f" {MAINTENANCE_WAIT:.0f}s 以上，先确认它没卡住"
+            )
+    try:
+        if build:
+            # 先扫 editable：工作区外的 editable 依赖无法固化进产物，宁可在这里拒绝
+            # apply，也不要让 base 里悄悄少一个模块、等 18 个服务一起 ImportError。
+            artifacts.reject_editable_installs()
+            _build_artifacts(desired, artifacts)
+        generation = _generation_store(desired).create(
+            desired,
+            artifacts,
+            reason=reason,
+            created_by=_git_revision(desired.base_dir),
+        )
+    finally:
+        lock.release()
     return desired, generation
 
 
@@ -718,12 +735,39 @@ def _generations(config_path: str, *, as_json: bool) -> int:
 def _gc(
     config_path: str, *, keep: int | None, dry_run: bool, vacuum: bool = False
 ) -> int:
-    """回收老世代与无人引用的产物 / wheel（数据面永不回收）。"""
+    """回收老世代与无人引用的产物 / wheel（数据面永不回收）。
+
+    与 ``apply`` 共用 :class:`MaintenanceLock`：构建中的 wheel 目录还没被任何产物
+    引用，并发回收会把它们当垃圾删掉。拿不到锁就跳过本次回收。
+    """
     desired = load_desired(config_path)
     settings = desired.supervisor
     keep_count = keep if keep is not None else settings.generation_keep
     store = _generation_store(desired)
     artifacts = _artifact_store(desired)
+    lock = MaintenanceLock(desired.supervisor.state_dir)
+    if not lock.acquire():
+        print(
+            "跳过本次回收：另一个 apply / gc 正在跑。"
+            "构建与回收互斥，否则可能删掉正在用的 wheel 或产物，稍后再跑一次。",
+            file=sys.stderr,
+        )
+        return 1
+    try:
+        return _gc_locked(desired, store, artifacts, keep_count, dry_run, vacuum)
+    finally:
+        lock.release()
+
+
+def _gc_locked(
+    desired: DesiredState,
+    store: GenerationStore,
+    artifacts: ArtifactStore,
+    keep_count: int,
+    dry_run: bool,
+    vacuum: bool,
+) -> int:
+    """``_gc`` 的主体：持着维护锁执行实际回收与输出。"""
 
     # 仍有存活进程在用的世代：只重启变了服务 → 进程会跨世代共存，
     # 老进程的 BLUE_CONFIG_FILE 还指着它启动时那一代，删了就崩（实测踩过）。
@@ -782,7 +826,14 @@ def _vacuum_dedupe(state_dir: Path, *, dry_run: bool) -> None:
         print("去重库：没有可收拾的文件")
         return
     verb = "可回收" if dry_run else "已回收"
-    print(f"{verb}去重库空间 {_human_size(report.reclaimed)}")
+    print(
+        f"{verb}去重库空间 {_human_size(report.reclaimed)}"
+        f"（扫描时共 {_human_size(report.total_bytes)}，"
+        f"空闲页 {report.free_pages} 个）"
+    )
+    if dry_run and not report.free_pages and not report.skipped:
+        # 0 B 不一定是 bug：库里的行还没被保留期删掉，本来就没有碎片可压
+        print("  ← 空闲页为 0：还没有“已删行但没压”的碎片，保留期到了再跑一次")
     if report.skipped:
         print(
             f"跳过 {len(report.skipped)} 个（被服务占用或不可读，停机窗口再跑）："

@@ -29,7 +29,7 @@ from blue.control.model import (
     ServiceStatus,
 )
 from blue.control.smoke import Check, SmokeReport
-from blue.control.state import StateStore
+from blue.control.state import MaintenanceLock, StateStore
 from blue.runtime import RUNTIME_CONFIG_VERSION
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -744,6 +744,25 @@ def test_gc_keeps_current_generation(
     remaining = [generation.id for generation in generations.list()]
     assert remaining == [3]
     assert "将删除世代 2 个" in capsys.readouterr().out
+
+
+def test_gc_skips_when_apply_is_building(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """gc 与 apply 共用维护锁：拿不到就跳过并说清楚，不动任何东西。
+
+    构建中的 wheel 目录还没被任何产物引用（manifest 在构建末尾才写），并发回收
+    会把它们当垃圾删掉——所以 gc 必须让路，而不是"小心一点"。
+    """
+    config = _config(tmp_path)
+    lock = MaintenanceLock(load_desired(config).supervisor.state_dir)
+    assert lock.acquire()
+    try:
+        assert main(["--config", str(config), "gc", "--dry-run"]) == 1
+    finally:
+        lock.release()
+
+    assert "另一个 apply / gc 正在跑" in capsys.readouterr().err
 
 
 def test_wait_for_activation_reports_rollback(

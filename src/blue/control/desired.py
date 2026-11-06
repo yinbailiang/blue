@@ -366,8 +366,14 @@ def render_state(desired: DesiredState, *, redact: bool = True) -> dict[str, Any
     services: dict[str, Any] = {}
     for name, service in desired.services.items():
         config = _redact(service.config) if redact else service.config
+        meta = service.meta.model_dump(mode="json")
+        if redact and meta.get("env"):
+            # ``env`` 的**键名不可信**（``FOO=secret`` 完全合法），命不中
+            # _SECRET_HINTS，所以整块值一律打码、只留键名便于排错：
+            # ``blue render`` 默认脱敏，将来真把密钥写进 meta.env 也不会明文输出。
+            meta["env"] = {key: "***" for key in cast(dict[str, str], meta["env"])}
         services[name] = {
-            "meta": service.meta.model_dump(mode="json"),
+            "meta": meta,
             "config": _json_safe(config),
             "config_hash": service.config_hash,
             "package_version": service.package_version,

@@ -234,7 +234,9 @@ view_image = ViewImageService()
 ] import . as kwin_tools
 
 mcp_bridge = McpBridgeService(
-  tools = [] # [*$kwin_tools] 暂时关闭
+  # 两个 server 现在都 enabled = false，所以白名单必须为空；要恢复 kwin 的能力就写成
+  # tools = [*$kwin_tools]（上面 !var 块里就是那份完整清单）。
+  tools = []
   servers = [
     # 禁用后它的工具必须同时从上面的 tools 白名单里撤掉，否则配置一致性
     # 校验会直接报错（"指向已禁用的 server"）。

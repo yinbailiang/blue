@@ -352,6 +352,11 @@ blue gc --keep 1 --dry-run   # 先看要删什么
 （那是另一个进程正在写，删了就是把它的 build 打崩）；`service_dir.rmdir()` 这类
 竞态失败只忽略、不中断整轮回收。
 
+更重要的是**互斥**：`apply` 与 `gc` 共用 `state_dir/maintenance.lock`。构建中的
+wheel 目录还没被任何产物引用（manifest 要等构建末尾才写），并发回收会把它们当
+垃圾删掉；同理刚建好、还没被新世代引用上的产物也会中招。`gc` 拿不到锁就跳过
+本次（退出码 1），`apply` 则最多等 5 分钟。
+
 实测（本项目真机）：`blue gc --keep 1` 删掉 6 个世代 + 108 个产物 + 2 个基座，
 `.blue/artifacts` 从 231 MB 降到 148 MB，系统仍在跑、无服务重启。
 

@@ -114,6 +114,12 @@ class VacuumReport:
     reclaimed: int
     """回收的字节数；``dry_run`` 下是**可回收**量（空闲页占用）。"""
 
+    total_bytes: int
+    """扫描时所有库文件的占用合计（VACUUM 之前）。"""
+
+    free_pages: int
+    """空闲页数量：``0`` 说明还没有“已删行但没压”的碎片（或已压过）。"""
+
     skipped: tuple[str, ...]
     """跳过的库，形如 ``"demo.sqlite（database is locked）"``——多为被服务占着。"""
 
@@ -133,8 +139,17 @@ def vacuum_databases(state_dir: Path, *, dry_run: bool = False) -> VacuumReport:
     directory = state_dir / DEDUPE_DIRNAME
     files = sorted(directory.glob("*.sqlite")) if directory.is_dir() else []
     reclaimed = 0
+    total_bytes = 0
+    free_pages = 0
     skipped: list[str] = []
     for path in files:
+        try:
+            before = path.stat().st_size
+        except OSError as error:
+            # glob 与 stat 之间被删/换掉：算噪声，跳过就好，别把整个 gc 带崩
+            skipped.append(f"{path.name}（{error}）")
+            continue
+        total_bytes += before
         try:
             connection = sqlite3.connect(
                 f"{path.resolve().as_uri()}?mode=rw", uri=True, timeout=0.2
@@ -145,23 +160,29 @@ def vacuum_databases(state_dir: Path, *, dry_run: bool = False) -> VacuumReport:
         try:
             # VACUUM 不能在事务里跑：关掉隐式 BEGIN
             connection.isolation_level = None
+            page = connection.execute("PRAGMA page_size").fetchone()[0]
+            free = connection.execute("PRAGMA freelist_count").fetchone()[0]
+            free_pages += int(free)
             if dry_run:
-                page = connection.execute("PRAGMA page_size").fetchone()[0]
-                free = connection.execute("PRAGMA freelist_count").fetchone()[0]
                 reclaimed += int(page) * int(free)
             else:
-                before = path.stat().st_size
                 connection.execute("VACUUM")
                 reclaimed += max(before - path.stat().st_size, 0)
         except (sqlite3.Error, OSError) as error:
             skipped.append(f"{path.name}（{error}）")
         finally:
             connection.close()
-    return VacuumReport(files=len(files), reclaimed=reclaimed, skipped=tuple(skipped))
+    return VacuumReport(
+        files=len(files),
+        reclaimed=reclaimed,
+        total_bytes=total_bytes,
+        free_pages=free_pages,
+        skipped=tuple(skipped),
+    )
 
 
 class IdempotencyMiddleware(Middleware):
-    """按「消费方 + 处理器」维度保证事件**只被执行一次**。
+    """按「消费方 + 处理器」维度保证事件**在保留期内**只被执行一次。
 
     状态机（只记「已派发、还没拿到执行权」的事件，两类出口都会清，不泄漏）：
 
