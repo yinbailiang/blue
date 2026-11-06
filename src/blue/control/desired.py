@@ -49,6 +49,8 @@ __all__ = [
     "SECRET_FILES",
     "digest_package",
     "load_desired",
+    "load_sdk",
+    "load_supervisor",
     "read_package_name",
     "read_package_version",
     "redact_config",
@@ -88,7 +90,7 @@ def load_desired(path: str | Path = DEFAULT_CONFIG_PATH) -> DesiredState:
     # emit 投影成 JSON 原生值，下游（pydantic 校验、渲染、写盘、算指纹）只见一种形态。
     # 别在各处再手写 isinstance 兜底——``PurePosixPath`` 不是 ``Path`` 子类，极易漏。
     value = cast(dict[str, Any], json.loads(_project(result.value)))
-    supervisor = _load_supervisor(value.get("supervisor"), base_dir)
+    supervisor = load_supervisor(value.get("supervisor"), base_dir)
     contracts = _load_contracts(base_dir)
 
     services: dict[str, DesiredService] = {}
@@ -103,7 +105,7 @@ def load_desired(path: str | Path = DEFAULT_CONFIG_PATH) -> DesiredState:
 
     _validate_dependencies(services)
     _validate_contract_dependencies(services, contracts)
-    sdk = _load_sdk(base_dir)
+    sdk = load_sdk(base_dir)
     _validate_sdk_dependencies(services, sdk)
     bus_url, bus_transport = _bus_endpoint(services)
     deps_hash = _load_deps_hash(base_dir)
@@ -398,7 +400,7 @@ def redact_state(desired: DesiredState) -> dict[str, Any]:
     return render_state(desired, redact=True)
 
 
-def _load_supervisor(raw: object, base_dir: Path) -> SupervisorSettings:
+def load_supervisor(raw: object, base_dir: Path) -> SupervisorSettings:
     """解析 ``supervisor`` 块；未知键只告警、不报错。
 
     ``blue.infd`` 是由**已经在跑的那个**调谐器解析的。如果新增配置项一律拒绝
@@ -500,7 +502,7 @@ def _load_deps_hash(base_dir: Path) -> str:
         return ""
 
 
-def _load_sdk(base_dir: Path) -> DesiredSdk:
+def load_sdk(base_dir: Path) -> DesiredSdk:
     """计算 blue 核心与 ``sdk/*`` 运行时包的指纹。
 
     核心的 ``source_hash`` 只覆盖 ``src/blue/**`` + 根 pyproject；``sdk/<name>/``

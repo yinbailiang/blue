@@ -13,6 +13,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import json
 import logging
@@ -34,6 +35,7 @@ __all__ = [
     "ArtifactStore",
     "artifact_hash",
     "editable_installs",
+    "link_tree",
     "venv_site_packages",
 ]
 
@@ -64,6 +66,9 @@ _SKIP_PREFIXES = ("blue", "_virtualenv")
 
 _DIRECT_URL_RECORD = "direct_url.json"
 """PEP 610 的安装来源记录；``dir_info.editable`` 是"这是 editable 安装"的权威判据。"""
+
+_STAGING_MARK = ".tmp-"
+"""构建中的临时目录标记：``<指纹>.tmp-<pid>`` / ``<锁指纹>.tmp-<pid>``。"""
 
 
 @dataclass(frozen=True)
@@ -280,14 +285,14 @@ class ArtifactStore:
         source = venv_site_packages(workspace_venv)
         self.reject_editable_installs(source)
         self._warn_if_cross_device(source, self.base_root)
-        staging = base.with_name(f"{base.name}.tmp-{os.getpid()}")
+        staging = base.with_name(f"{base.name}{_STAGING_MARK}{os.getpid()}")
         shutil.rmtree(staging, ignore_errors=True)
         target = staging / "lib" / source.parent.name / "site-packages"
         target.mkdir(parents=True, exist_ok=True)
         for entry in sorted(source.iterdir()):
             if _skip_site_packages_entry(entry.name):
                 continue
-            _link_tree(entry, target / entry.name)
+            link_tree(entry, target / entry.name)
         (staging / BASE_MARKER).write_text("ok\n", encoding="utf-8")
         base.parent.mkdir(parents=True, exist_ok=True)
         shutil.rmtree(base, ignore_errors=True)
@@ -311,11 +316,16 @@ class ArtifactStore:
             for artifact_dir in sorted(service_dir.iterdir()):
                 if not artifact_dir.is_dir() or artifact_dir.name in keep_hashes:
                     continue
+                if _is_staging(artifact_dir):
+                    # 别的进程正在往里写（<hash>.tmp-<pid>），删了就是把人家 build 打崩
+                    continue
                 if not dry_run:
                     shutil.rmtree(artifact_dir, ignore_errors=True)
                 removed.append(f"{service_dir.name}/{artifact_dir.name}")
-            if not dry_run and not any(service_dir.iterdir()):
-                service_dir.rmdir()
+            if not dry_run:
+                # 目录可能刚被并发构建创建出来；竞争下 rmdir 失败不该打断整轮回收
+                with contextlib.suppress(OSError):
+                    service_dir.rmdir()
         return removed
 
     def gc_bases(self, keep_keys: set[str], *, dry_run: bool = False) -> list[str]:
@@ -325,6 +335,9 @@ class ArtifactStore:
             return removed
         for base_dir in sorted(self.base_root.iterdir()):
             if not base_dir.is_dir() or base_dir.name in keep_keys:
+                continue
+            if _is_staging(base_dir):
+                # 另一个进程正在克隆 base，删了它就得从零重来
                 continue
             if not dry_run:
                 shutil.rmtree(base_dir, ignore_errors=True)
@@ -393,7 +406,7 @@ class ArtifactStore:
         self, service: DesiredService, desired: DesiredState, ref: ArtifactRef
     ) -> None:
         """构建一个产物：造 wheel → 建 venv → 装包 → 落 manifest 与完成标记。"""
-        staging = ref.path.with_name(f"{ref.path.name}.tmp-{os.getpid()}")
+        staging = ref.path.with_name(f"{ref.path.name}{_STAGING_MARK}{os.getpid()}")
         shutil.rmtree(staging, ignore_errors=True)
         staging.mkdir(parents=True, exist_ok=True)
         base_site = self.ensure_base(desired)
@@ -655,6 +668,11 @@ def _is_within(path: Path, root: Path) -> bool:
     return True
 
 
+def _is_staging(path: Path) -> bool:
+    """是否是构建中的临时目录——另一个进程正在写，回收必须让开。"""
+    return _STAGING_MARK in path.name
+
+
 def _warn_unknown_manifest(origin: Path, problem: str) -> None:
     """清理类操作遇到读不懂的清单时只告警、不猜——猜错会删掉还在用的 wheel。"""
     logger.warning("产物清单 %s %s，跳过 wheel 回收判定", origin, problem)
@@ -748,7 +766,7 @@ def _has_wheel(directory: Path) -> bool:
     return directory.is_dir() and any(directory.glob("*.whl"))
 
 
-def _link_tree(source: Path, target: Path) -> None:
+def link_tree(source: Path, target: Path) -> None:
     """把 ``source`` 尽量以硬链接方式放到 ``target``（跨分区退化为拷贝）。
 
     硬链接让 25 个产物共享同一份依赖 inode；拷贝只是慢与占空间，语义不变。
@@ -756,7 +774,7 @@ def _link_tree(source: Path, target: Path) -> None:
     if source.is_dir():
         target.mkdir(parents=True, exist_ok=True)
         for entry in source.iterdir():
-            _link_tree(entry, target / entry.name)
+            link_tree(entry, target / entry.name)
         return
     if target.exists() or target.is_symlink():
         return

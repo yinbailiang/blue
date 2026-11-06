@@ -56,7 +56,7 @@ _NOTIFICATION_MARKERS = ("🔄 重启完成", "❌ 重启未收敛")
 """本脚本通知的开头；用来给队列做幂等（同类旧通知先清掉）。"""
 
 
-def _is_own_notification(text: str) -> bool:
+def is_own_notification(text: str) -> bool:
     """是不是本脚本发过的重启通知。
 
     为什么要去重：outbox 是 at-least-once。agent 领走通知后如果正好赶上 execv
@@ -315,7 +315,7 @@ async def _enqueue(
         )
         if isinstance(listed, SessionOutboxListResponse):
             for queued in listed.messages:
-                if not _is_own_notification(queued.text):
+                if not is_own_notification(queued.text):
                     continue
                 await request(
                     proxy,
@@ -363,7 +363,7 @@ _FAILURE_MARKERS = ("冒烟失败", "激活失败", "配置编译失败", "错�
 """日志里表示"真的失败了"的行首标记；比盲取尾部靠谱得多。"""
 
 
-def _failure_reason(log_path: Path) -> str:
+def failure_reason(log_path: Path) -> str:
     """从日志里挑出真正的失败原因。
 
     直接取尾部会把回滚之后的"已稳定"当成结论——实测踩过：冒烟失败的回执里
@@ -423,7 +423,7 @@ def run_worker(
     ok = exit_code == 0 and converged
     detail = ""
     if exit_code != 0:
-        detail = f"blue {commands[0]} 退出码 {exit_code}：{_failure_reason(log_path)}"
+        detail = f"blue {commands[0]} 退出码 {exit_code}：{failure_reason(log_path)}"
     elif failure is not None:
         detail = failure
 

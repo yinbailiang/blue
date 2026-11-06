@@ -563,6 +563,23 @@ def test_create_dedupes_against_unactivated_generation(tmp_path: Path) -> None:
     assert len(store.list()) == 1
 
 
+def test_create_reuses_failed_generation(tmp_path: Path) -> None:
+    """上一代激活失败、内容又没变时复用它：同输入同结果，再造一份相同目录没意义。
+
+    复用时**不**抹掉 ``.failed``——失败的证据留着，下一次激活会重新记一遍。
+    """
+    store = _store(tmp_path)
+    desired = _desired(tmp_path, generation="gen-1")
+    generation = store.create(desired, _artifacts(tmp_path), reason="apply")
+    store.mark_failed(generation, "冒烟失败")
+
+    again = store.create(desired, _artifacts(tmp_path), reason="apply")
+
+    assert again.id == generation.id
+    assert len(store.list()) == 1
+    assert again.failed is True
+
+
 def _point_current(store: GenerationStore, *, ident: int, fingerprint: str) -> None:
     """造一个 ``current`` 指向的世代（只写 ``current()`` 需要的字段）。"""
     path = store.root / f"{ident:04d}"

@@ -764,10 +764,10 @@ def test_unknown_supervisor_key_warns_but_does_not_fail(
     未知键，加一个新配置项就会死锁——旧代码热重载失败、又因"配置编译失败"放弃
     execv 自重启，只能人工 `blue down && blue up`（实测卡过）。
     """
-    from blue.control.desired import _load_supervisor  # pyright: ignore[reportPrivateUsage]
+    from blue.control.desired import load_supervisor
 
     with caplog.at_level(logging.WARNING):
-        settings = _load_supervisor(
+        settings = load_supervisor(
             {"state_dir": ".blue", "future_knob": 1, "smoke_enabled": False}, tmp_path
         )
 
@@ -778,8 +778,8 @@ def test_unknown_supervisor_key_warns_but_does_not_fail(
 
 def test_bad_supervisor_value_still_fails(tmp_path: Path) -> None:
     """值本身非法仍然要报错——放行未知键不等于放行错值。"""
-    from blue.control.desired import _load_supervisor  # pyright: ignore[reportPrivateUsage]
+    from blue.control.desired import load_supervisor
     from blue.errors import ConfigError
 
     with pytest.raises(ConfigError):
-        _load_supervisor({"activation_timeout": -1}, tmp_path)
+        load_supervisor({"activation_timeout": -1}, tmp_path)

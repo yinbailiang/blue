@@ -451,7 +451,7 @@ def test_apply_asks_self_restart_only_when_sdk_hash_differs(
     apply 一次：指纹不同 → SIGUSR1 → 新镜像把新指纹写进锁；
     再 apply 一次：指纹相同 → SIGHUP → 不再重启。一次 apply 只重启一次。
     """
-    from blue.cli import _needs_self_restart  # pyright: ignore[reportPrivateUsage]
+    from blue.cli import needs_self_restart
     from blue.config import load_desired
     from blue.control.state import LockInfo
 
@@ -473,8 +473,8 @@ def test_apply_asks_self_restart_only_when_sdk_hash_differs(
         config_version=RUNTIME_CONFIG_VERSION,
         sdk_hash=desired.sdk.source_hash,
     )
-    assert _needs_self_restart(old, desired=desired) is True
-    assert _needs_self_restart(same, desired=desired) is False
+    assert needs_self_restart(old, desired=desired) is True
+    assert needs_self_restart(same, desired=desired) is False
 
 
 def test_exec_self_uses_the_supervise_subcommand(
@@ -750,7 +750,7 @@ def test_wait_for_activation_reports_rollback(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     """apply --wait 遇到 rolled_back 时返回非 0 并说明回滚去向。"""
-    from blue.cli import _wait_for_activation  # pyright: ignore[reportPrivateUsage]
+    from blue.cli import wait_for_activation
     from blue.config import load_desired
 
     config = _config(tmp_path)
@@ -780,7 +780,7 @@ def test_wait_for_activation_reports_rollback(
         )
     )
 
-    code = _wait_for_activation(desired, generation, timeout=5.0)
+    code = wait_for_activation(desired, generation, timeout=5.0)
 
     assert code == 1
     captured = capsys.readouterr()
@@ -792,7 +792,7 @@ def test_wait_for_activation_returns_zero_when_stable(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     """apply --wait 在 stable 时返回 0。"""
-    from blue.cli import _wait_for_activation  # pyright: ignore[reportPrivateUsage]
+    from blue.cli import wait_for_activation
     from blue.config import load_desired
 
     config = _config(tmp_path)
@@ -816,7 +816,7 @@ def test_wait_for_activation_returns_zero_when_stable(
         )
     )
 
-    assert _wait_for_activation(desired, generation, timeout=5.0) == 0
+    assert wait_for_activation(desired, generation, timeout=5.0) == 0
     assert "已稳定" in capsys.readouterr().out
 
 
@@ -845,7 +845,7 @@ def _no_verify(
 def _wait_ok(
     desired: DesiredState, generation: Generation, timeout: float | None
 ) -> int:
-    """假装闸门立刻通过（对应 _wait_for_activation 的位置参数调用）。"""
+    """假装闸门立刻通过（对应 wait_for_activation 的位置参数调用）。"""
     return 0
 
 
@@ -934,7 +934,7 @@ def test_apply_rolls_back_when_smoke_fails(
         )
     )
     monkeypatch.setattr("blue.cli._notify_supervisor", _no_notify)
-    monkeypatch.setattr("blue.cli._wait_for_activation", _wait_ok)
+    monkeypatch.setattr("blue.cli.wait_for_activation", _wait_ok)
 
     def fake_smoke(desired: DesiredState, generation: Generation) -> SmokeReport:
         return bad
@@ -963,7 +963,7 @@ def test_apply_passes_smoke_and_records_tool_count(
         tools=("now", "get_weather"),
     )
     monkeypatch.setattr("blue.cli._notify_supervisor", _no_notify)
-    monkeypatch.setattr("blue.cli._wait_for_activation", _wait_ok)
+    monkeypatch.setattr("blue.cli.wait_for_activation", _wait_ok)
 
     def fake_smoke(desired: DesiredState, generation: Generation) -> SmokeReport:
         return good

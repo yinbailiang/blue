@@ -214,6 +214,11 @@ def test_runtime_package_enters_artifact_closure(
             "source_hash": "tool-sdk-1",
         }
     }
+    # 写方（_build）和读方（_manifest_hashes）各写一份字段列表，靠这条钉住不漂：
+    # 读不懂清单时 wheel 回收会整体跳过，等于 GC 静默失效。
+    wheel_keys = _store(tmp_path).keep_wheel_keys({"demo": {ref.hash}})
+    assert wheel_keys is not None, "产物清单必须能被 wheel 回收读懂"
+    assert "tool-sdk-1" in wheel_keys, "sdk 包的 source_hash 必须进保留集"
     install = fake_uv.install_calls()[0]
     assert "blue-tool-sdk" in install
     built = [
@@ -356,6 +361,25 @@ def test_gc_removes_unreferenced_artifacts(tmp_path: Path) -> None:
     assert removed_bases == ["_base/deps-old"]
 
 
+def test_gc_skips_staging_directories(tmp_path: Path) -> None:
+    """构建中的 ``<指纹>.tmp-<pid>`` 一律不动——删了就是把别人的 apply 打崩。"""
+    store = _store(tmp_path)
+    (store.root / "demo" / "drop-me").mkdir(parents=True)
+    staging = store.root / "demo" / "building.tmp-424242"
+    staging.mkdir()
+    (store.base_root / "deps-old").mkdir(parents=True)
+    base_staging = store.base_root / "deps-2.tmp-424242"
+    base_staging.mkdir(parents=True)
+
+    removed = store.gc({})
+    removed_bases = store.gc_bases(set())
+
+    assert removed == ["demo/drop-me"]
+    assert staging.is_dir()
+    assert removed_bases == ["_base/deps-old"]
+    assert base_staging.is_dir()
+
+
 def test_gc_dry_run_keeps_everything(tmp_path: Path) -> None:
     """dry-run 只报告。"""
     store = _store(tmp_path)
@@ -372,15 +396,15 @@ def test_gc_dry_run_keeps_everything(tmp_path: Path) -> None:
 
 def test_link_tree_reuses_inodes_on_same_filesystem(tmp_path: Path) -> None:
     """同分区硬链接：两份产物共享 inode，磁盘不重复占用。"""
-    from blue.control.artifacts import _link_tree  # pyright: ignore[reportPrivateUsage]
+    from blue.control.artifacts import link_tree
 
     source = tmp_path / "src" / "file.txt"
     source.parent.mkdir()
     source.write_text("hello\n", encoding="utf-8")
     first = tmp_path / "a" / "file.txt"
     second = tmp_path / "b" / "file.txt"
-    _link_tree(source, first)
-    _link_tree(source, second)
+    link_tree(source, first)
+    link_tree(source, second)
 
     assert first.read_text(encoding="utf-8") == "hello\n"
     if os.stat(source).st_dev == os.stat(first).st_dev:

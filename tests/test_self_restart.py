@@ -10,7 +10,7 @@ from __future__ import annotations
 import asyncio
 from pathlib import Path
 
-from blue.cli import _maybe_self_restart  # pyright: ignore[reportPrivateUsage]
+from blue.cli import maybe_self_restart
 from blue.config import load_desired
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -30,7 +30,7 @@ def test_restarts_on_signal() -> None:
     """配置能编译 → 直接同意 execv（不自己再判一遍代码有没有变）。"""
     desired = load_desired(ROOT / "blue.infd")
     supervisor = _FakeSupervisor()
-    assert asyncio.run(_maybe_self_restart(desired, supervisor)) is True  # type: ignore[arg-type]
+    assert asyncio.run(maybe_self_restart(desired, supervisor)) is True  # type: ignore[arg-type]
     assert supervisor.reloads == 0
 
 
@@ -41,5 +41,5 @@ def test_falls_back_to_reload_when_config_is_broken(tmp_path: Path) -> None:
     broken.write_text("这不是合法配置 {\n", encoding="utf-8")
     desired.config_path = broken
     supervisor = _FakeSupervisor()
-    assert asyncio.run(_maybe_self_restart(desired, supervisor)) is False  # type: ignore[arg-type]
+    assert asyncio.run(maybe_self_restart(desired, supervisor)) is False  # type: ignore[arg-type]
     assert supervisor.reloads == 1

@@ -44,7 +44,14 @@ from blue.runtime import RUNTIME_CONFIG_VERSION
 
 logger = logging.getLogger(__name__)
 
-__all__ = ["build_parser", "exec_self", "main"]
+__all__ = [
+    "build_parser",
+    "exec_self",
+    "main",
+    "maybe_self_restart",
+    "needs_self_restart",
+    "wait_for_activation",
+]
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -243,7 +250,7 @@ async def _run_supervisor(desired: DesiredState) -> None:
                 await asyncio.wait_for(stop.wait(), timeout=0.2)
             if restart_requested.is_set():
                 restart_requested.clear()
-                if await _maybe_self_restart(desired, supervisor):
+                if await maybe_self_restart(desired, supervisor):
                     reexec = True
                     break
             if reload_requested.is_set():
@@ -271,11 +278,11 @@ def should_announce_offline(reexec: bool, stop: asyncio.Event) -> bool:
     return not reexec and stop.is_set()
 
 
-async def _maybe_self_restart(desired: DesiredState, supervisor: Supervisor) -> bool:
+async def maybe_self_restart(desired: DesiredState, supervisor: Supervisor) -> bool:
     """收到 SIGUSR1 就照做——**判断权在发信号的一方**（新代码的 CLI）。
 
     这里曾经自己再算一遍 SDK 指纹来"确认"，那是**循环论证**：进程只能用自己的
-    （旧的）代码算指纹。旧的 `_load_sdk` 有 bug（只覆盖 pyproject.toml）时，
+    （旧的）代码算指纹。旧的 `load_sdk` 有 bug（只覆盖 pyproject.toml）时，
     它算出的指纹永远等于自己启动时的那个，于是永远得出"代码没变"——真事故。
 
     唯一要守的是：配置能编译。execv 进一个坏配置会让新镜像直接退出，而此时没有
@@ -399,7 +406,7 @@ def _notify_supervisor(desired: DesiredState, state: StateStore) -> bool:
     running, info = state.supervisor_running()
     if not running or info is None:
         raise BlueError("supervisor 未运行；请先执行 blue up")
-    restart = _needs_self_restart(info, desired=desired)
+    restart = needs_self_restart(info, desired=desired)
     try:
         os.kill(info.pid, signal.SIGUSR1 if restart else signal.SIGHUP)
     except ProcessLookupError as error:
@@ -411,7 +418,7 @@ def _notify_supervisor(desired: DesiredState, state: StateStore) -> bool:
     return restart
 
 
-def _wait_for_activation(
+def wait_for_activation(
     desired: DesiredState, generation: Generation, timeout: float | None
 ) -> int:
     """等该世代通过健康闸门；失败/回滚返回非 0。"""
@@ -465,7 +472,7 @@ def _verify_activation(
     smoke: bool,
 ) -> int:
     """等健康闸门 → 跑冒烟；冒烟失败就当作激活失败处理（标记 + 回滚）。"""
-    code = _wait_for_activation(desired, generation, timeout)
+    code = wait_for_activation(desired, generation, timeout)
     if code != 0 or not smoke:
         return code
     report = _run_smoke(desired, generation)
@@ -488,7 +495,7 @@ def _verify_activation(
     except BlueError as error:
         print(f"   回滚后通知调谐器失败：{error}", file=sys.stderr)
         return 1
-    _wait_for_activation(desired, fallback, timeout)
+    wait_for_activation(desired, fallback, timeout)
     return 1
 
 
@@ -632,7 +639,7 @@ def _rollback(
 
     store.activate(target)
     _notify_supervisor(desired, StateStore(desired.supervisor.state_dir))
-    return _wait_for_activation(desired, target, timeout) if wait else 0
+    return wait_for_activation(desired, target, timeout) if wait else 0
 
 
 def _previous_service_generation(
@@ -830,7 +837,7 @@ def _warn_if_stale_reconciler(store: StateStore, desired: DesiredState) -> None:
     )
 
 
-def _needs_self_restart(info: LockInfo, *, desired: DesiredState) -> bool:
+def needs_self_restart(info: LockInfo, *, desired: DesiredState) -> bool:
     """运行中的调谐器是否需要**重启自己**（而不是热重载配置）。
 
     三种情况必须自重启：blue 代码/SDK 指纹变了、包版本变了、运行时配置格式变了。
