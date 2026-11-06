@@ -340,6 +340,35 @@ class GenerationStore:
             return None
         return self._load_path(target)
 
+    def assert_current(self, expect: str) -> Generation:
+        """断言 ``current`` 仍是 ``expect`` 那一代（乐观并发控制）。
+
+        ``blue plan`` 只读、``blue apply`` 会写，两次调用之间世界可能已经变了（别人
+        又 apply 了一次、服务自愈重启、源码被改）。这道闸门把“我看到的那一代”和
+        “本次基于的那一代”钉在一起：不一样就拒绝，而不是让 apply 悄悄换个起点。
+
+        只锁定**起点**：它不保证执行完就落在某个特定世代——期间源码又变了就只能
+        算“世界变了”，那是下一道构建/指纹的活，不归这里。
+
+        :param expect: 世代内容指纹，允许只写前缀（和 ``git`` 一样）
+        :raises BlueError: 没有当前世代，或当前世代与期望不符
+        """
+        wanted = expect.strip()
+        if not wanted:
+            raise BlueError("--expect 不能为空")
+        current = self.current()
+        if current is None:
+            raise BlueError(
+                f"还没有当前世代，无从校验 --expect {wanted}；首次 apply 不需要它"
+            )
+        if current.generation.startswith(wanted):
+            return current
+        raise BlueError(
+            f"当前世代已变化：期望 {wanted}，实际 {current.generation[:12]}"
+            f"（世代 {current.id:04d}）\n"
+            "预览是在另一时刻算的，请重新执行 blue plan 再决定要不要 apply。"
+        )
+
     def latest_stable(self, *, exclude: int | None = None) -> Generation | None:
         """最新的 stable 世代（可排除某个世代号）。"""
         for generation in reversed(self.list()):
@@ -368,6 +397,12 @@ class GenerationStore:
         if current is not None and current.generation == desired.generation:
             # 内容一致就复用：Nix 的 "同样输入 → 同样 store path"
             return current
+        if existing and existing[-1].generation == desired.generation:
+            # 同样的内容也可能停在"已构建但还没激活"的世代里：``apply --staged``
+            # 之后紧跟一次 ``apply``（current 还停在更早那代）。只和 ``current``
+            # 比会再建一个逐字节相同的世代——实测踩过：0042/0043 内容一致、
+            # parent 链多一跳，纯属噪音。
+            return existing[-1]
 
         generation_id = (existing[-1].id + 1) if existing else 1
         parent_id = existing[-1].id if existing else None

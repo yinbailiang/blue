@@ -128,7 +128,7 @@ class SupervisorSettings(BaseModel):
         description="事件去重总开关；下发到各服务的 infra.idempotency",
     )
     idempotency_retention: float = Field(
-        default=7 * 24 * 3600.0,
+        default=24 * 3600.0,
         gt=0,
         description="去重记录保留时长（秒）；必须覆盖任何重投窗口",
     )
@@ -319,6 +319,13 @@ class ActualService(BaseModel):
     """当前进程是从哪个产物启动的（空串 = 未经世代化，用工作区 `uv run` 启动）。"""
     generation_id: int = 0
     """当前进程用的配置来自哪个世代（0 = 未经世代化）。"""
+    meta: ServiceMeta | None = None
+    """该进程**启动时**的服务清单（kind / depends_on / depends_contracts / ...）。
+
+    ``blue plan`` 靠它判断"只改了清单字段"要不要重启——reconciler 用内存里的
+    ``DesiredService`` 做同一件事，但 CLI 是独立进程读不到内存，只能靠这一列。
+    旧版本写下的 ``state.json`` 没有它（``None``），此时预览退回"无法判定"的说法。
+    """
     config: dict[str, Any] = Field(default_factory=dict)
     """脱敏后的配置快照，供 ``blue plan --diff`` 做字段级对比。
 

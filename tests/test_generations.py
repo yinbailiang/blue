@@ -544,3 +544,74 @@ def test_mark_failed_clears_stable_marker(tmp_path: Path) -> None:
 
     assert generation.state == "failed"
     assert "冒烟失败" in (generation.path / ".failed").read_text(encoding="utf-8")
+
+
+def test_create_dedupes_against_unactivated_generation(tmp_path: Path) -> None:
+    """``apply --staged`` 之后紧跟 ``apply``：内容相同就不该再造一个世代。
+
+    只和 current 比是不够的——staged 世代不是 current，会凭空多一代逐字节相同的
+    目录（实测踩过：0042/0043）。
+    """
+    store = _store(tmp_path)
+    desired = _desired(tmp_path, generation="gen-1")
+    staged = store.create(desired, _artifacts(tmp_path), reason="apply")
+    assert store.current() is None
+
+    again = store.create(desired, _artifacts(tmp_path), reason="apply")
+
+    assert again.id == staged.id
+    assert len(store.list()) == 1
+
+
+def _point_current(store: GenerationStore, *, ident: int, fingerprint: str) -> None:
+    """造一个 ``current`` 指向的世代（只写 ``current()`` 需要的字段）。"""
+    path = store.root / f"{ident:04d}"
+    path.mkdir(parents=True, exist_ok=True)
+    (path / GENERATION_FILE).write_text(
+        json.dumps({"id": ident, "generation": fingerprint, "created_at": 0.0}),
+        encoding="utf-8",
+    )
+    (path / COMPLETE_MARKER).write_text("ok\n", encoding="utf-8")
+    link = store.current_link
+    if link.is_symlink() or link.exists():
+        link.unlink()
+    link.symlink_to(Path("generations") / f"{ident:04d}")
+
+
+def test_assert_current_accepts_matching_prefix(tmp_path: Path) -> None:
+    """--expect 支持只写前缀（和 git 一样），匹配就放行。"""
+    store = _store(tmp_path)
+    _point_current(store, ident=7, fingerprint="d2b32fecd171ffff")
+
+    assert store.assert_current("d2b32fec").id == 7
+    assert store.assert_current("d2b32fecd171ffff").id == 7
+
+
+def test_assert_current_refuses_when_world_moved(tmp_path: Path) -> None:
+    """预览之后 current 变了 → 直接拒绝，并说清实际是什么。"""
+    store = _store(tmp_path)
+    _point_current(store, ident=7, fingerprint="aaaaaaaaaaaa")
+
+    with pytest.raises(BlueError) as caught:
+        store.assert_current("bbbbbbbb")
+
+    message = str(caught.value)
+    assert "当前世代已变化" in message
+    assert "aaaaaaaaaaaa" in message
+    assert "0007" in message
+    assert "blue plan" in message
+
+
+def test_assert_current_requires_existing_generation(tmp_path: Path) -> None:
+    """没有 current 时无从校验，要说人话而不是崩。"""
+    with pytest.raises(BlueError, match="还没有当前世代"):
+        _store(tmp_path).assert_current("abc")
+
+
+def test_assert_current_rejects_empty_value(tmp_path: Path) -> None:
+    """空串当成用户写错了，不要静默放过。"""
+    store = _store(tmp_path)
+    _point_current(store, ident=7, fingerprint="aaaaaaaaaaaa")
+
+    with pytest.raises(BlueError, match="不能为空"):
+        store.assert_current("   ")

@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import os
 import shutil
 import subprocess
@@ -36,11 +37,16 @@ __all__ = [
     "venv_site_packages",
 ]
 
+logger = logging.getLogger(__name__)
+
 COMPLETE_MARKER = ".complete"
 """产物目录写完（且可启动）的标记。"""
 
 MANIFEST_NAME = "manifest.json"
 """产物组装成分清单。"""
+
+MANIFEST_VERSION = 1
+"""清单格式版本；读写两侧共用，认不出的版本一律不猜。"""
 
 BASE_MARKER = ".complete"
 """共享依赖 base 的完成标记。"""
@@ -325,6 +331,62 @@ class ArtifactStore:
             removed.append(f"_base/{base_dir.name}")
         return removed
 
+    def keep_wheel_keys(self, keep: dict[str, set[str]]) -> set[str] | None:
+        """保留产物引用到的**源码指纹**——``wheels`` 目录就是按它命名的。
+
+        wheel 目录键是"每个包各自的 ``source_hash``"（blue SDK / 各 sdk 包 / 各契约 /
+        服务自己），所以不能只看服务自己的 ``source_hash``。权威来源是产物里的
+        ``manifest.json``（产物一旦 ``.complete`` 就不可变，读它最准）。
+
+        :return: 要保留的键；**有任何清单读不出来或结构认不出时返回 ``None``**，
+            表示无法判定——调用方应当一个都不删。宁可留垃圾，也不要删掉活产物
+            还在引用的 wheel。
+        """
+        # ``_ensure_wheels`` 在指纹为空时用 ``unknown`` 兜底，那个目录一律保留
+        keys: set[str] = {"unknown"}
+        for service, hashes in keep.items():
+            for digest in hashes:
+                manifest = self.root / service / digest / MANIFEST_NAME
+                try:
+                    data = json.loads(manifest.read_text(encoding="utf-8"))
+                except (OSError, ValueError) as error:
+                    logger.warning(
+                        "读不出产物清单 %s，跳过 wheel 回收判定：%s", manifest, error
+                    )
+                    return None
+                if not isinstance(data, dict):
+                    logger.warning(
+                        "产物清单 %s 不是对象，跳过 wheel 回收判定", manifest
+                    )
+                    return None
+                hashes_in_manifest = _manifest_hashes(
+                    cast(dict[str, object], data), origin=manifest
+                )
+                if hashes_in_manifest is None:
+                    return None
+                keys.update(hashes_in_manifest)
+        keys.discard("")
+        return keys
+
+    def gc_wheels(
+        self, keep_keys: set[str] | None, *, dry_run: bool = False
+    ) -> list[str]:
+        """回收没人引用的 wheel 目录（``.blue/wheels/<源码指纹>/``）。
+
+        :param keep_keys: :meth:`keep_wheel_keys` 的结果；``None`` = 判定不了，跳过
+        :return: 命中的目录（相对 ``wheels``）
+        """
+        if keep_keys is None or not self.wheels_root.is_dir():
+            return []
+        removed: list[str] = []
+        for directory in sorted(self.wheels_root.iterdir()):
+            if not directory.is_dir() or directory.name in keep_keys:
+                continue
+            if not dry_run:
+                shutil.rmtree(directory, ignore_errors=True)
+            removed.append(directory.name)
+        return removed
+
     # -- 构建 ---------------------------------------------------------------
 
     def _build(
@@ -358,7 +420,7 @@ class ArtifactStore:
         install.extend(_install_targets(service, desired))
         self._run(install, cwd=self._project_root)
         manifest = {
-            "version": 1,
+            "version": MANIFEST_VERSION,
             "service": service.meta.name,
             "artifact_hash": ref.hash,
             "package": service.meta.package,
@@ -591,6 +653,75 @@ def _is_within(path: Path, root: Path) -> bool:
     except OSError, ValueError:
         return False
     return True
+
+
+def _warn_unknown_manifest(origin: Path, problem: str) -> None:
+    """清理类操作遇到读不懂的清单时只告警、不猜——猜错会删掉还在用的 wheel。"""
+    logger.warning("产物清单 %s %s，跳过 wheel 回收判定", origin, problem)
+
+
+def _manifest_hashes(manifest: dict[str, object], *, origin: Path) -> set[str] | None:
+    """产物清单里出现的全部源码指纹——决定哪些 wheel 目录还被需要。
+
+    wheel 目录按**每个包各自的** ``source_hash`` 命名，所以服务自己的
+    ``source_hash`` 不够：blue SDK、各 sdk 包、各契约包各有各的键。
+
+    清单在 ``.complete`` 之后不再改写，所以这里没有"历史格式"要兼容：字段形态
+    只有一个（见 :meth:`ArtifactStore._build`），认不出来就说明写坏了或升了版。
+
+    :param origin: 清单路径，仅用于告警定位
+    :return: 指纹集合；**结构认不出时返回 ``None`` 并告警**，调用方应当一个都不删
+    """
+    version = manifest.get("version")
+    if version != MANIFEST_VERSION:
+        _warn_unknown_manifest(
+            origin, f"版本不认识（{version!r}，期望 {MANIFEST_VERSION}）"
+        )
+        return None
+    hashes: set[str] = set()
+    direct = manifest.get("source_hash")
+    if not isinstance(direct, str):
+        _warn_unknown_manifest(origin, "缺少 source_hash")
+        return None
+    hashes.add(direct)
+    # blue SDK：{"package_version": ..., "source_hash": ...}
+    sdk = manifest.get("sdk")
+    sdk_hash = (
+        cast(dict[str, object], sdk).get("source_hash")
+        if isinstance(sdk, dict)
+        else None
+    )
+    if not isinstance(sdk_hash, str):
+        _warn_unknown_manifest(origin, "的 sdk 字段缺少 source_hash")
+        return None
+    hashes.add(sdk_hash)
+    # 各 sdk 包：{名字: {"package": ..., "source_hash": ...}}——值是对象，不是字符串
+    packages = manifest.get("sdk_packages")
+    if not isinstance(packages, dict):
+        _warn_unknown_manifest(origin, "的 sdk_packages 字段不是对象")
+        return None
+    for name, entry in cast(dict[str, object], packages).items():
+        entry_hash = (
+            cast(dict[str, object], entry).get("source_hash")
+            if isinstance(entry, dict)
+            else None
+        )
+        if not isinstance(entry_hash, str):
+            _warn_unknown_manifest(origin, f"的 sdk_packages[{name}] 缺少 source_hash")
+            return None
+        hashes.add(entry_hash)
+    # 各契约：{名字: source_hash}——值就是字符串
+    contracts = manifest.get("contracts")
+    if not isinstance(contracts, dict):
+        _warn_unknown_manifest(origin, "的 contracts 字段不是对象")
+        return None
+    for name, value in cast(dict[str, object], contracts).items():
+        if not isinstance(value, str):
+            _warn_unknown_manifest(origin, f"的 contracts[{name}] 不是字符串指纹")
+            return None
+        hashes.add(value)
+    hashes.discard("")
+    return hashes
 
 
 def _install_targets(service: DesiredService, desired: DesiredState) -> list[str]:

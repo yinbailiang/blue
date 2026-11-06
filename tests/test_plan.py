@@ -48,6 +48,8 @@ def _actual(desired: DesiredState, *, generation: str = "old") -> ActualState:
                 config_hash=service.config_hash,
                 package_version=service.package_version,
                 source_hash=service.source_hash,
+                artifact_hash=service.artifact_hash,
+                meta=service.meta,
             )
             for name, service in desired.services.items()
         },
@@ -380,3 +382,49 @@ def test_restart_reasons_detects_artifact_change(desired: DesiredState) -> None:
         )
         == ()
     )
+
+
+def test_meta_change_alone_is_detected_from_snapshot(desired: DesiredState) -> None:
+    """只改了服务清单（kind / depends_on）也要被预览抓住。
+
+    这些字段不进 config_hash，所以只能靠快照里的 ``meta`` 比出来——reconciler 用
+    内存里的 ``DesiredService`` 做同一件事，CLI 只能靠这一列。
+    """
+    actual = _actual(desired)
+    name = "clock"
+    service = actual.services[name]
+    assert service.meta is not None
+    service.meta = service.meta.model_copy(
+        update={"depends_on": (*service.meta.depends_on, "session")}
+    )
+
+    result = plan(desired, actual)
+
+    change = next(item for item in result.services if item.name == name)
+    assert change.action == "restart"
+    assert "服务清单变化" in change.reasons
+    assert result.note == ""
+
+
+def test_modern_snapshot_has_no_caveat(desired: DesiredState) -> None:
+    """快照里有 meta 时不该再出现"可能多重启几个"的免责声明。"""
+    assert plan(desired, _actual(desired)).note == ""
+
+
+def test_old_snapshot_without_meta_keeps_the_caveat(desired: DesiredState) -> None:
+    """旧版本写的快照没有 meta，只能退回"无法判定"的说法。"""
+    actual = _actual(desired)
+    actual.services["clock"].meta = None
+
+    result = plan(desired, actual)
+
+    assert "meta" in result.note
+    assert "apply 一次后即可精确对比" in result.note
+
+
+def test_missing_state_still_creates_everything(desired: DesiredState) -> None:
+    """没有快照时仍是"全部新建"，note 说明原因。"""
+    result = plan(desired, None)
+
+    assert result.counts()["create"] == len(desired.services)
+    assert "还没部署过" in result.note

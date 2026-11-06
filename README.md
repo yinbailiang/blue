@@ -182,7 +182,7 @@ supervisor {
   restart_max_attempts: <int, range(1, 100)> = 10
   registry_ttl: <float, positive> = 15.0
   idempotency: bool = true                      # 事件去重总开关，见「事件去重」
-  idempotency_retention: <float, positive> = 604800.0
+  idempotency_retention: <float, positive> = 86400.0
   idempotency_sweep_interval: <float, positive> = 600.0
 }
 
@@ -816,9 +816,12 @@ at-least-once 下事件可能重复投递（崩溃重连 / `restart` 补投）�
   的不会再跑一遍（这是上游事件级 `claim` 拿不到、blue 本地补上的精度）。
 - 存储：库的 `SqliteIdempotencyRecorder`（`state_dir/dedupe/<service>.sqlite`），
   跨重启有效——进程内集合做不到，重复恰恰发生在重启之后；
-- 保留期：`supervisor.idempotency_retention`（默认 7 天）+ 每
+- 保留期：`supervisor.idempotency_retention`（默认 1 天）+ 每
   `idempotency_sweep_interval`（默认 600 秒）顺带清理一次。不清就是只增不减
-  （实测单个服务一天 5 万行）；
+  （实测单个服务一天 5 万行，webui/registry 一天几十万行）；
+- **删行不缩文件**：SQLite 按行 DELETE 后空间留在 freelist 里，文件大小不回落。
+  调小保留期只是停止增长，要真回收得 `blue gc --vacuum-dedupe`（`VACUUM` 需独占，
+  服务开着库时会跳过，停机窗口跑更彻底）；
 - 关掉：`supervisor.idempotency = false`（排查"某条事件没被处理"时的第一步）；
 - 写放大：库开 WAL + `synchronous=NORMAL`，实测 13ms/事件 → 0.02ms。
   代价是掉电可能丢最后几个事务——最坏等于「该事件被重复执行一次」，也就是没有去重

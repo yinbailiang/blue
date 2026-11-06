@@ -481,7 +481,7 @@ def test_exec_self_uses_the_supervise_subcommand(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     """自重启走 ``blue _supervise <config>``：PID 不变、锁不丢。"""
-    from blue.cli import _exec_self  # pyright: ignore[reportPrivateUsage]
+    from blue.cli import exec_self
     from blue.config import load_desired
 
     config = _config(tmp_path)
@@ -494,16 +494,16 @@ def test_exec_self_uses_the_supervise_subcommand(
 
     monkeypatch.setattr("blue.cli.os.execv", fake_execv)
     with pytest.raises(SystemExit):
-        _exec_self(desired)
+        exec_self(desired)
     assert captured and captured[0][1][-2:] == ["_supervise", str(desired.config_path)]
 
 
 def test_supervise_subcommand_accepts_config_path(tmp_path: Path) -> None:
     """``_supervise`` 必须能解析 up / execv 传入的配置路径。"""
-    from blue.cli import _parser  # pyright: ignore[reportPrivateUsage]
+    from blue.cli import build_parser
 
     config = tmp_path / "blue.infd"
-    args = _parser().parse_args(["_supervise", str(config)])
+    args = build_parser().parse_args(["_supervise", str(config)])
     assert args.command == "_supervise"
     assert args.config_path == str(config)
 

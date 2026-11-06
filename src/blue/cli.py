@@ -39,16 +39,17 @@ from blue.control.runner import ProcessRunner
 from blue.control.smoke import SmokeReport, run_smoke
 from blue.control.state import LockInfo, StateStore
 from blue.errors import BlueError
+from blue.idempotency import vacuum_databases
 from blue.runtime import RUNTIME_CONFIG_VERSION
 
 logger = logging.getLogger(__name__)
 
-__all__ = ["main"]
+__all__ = ["build_parser", "exec_self", "main"]
 
 
 def main(argv: Sequence[str] | None = None) -> int:
     """命令行入口，返回进程退出码。"""
-    args = _parser().parse_args(argv)
+    args = build_parser().parse_args(argv)
     _configure_logging(bool(args.verbose))
     config_path = cast(str, args.config)
     try:
@@ -63,6 +64,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     staged=bool(args.staged),
                     build=not bool(args.no_build),
                     smoke=not bool(args.no_smoke),
+                    expect=args.expect,
                 )
             case "activate":
                 return _activate(
@@ -83,7 +85,12 @@ def main(argv: Sequence[str] | None = None) -> int:
             case "generations":
                 return _generations(config_path, as_json=bool(args.json))
             case "gc":
-                return _gc(config_path, keep=args.keep, dry_run=bool(args.dry_run))
+                return _gc(
+                    config_path,
+                    keep=args.keep,
+                    dry_run=bool(args.dry_run),
+                    vacuum=bool(args.vacuum_dedupe),
+                )
             case "status":
                 return _status(config_path, as_json=bool(args.json))
             case "logs":
@@ -249,7 +256,7 @@ async def _run_supervisor(desired: DesiredState) -> None:
             supervisor.request_offline_shutdown()
         await supervisor.stop()
     if reexec:
-        _exec_self(desired)
+        exec_self(desired)
 
 
 def should_announce_offline(reexec: bool, stop: asyncio.Event) -> bool:
@@ -284,7 +291,7 @@ async def _maybe_self_restart(desired: DesiredState, supervisor: Supervisor) -> 
     return True
 
 
-def _exec_self(desired: DesiredState) -> None:
+def exec_self(desired: DesiredState) -> None:
     """用新代码替换当前进程：PID 不变、锁不丢，服务随后按新代码全部拉起。"""
     argv = [sys.executable, "-m", "blue", "_supervise", str(desired.config_path)]
     logger.info("execv 重启调谐器：%s", " ".join(argv))
@@ -357,10 +364,17 @@ def _git_revision(base_dir: Path) -> str:
 
 
 def _prepare_generation(
-    config_path: str, *, reason: str, build: bool
+    config_path: str, *, reason: str, build: bool, expect: str | None = None
 ) -> tuple[DesiredState, Generation]:
-    """编译 → 构建产物 → 冻结世代目录（**不激活**）。"""
+    """编译 → 构建产物 → 冻结世代目录（**不激活**）。
+
+    ``expect`` 是预览与执行之间的一致性断言：它要求 ``current`` 仍是你在
+    ``blue plan`` 里看到的那个世代。校验放在**构建之前**——世界变了就直接退出，
+    连产物都不动。只锁起点：执行完落在哪一代不归它管。
+    """
     desired = load_desired(config_path)
+    if expect is not None:
+        _generation_store(desired).assert_current(expect)
     artifacts = _artifact_store(desired)
     if build:
         # 先扫 editable：工作区外的 editable 依赖无法固化进产物，宁可在这里拒绝
@@ -486,16 +500,21 @@ def _apply(
     staged: bool = False,
     build: bool = True,
     smoke: bool = True,
+    expect: str | None = None,
 ) -> int:
     """三阶段 apply：构建 → 原子切换 → 健康验证（+ 冒烟）。
 
     ``--staged`` 只到"世代目录已就绪"为止（等价 NixOS 的 ``nixos-rebuild boot``），
     用 ``blue activate <N>`` 才真正切换。
 
+    ``--expect`` 把本次 apply 钉在预览时那个世代上：``current`` 变了就拒绝执行。
+
     控制面代码变化会触发 execv 自重启：那种情况下**默认也要等验证结果**
     （``supervisor.await_control_change``），否则"命令返回 0 但其实没起来"。
     """
-    desired, generation = _prepare_generation(config_path, reason="apply", build=build)
+    desired, generation = _prepare_generation(
+        config_path, reason="apply", build=build, expect=expect
+    )
     store = _generation_store(desired)
     state = StateStore(desired.supervisor.state_dir)
     current = store.current()
@@ -689,8 +708,10 @@ def _generations(config_path: str, *, as_json: bool) -> int:
     return 0
 
 
-def _gc(config_path: str, *, keep: int | None, dry_run: bool) -> int:
-    """回收老世代与无人引用的产物（数据面永不回收）。"""
+def _gc(
+    config_path: str, *, keep: int | None, dry_run: bool, vacuum: bool = False
+) -> int:
+    """回收老世代与无人引用的产物 / wheel（数据面永不回收）。"""
     desired = load_desired(config_path)
     settings = desired.supervisor
     keep_count = keep if keep is not None else settings.generation_keep
@@ -701,6 +722,9 @@ def _gc(config_path: str, *, keep: int | None, dry_run: bool) -> int:
     # 老进程的 BLUE_CONFIG_FILE 还指着它启动时那一代，删了就崩（实测踩过）。
     in_use = _generations_in_use(desired)
     keep_hashes = store.keep_hashes(keep=keep_count, in_use=in_use)
+    # wheel 目录按每个包各自的源码指纹命名，判据只能从保留产物的 manifest 里读。
+    # 必须在删产物**之前**算，否则读不到清单。
+    wheel_keys = artifacts.keep_wheel_keys(keep_hashes)
     # 上一轮 apply 的世代（回滚目标）也得留着，否则 gc 完就没有回滚目标了
     bases = {
         generation.data.deps_hash or "nolock"
@@ -710,6 +734,7 @@ def _gc(config_path: str, *, keep: int | None, dry_run: bool) -> int:
     removed_generations = store.gc(keep=keep_count, dry_run=dry_run, in_use=in_use)
     removed_artifacts = artifacts.gc(keep_hashes, dry_run=dry_run)
     removed_bases = artifacts.gc_bases(bases, dry_run=dry_run)
+    removed_wheels = artifacts.gc_wheels(wheel_keys, dry_run=dry_run)
 
     verb = "将删除" if dry_run else "已删除"
     print(
@@ -729,7 +754,44 @@ def _gc(config_path: str, *, keep: int | None, dry_run: bool) -> int:
     print(
         f"{verb}依赖基座 {len(removed_bases)} 个：" + (", ".join(removed_bases) or "无")
     )
+    if wheel_keys is None:
+        print("跳过 wheel 回收：有产物清单读不出来或结构认不出，无法判定谁还在被引用")
+    else:
+        print(
+            f"{verb}wheel 目录 {len(removed_wheels)} 个："
+            + (", ".join(removed_wheels[:6]) or "无")
+            + (" …" if len(removed_wheels) > 6 else "")
+        )
+    if vacuum:
+        _vacuum_dedupe(desired.supervisor.state_dir, dry_run=dry_run)
     return 0
+
+
+def _vacuum_dedupe(state_dir: Path, *, dry_run: bool) -> None:
+    """把 ``gc --vacuum-dedupe`` 的结果说成人话（真正的活在
+    :func:`blue.idempotency.vacuum_databases` 里）。"""
+    report = vacuum_databases(state_dir, dry_run=dry_run)
+    if not report.files:
+        print("去重库：没有可收拾的文件")
+        return
+    verb = "可回收" if dry_run else "已回收"
+    print(f"{verb}去重库空间 {_human_size(report.reclaimed)}")
+    if report.skipped:
+        print(
+            f"跳过 {len(report.skipped)} 个（被服务占用或不可读，停机窗口再跑）："
+            + ", ".join(report.skipped[:4])
+            + (" …" if len(report.skipped) > 4 else "")
+        )
+
+
+def _human_size(size: int) -> str:
+    """字节数 → ``12.3 MB`` 这种便于阅读的形式。"""
+    value = float(size)
+    for unit in ("B", "KB", "MB", "GB"):
+        if value < 1024 or unit == "GB":
+            return f"{value:.1f} {unit}" if unit != "B" else f"{int(value)} B"
+        value /= 1024
+    return f"{value:.1f} GB"
 
 
 def _generations_in_use(desired: DesiredState) -> set[int]:
@@ -1402,7 +1464,7 @@ def _format_time(value: float) -> str:
     return time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(value))
 
 
-def _parser() -> argparse.ArgumentParser:
+def build_parser() -> argparse.ArgumentParser:
     """构造命令行解析器。"""
     parser = argparse.ArgumentParser(prog="blue", description="分布式 Agent 系统控制面")
     parser.add_argument(
@@ -1439,6 +1501,13 @@ def _parser() -> argparse.ArgumentParser:
     apply_parser.add_argument(
         "--no-smoke", action="store_true", help="跳过冒烟检查（不推荐）"
     )
+    apply_parser.add_argument(
+        "--expect",
+        default=None,
+        metavar="GENERATION",
+        help="断言 current 仍是这个世代（内容指纹可只写前缀；传 plan 显示的当前值）；"
+        "只锁起点：current 变了就拒绝，不承诺执行完落在哪个世代",
+    )
 
     activate_parser = subparsers.add_parser("activate", help="激活一个已存在的世代")
     activate_parser.add_argument("generation", type=int, help="世代号")
@@ -1469,6 +1538,11 @@ def _parser() -> argparse.ArgumentParser:
         help="保留多少个最近世代（默认 generation_keep）",
     )
     gc_parser.add_argument("--dry-run", action="store_true", help="只列出，不删除")
+    gc_parser.add_argument(
+        "--vacuum-dedupe",
+        action="store_true",
+        help="顺带 VACUUM 去重库（服务占用时会跳过，停机窗口跑更彻底）",
+    )
 
     status_parser = subparsers.add_parser("status", help="查看服务状态")
     status_parser.add_argument("--json", action="store_true", help="输出 JSON")

@@ -166,7 +166,7 @@ class InfraConfig(BaseModel):
         description="是否启用事件去重（业务不必自己写幂等）；由 supervisor 下发",
     )
     idempotency_retention: float = Field(
-        default=7 * 24 * 3600.0,
+        default=24 * 3600.0,
         gt=0,
         description="去重记录保留时长（秒）：超出即删，必须覆盖任何重投窗口",
     )

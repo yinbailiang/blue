@@ -39,6 +39,9 @@ at-least-once 语义下（未 ack 断连重投 / ``restart`` 补投）事件可�
 from __future__ import annotations
 
 import logging
+import sqlite3
+from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 from infinity_bus import (
@@ -55,7 +58,17 @@ from infinity_bus import (
 from infinity_bus.templates import IdempotencyRecorder
 from pydantic import BaseModel
 
-__all__ = ["IdempotencyMiddleware", "consumer_key", "handler_dedupe_key"]
+__all__ = [
+    "DEDUPE_DIRNAME",
+    "IdempotencyMiddleware",
+    "VacuumReport",
+    "consumer_key",
+    "handler_dedupe_key",
+    "vacuum_databases",
+]
+
+DEDUPE_DIRNAME = "dedupe"
+"""去重库在各成员状态目录下的子目录名（见 ``blue.runtime.idempotency_recorder``）。"""
 
 logger = logging.getLogger(__name__)
 
@@ -89,6 +102,62 @@ def consumer_key(consumer: str, handler: EventHandler) -> str:
     也用这个函数拼键，别自己拼字符串。
     """
     return f"{consumer}:{handler_dedupe_key(handler)}"
+
+
+@dataclass(frozen=True)
+class VacuumReport:
+    """一次去重库 VACUUM 的结果。"""
+
+    files: int
+    """扫到的库文件数；``0`` 表示无从收拾。"""
+
+    reclaimed: int
+    """回收的字节数；``dry_run`` 下是**可回收**量（空闲页占用）。"""
+
+    skipped: tuple[str, ...]
+    """跳过的库，形如 ``"demo.sqlite（database is locked）"``——多为被服务占着。"""
+
+
+# VACUUM 要独占访问，服务开着库时必然 database is locked；那种情况只报告、不重试，
+# 等停机窗口（blue down / 激活重启）再跑一次。
+def vacuum_databases(state_dir: Path, *, dry_run: bool = False) -> VacuumReport:
+    """收拾 ``state_dir/dedupe`` 下去重库的碎片空间。
+
+    去重记录会被保留期按行删除，但 **SQLite 删行不缩文件**（只剩空闲页，除非
+    ``auto_vacuum``）。于是库会停在一个历史峰值上不回落——这是“调小 retention
+    却不省磁盘”的真正原因。这里显式 ``VACUUM`` 一次把它压回去。
+
+    :param state_dir: 成员状态目录（去重库在它的 ``dedupe`` 子目录下）
+    :param dry_run: 只统计空闲页占用，不动文件
+    """
+    directory = state_dir / DEDUPE_DIRNAME
+    files = sorted(directory.glob("*.sqlite")) if directory.is_dir() else []
+    reclaimed = 0
+    skipped: list[str] = []
+    for path in files:
+        try:
+            connection = sqlite3.connect(
+                f"{path.resolve().as_uri()}?mode=rw", uri=True, timeout=0.2
+            )
+        except sqlite3.Error as error:
+            skipped.append(f"{path.name}（{error}）")
+            continue
+        try:
+            # VACUUM 不能在事务里跑：关掉隐式 BEGIN
+            connection.isolation_level = None
+            if dry_run:
+                page = connection.execute("PRAGMA page_size").fetchone()[0]
+                free = connection.execute("PRAGMA freelist_count").fetchone()[0]
+                reclaimed += int(page) * int(free)
+            else:
+                before = path.stat().st_size
+                connection.execute("VACUUM")
+                reclaimed += max(before - path.stat().st_size, 0)
+        except (sqlite3.Error, OSError) as error:
+            skipped.append(f"{path.name}（{error}）")
+        finally:
+            connection.close()
+    return VacuumReport(files=len(files), reclaimed=reclaimed, skipped=tuple(skipped))
 
 
 class IdempotencyMiddleware(Middleware):

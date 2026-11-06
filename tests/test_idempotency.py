@@ -34,7 +34,12 @@ from infinity_bus.templates import (
     SqliteIdempotencyRecorder,
 )
 
-from blue.idempotency import IdempotencyMiddleware, consumer_key, handler_dedupe_key
+from blue.idempotency import (
+    IdempotencyMiddleware,
+    consumer_key,
+    handler_dedupe_key,
+    vacuum_databases,
+)
 from blue.runtime import InfraConfig, idempotency_recorder
 
 
@@ -604,3 +609,43 @@ def test_bus_dispatch_is_deduped_and_duplicate_is_acked() -> None:
         )
 
     asyncio.run(run())
+
+
+def _churny_database(path: Path) -> None:
+    """造一个"删掉了大量行"的库：文件不缩，空闲页留着。"""
+    connection = sqlite3.connect(path)
+    connection.execute(
+        "create table processed_log (consumer text, event_id text, ts real)"
+    )
+    connection.executemany(
+        "insert into processed_log values (?, ?, ?)",
+        [(f"c{index % 50}", f"e{index}", float(index)) for index in range(20000)],
+    )
+    connection.commit()
+    connection.execute("delete from processed_log")
+    connection.commit()
+    connection.close()
+
+
+def test_vacuum_databases_dry_run_then_shrink(tmp_path: Path) -> None:
+    """去重库删行不缩文件：dry-run 只报可回收量，真跑才 VACUUM 缩下来。"""
+    directory = tmp_path / "dedupe"
+    directory.mkdir()
+    path = directory / "demo.sqlite"
+    _churny_database(path)
+    before = path.stat().st_size
+
+    report = vacuum_databases(tmp_path, dry_run=True)
+    assert report.files == 1 and report.reclaimed > 0 and not report.skipped
+    assert path.stat().st_size == before
+
+    report = vacuum_databases(tmp_path, dry_run=False)
+    assert report.reclaimed > 0
+    assert path.stat().st_size < before
+
+
+def test_vacuum_databases_without_files(tmp_path: Path) -> None:
+    """没有去重库时给一个空报告，不报错。"""
+    report = vacuum_databases(tmp_path, dry_run=True)
+
+    assert report.files == 0 and report.reclaimed == 0 and not report.skipped

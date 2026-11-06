@@ -356,7 +356,7 @@ def plan(desired: DesiredState, actual: ActualState | None) -> PlanResult:
         reasons = list(
             restart_reasons(
                 current=service,
-                previous_meta=None,
+                previous_meta=previous.meta,
                 previous_config_hash=previous.config_hash,
                 previous_source_hash=previous.source_hash,
                 previous_version=previous.package_version,
@@ -413,10 +413,10 @@ def plan(desired: DesiredState, actual: ActualState | None) -> PlanResult:
     note = ""
     if actual is None:
         note = "没有找到 .blue/state.json（还没部署过），所有服务都会新建。"
-    else:
+    elif any(service.meta is None for service in actual.services.values()):
         note = (
-            "预览基于 state.json 快照：服务清单（kind/depends_on 等）的变化"
-            "无法从快照还原，若只改了这些字段，apply 可能比预览多重启几个服务。"
+            "快照里缺少服务清单（meta 是旧版本写入的）：若只改了 kind / depends_on "
+            "这类字段，apply 可能比预览多重启几个服务。apply 一次后即可精确对比。"
         )
     return PlanResult(
         desired_generation=desired.generation,

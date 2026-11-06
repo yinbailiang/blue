@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 from pathlib import Path
 
@@ -11,6 +12,7 @@ import pytest
 from blue.control.artifacts import (
     COMPLETE_MARKER,
     MANIFEST_NAME,
+    MANIFEST_VERSION,
     ArtifactRef,
     ArtifactStore,
     artifact_hash,
@@ -504,3 +506,152 @@ def test_ensure_base_rejects_editable_install(tmp_path: Path) -> None:
 def test_reject_editable_installs_tolerates_missing_venv(tmp_path: Path) -> None:
     """没有开发用 .venv 时不该在这里报错（该由 _workspace_venv 说出更准的话）。"""
     _store(tmp_path).reject_editable_installs()
+
+
+def _fake_artifact(
+    root: Path, service: str, digest: str, manifest: dict[str, object]
+) -> None:
+    """造一个"已完成的产物"（只需 manifest，gc_wheels 只读它）。"""
+    path = root / "artifacts" / service / digest
+    path.mkdir(parents=True, exist_ok=True)
+    (path / MANIFEST_NAME).write_text(json.dumps(manifest), encoding="utf-8")
+
+
+def _manifest(**fields: object) -> dict[str, object]:
+    """按 ``_build`` 的真实形态造一份 v1 清单：``sdk_packages`` 的值是对象。"""
+    manifest: dict[str, object] = {
+        "version": MANIFEST_VERSION,
+        "service": "demo",
+        "artifact_hash": "art-1",
+        "package": "blue-service-demo",
+        "module": "blue_service_demo",
+        "package_version": "0.1.0",
+        "source_hash": "svc-src",
+        "sdk": {"package_version": "0.1.0", "source_hash": "blue-src"},
+        "sdk_packages": {},
+        "contracts": {},
+        "deps_hash": "deps-1",
+        "python": PYTHON,
+        "base": "/tmp/base",
+        "interpreter": "/tmp/python",
+    }
+    manifest.update(fields)
+    return manifest
+
+
+def _fake_wheel(root: Path, key: str) -> None:
+    directory = root / "wheels" / key
+    directory.mkdir(parents=True, exist_ok=True)
+    (directory / f"{key}-0.1.0-py3-none-any.whl").write_text("", encoding="utf-8")
+
+
+def test_keep_wheel_keys_covers_every_package_hash(tmp_path: Path) -> None:
+    """wheel 目录按每个包各自的源码指纹命名，服务自己的 hash 不够。"""
+    root = tmp_path / ".blue"
+    _fake_artifact(
+        root,
+        "demo",
+        "art-1",
+        _manifest(
+            sdk_packages={
+                "tool": {
+                    "package": "blue-tool-sdk",
+                    "module": "blue_tool_sdk",
+                    "package_version": "0.1.0",
+                    "source_hash": "sdk-tool-src",
+                }
+            },
+            contracts={"tool": "contract-src"},
+        ),
+    )
+    store = _store(tmp_path)
+
+    assert store.keep_wheel_keys({"demo": {"art-1"}}) == {
+        "unknown",
+        "svc-src",
+        "blue-src",
+        "sdk-tool-src",
+        "contract-src",
+    }
+
+
+def test_gc_wheels_removes_only_unreferenced(tmp_path: Path) -> None:
+    """没人引用的 wheel 目录才删；被保留产物引用的必须留着。"""
+    root = tmp_path / ".blue"
+    _fake_artifact(root, "demo", "art-1", _manifest())
+    for key in ("svc-src", "blue-src", "stale-src"):
+        _fake_wheel(root, key)
+    store = _store(tmp_path)
+
+    removed = store.gc_wheels(store.keep_wheel_keys({"demo": {"art-1"}}))
+
+    assert removed == ["stale-src"]
+    assert not (root / "wheels" / "stale-src").exists()
+    assert (root / "wheels" / "svc-src").is_dir()
+    assert (root / "wheels" / "blue-src").is_dir()
+
+
+def test_gc_wheels_dry_run_keeps_everything(tmp_path: Path) -> None:
+    """dry-run 只报告，不落刀。"""
+    root = tmp_path / ".blue"
+    _fake_wheel(root, "stale-src")
+    store = _store(tmp_path)
+
+    assert store.gc_wheels({"svc-src"}, dry_run=True) == ["stale-src"]
+    assert (root / "wheels" / "stale-src").is_dir()
+
+
+def test_gc_wheels_bails_out_when_manifest_unreadable(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """清单读不出来就一个都不删——宁可留垃圾，也不要删掉活产物引用的 wheel。"""
+    root = tmp_path / ".blue"
+    _fake_wheel(root, "svc-src")
+    store = _store(tmp_path)
+
+    with caplog.at_level(logging.WARNING):
+        keys = store.keep_wheel_keys({"demo": {"missing-artifact"}})
+
+    assert keys is None
+    assert "读不出产物清单" in caplog.text
+    assert store.gc_wheels(keys) == []
+    assert (root / "wheels" / "svc-src").is_dir()
+
+
+@pytest.mark.parametrize(
+    "fields",
+    [
+        pytest.param({"version": 2}, id="版本不认识"),
+        pytest.param({"source_hash": 1}, id="source_hash 不是字符串"),
+        pytest.param({"sdk": {"package_version": "0.1.0"}}, id="sdk 缺 source_hash"),
+        pytest.param(
+            {"sdk_packages": {"tool": "sdk-tool-src"}}, id="sdk_packages 值是字符串"
+        ),
+        pytest.param(
+            {"sdk_packages": {"tool": {"package": "blue-tool-sdk"}}},
+            id="sdk_packages 条目缺 source_hash",
+        ),
+        pytest.param(
+            {"contracts": {"tool": {"source_hash": "contract-src"}}},
+            id="contracts 值是对象",
+        ),
+    ],
+)
+def test_keep_wheel_keys_bails_out_on_unknown_manifest_shape(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture, fields: dict[str, object]
+) -> None:
+    """认不出的结构不许猜：告警 + 一个都不删（删错就是删掉还在用的 wheel）。"""
+    root = tmp_path / ".blue"
+    _fake_artifact(root, "demo", "art-1", _manifest(**fields))
+    _fake_wheel(root, "svc-src")
+    _fake_wheel(root, "stale-src")
+    store = _store(tmp_path)
+
+    with caplog.at_level(logging.WARNING):
+        keys = store.keep_wheel_keys({"demo": {"art-1"}})
+
+    assert keys is None
+    assert "跳过 wheel 回收判定" in caplog.text
+    assert store.gc_wheels(keys) == []
+    assert (root / "wheels" / "svc-src").is_dir()
+    assert (root / "wheels" / "stale-src").is_dir()

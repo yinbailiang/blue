@@ -956,6 +956,7 @@ class Supervisor:
             services[name] = ActualService(
                 name=name,
                 kind=runtime.desired.meta.kind,
+                meta=runtime.desired.meta,
                 status=runtime.status,
                 pid=handle.pid if handle is not None else None,
                 pgid=handle.pgid if handle is not None else None,
