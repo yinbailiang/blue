@@ -409,14 +409,17 @@ class TerminalSession:
     # 输入
     # ------------------------------------------------------------------
 
-    def write(self, text: str, *, newline: bool = True) -> None:
-        """把文本写进 PTY（``newline`` 表示补一个回车）。
+    def write(self, text: str, *, newline: bool = True, literal: bool = False) -> None:
+        r"""把文本写进 PTY（``newline`` 表示补一个回车）。
 
-        文本里的转义写法先由 :func:`decode_escapes` 展开，因此
+        默认先由 :func:`decode_escapes` 展开转义写法，因此
         ``write("\\u0003")`` 送出的是一个真正的 Ctrl-C 字节，而不是 6 个字符。
+
+        ``literal=True`` 跳过展开，按字面写入。往编辑器里贴含反斜杠的代码
+        （``print("a\nb")``、``C:\Users\...``）时必须用它，否则 ``\n`` 会变成真换行。
         """
-        payload = decode_escapes(text) + ("\r" if newline else "")
-        self._write_bytes(payload.encode("utf-8"))
+        body = text if literal else decode_escapes(text)
+        self._write_bytes((body + ("\r" if newline else "")).encode("utf-8"))
 
     def send(self, data: bytes) -> None:
         """直接写原始字节（转义序列、控制字符），不做转义展开。"""

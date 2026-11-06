@@ -300,3 +300,28 @@ async def _send_raw_bytes() -> None:
         assert "c3 a9 41" in text
     finally:
         await manager.stop()
+
+
+def test_write_literal_keeps_backslashes() -> None:
+    r"""``literal=True`` 不展开转义：贴代码/路径里的 ``\n`` 必须原样送达。
+
+    默认的展开对 TUI 是对的（``\u001b`` 要变成 ESC），但往编辑器里贴
+    ``print("a\nb")`` 时会真的换行、贴 ``C:\Users`` 会去解析 ``\U``——所以留了个
+    按字面写入的开关。
+    """
+    asyncio.run(_write_literal())
+
+
+async def _write_literal() -> None:
+    manager = SessionManager(max_sessions=2, idle_ttl=60.0)
+    await manager.start()
+    try:
+        session = await _open(manager)
+        await asyncio.sleep(1.0)
+        # printf '%s' 不做转义解释：屏幕上出现 a\nb 说明两个字符真的到了 PTY
+        session.write(r"printf '%s' 'a\nb'", literal=True)
+        await asyncio.sleep(0.8)
+        text = session.text(20)
+        assert "a\\nb" in text
+    finally:
+        await manager.stop()

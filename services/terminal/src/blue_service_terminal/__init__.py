@@ -241,15 +241,22 @@ def terminal_write(
         "\\u001b[A=方向键，另有 \\r \\n \\t \\e \\\\ \\xHH \\uXXXX",
     ],
     newline: Annotated[bool, "是否自动补回车"] = True,
+    literal: Annotated[
+        bool, "按字面写入、不展开转义：贴代码或路径里的反斜杠时置 true"
+    ] = False,
 ) -> TerminalView:
     """往终端输入一行文本（像人打字后按回车）。
 
     文本中的转义写法会先还原成真实字符，因此可以驱动交互式程序——
     ``\\u001b`` 退出插入模式、``\\u0003`` 中断前台进程、``\\u001b[A`` 调用历史。
     无法识别的序列原样保留，要输入字面反斜杠写 ``\\\\``。
+
+    ``literal=True`` 时完全不展开：贴 ``print("a\\nb")`` 这类代码、或者
+    ``C:\\Users`` 这种路径时必须用它，否则 ``\\n`` 会真的换行、``\\U`` 会去解析
+    8 位十六进制。
     """
     session = _require_manager().get(session_id)
-    session.write(text, newline=newline)
+    session.write(text, newline=newline, literal=literal)
     return _view(session)
 
 
