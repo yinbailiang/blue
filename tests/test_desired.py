@@ -9,12 +9,14 @@ from __future__ import annotations
 
 import json
 from pathlib import Path, PurePosixPath
+from typing import cast
 
 import pytest
 
 from blue.config import load_desired
-from blue.control.desired import render_state
+from blue.control.desired import render_state, runtime_config_content
 from blue.control.model import DesiredState
+from blue.runtime import InfraConfig
 
 ROOT = Path(__file__).resolve().parents[1]
 """项目根（含 blue.infd）。"""
@@ -72,3 +74,69 @@ def test_redacted_render_state_is_json_serialisable(desired: DesiredState) -> No
 
     json.dumps(rendered, ensure_ascii=False)
     assert rendered["services"]["agent"]["config"]["api_key"] == "***"
+
+
+def _infra_of(service: str, desired: DesiredState) -> dict[str, object]:
+    """取某个服务运行配置里的 ``infra`` 段。"""
+    payload = json.loads(runtime_config_content(desired.services[service], desired))
+    return cast(dict[str, object], payload["infra"])
+
+
+def test_every_infra_config_field_is_projected(desired: DesiredState) -> None:
+    """守卫：``InfraConfig`` 的每个字段都必须由 supervisor 真的写进去。
+
+    写死的键（曾经的 ``"idempotency": True``）会让配置项在服务侧永远改不动，而
+    声明照样存在——排查时极易误判。新增字段忘了投影，这条就变红。
+    """
+    infra = _infra_of("agent", desired)
+
+    missing = set(InfraConfig.model_fields) - set(infra)
+    assert missing == set(), f"这些 infra 字段没有下发给服务：{sorted(missing)}"
+
+
+def test_idempotency_settings_follow_supervisor_config(desired: DesiredState) -> None:
+    """去重相关参数来自 ``supervisor`` 配置，不是写死的常量。"""
+    patched = desired.model_copy(
+        update={
+            "supervisor": desired.supervisor.model_copy(
+                update={
+                    "idempotency": False,
+                    "idempotency_retention": 1234.0,
+                    "idempotency_sweep_interval": 56.0,
+                }
+            )
+        }
+    )
+
+    infra = _infra_of("agent", patched)
+
+    assert infra["idempotency"] is False
+    assert infra["idempotency_retention"] == 1234.0
+    assert infra["idempotency_sweep_interval"] == 56.0
+
+
+def test_stop_timeout_comes_from_service_meta(desired: DesiredState) -> None:
+    """停机预算按服务下发：服务自己据此把排空预算压在 supervisor 的 SIGKILL 之前。"""
+    for name, service in desired.services.items():
+        assert _infra_of(name, desired)["stop_timeout"] == service.meta.stop_timeout
+
+
+def test_shutdown_timeout_covers_the_slowest_service(desired: DesiredState) -> None:
+    """整体停机预算不得低于任一服务的 ``stop_timeout``。
+
+    低于它等于「即使只停这一个服务也必然 SIGKILL」：bus 是 30 秒，所以这里曾经用
+    10 秒的默认值实际上从来没够用过。
+    """
+    longest = max(service.meta.stop_timeout for service in desired.services.values())
+
+    assert desired.supervisor.shutdown_timeout >= longest
+
+
+def test_every_service_gets_a_30s_stop_budget(desired: DesiredState) -> None:
+    """每个服务的优雅停止预算都是 30 秒（需求：单服务 30s、整场 60s）。
+
+    低于它服务侧的排空预算就跟着缩水（`stop_timeout - min(2, 一半)`），在跑的处理器
+    会在停机时被取消。这条同时钉住"以后别悄悄把某个服务调小"。
+    """
+    for name, service in desired.services.items():
+        assert service.meta.stop_timeout >= 30.0, f"{name} 的 stop_timeout 被调小了"

@@ -243,15 +243,25 @@ async def _run_supervisor(desired: DesiredState) -> None:
                 reload_requested.clear()
                 supervisor.request_reload()
     finally:
-        # down 与自重启要区别对待：自重启（SIGUSR1）属于「重启」，积压该保留给
-        # 新进程补投；只有真正的下线才预告 offline（解绑 + 排空，不留积压）。
-        if not reexec:
-            # 写「下线意图」文件：各服务停机时会读到并切 offline（解绑 + 排空）。
+        if should_announce_offline(reexec, stop):
+            # 写「下线意图」文件：各服务停机时读到并把策略切成 offline（解绑 + 排空）。
             # 文件写完后才发 SIGTERM，不存在两个信号抢跑的时序问题。
             supervisor.request_offline_shutdown()
         await supervisor.stop()
     if reexec:
         _exec_self(desired)
+
+
+def should_announce_offline(reexec: bool, stop: asyncio.Event) -> bool:
+    """本次退出是否算「真正下线」——只有它该写 offline 意图。
+
+    两条不该写的路径都要排除：
+
+    - **自重启**（``reexec``）：积压要留给新进程补投；
+    - **调谐循环异常退出**（``stop`` 没被置位）：那是事故而不是下线。写 offline 会让
+      服务解绑队列并排空，等于把积压丢掉——事故必须先按 ``restart`` 保住消息。
+    """
+    return not reexec and stop.is_set()
 
 
 async def _maybe_self_restart(desired: DesiredState, supervisor: Supervisor) -> bool:

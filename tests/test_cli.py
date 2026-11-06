@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import re
@@ -12,7 +13,7 @@ from pathlib import Path
 
 import pytest
 
-from blue.cli import main
+from blue.cli import main, should_announce_offline
 from blue.config import DesiredState
 from blue.control.artifacts import ArtifactStore
 from blue.control.desired import load_desired
@@ -978,3 +979,22 @@ def test_apply_passes_smoke_and_records_tool_count(
         lock.release()
 
     assert '"tools": 2' in marker_text
+
+
+def test_offline_intent_only_on_explicit_stop() -> None:
+    """只有「收到停止信号」的退出才写 offline 意图。
+
+    三个场景分别对应三种退出：
+
+    - ``blue down`` / Ctrl-C：``stop`` 被置位 → 写意图（解绑 + 排空，不留积压）；
+    - 自重启（``reexec``）：不写——积压要留给新进程补投；
+    - 调谐循环异常退出（``stop`` 没置位）：不写——那是事故，按 ``restart`` 才能保住
+      积压，写 offline 会把消息丢掉。
+    """
+    stop = asyncio.Event()
+
+    assert should_announce_offline(False, stop) is False
+
+    stop.set()
+    assert should_announce_offline(False, stop) is True
+    assert should_announce_offline(True, stop) is False

@@ -9,6 +9,8 @@ import time
 from collections.abc import Callable
 from pathlib import Path
 
+import pytest
+
 from blue.control.desired import load_desired
 from blue.control.logs import LogManager
 from blue.control.model import (
@@ -18,9 +20,15 @@ from blue.control.model import (
     ServiceStatus,
     SupervisorSettings,
 )
-from blue.control.reconciler import Supervisor
-from blue.control.runner import ProcessRunner
+from blue.control.reconciler import (
+    Supervisor,
+    dependency_levels,
+    shutdown_waves,
+    shutdown_worst_case,
+)
+from blue.control.runner import ProcessHandle, ProcessRunner
 from blue.control.state import StateStore
+from blue.runtime import shutdown_intent_dir, shutdown_intent_path
 
 FIXTURE = Path(__file__).parent / "fixtures" / "fake_service.py"
 
@@ -329,3 +337,177 @@ async def _launch_failure_flow(tmp_path: Path) -> None:
         assert _status(state, "demo") is ServiceStatus.FAILED
     finally:
         await supervisor.stop()
+
+
+def test_offline_shutdown_writes_one_intent_per_service(tmp_path: Path) -> None:
+    """下线意图按服务写：共享一份时只有第一个停机的服务能读到。
+
+    实测过的坏形态：全集群一份文件，第一个服务读完即删，其余服务按 ``restart``
+    留着队列——于是 ``blue down`` 之后队列里还留着本该丢掉的积压。
+    """
+    desired = _desired(
+        tmp_path, services={"alpha": ("sleep", ()), "beta": ("sleep", ())}
+    )
+    supervisor = _supervisor(desired)
+
+    assert supervisor.request_offline_shutdown() is True
+
+    directory = shutdown_intent_dir(desired.supervisor.state_dir)
+    assert sorted(path.name for path in directory.glob("*.json")) == [
+        "alpha.json",
+        "beta.json",
+    ]
+    payload = json.loads((directory / "alpha.json").read_text(encoding="utf-8"))
+    assert payload["mode"] == "offline"
+    assert isinstance(payload["ts"], float)
+
+
+def test_stale_intents_are_cleared_on_start(tmp_path: Path) -> None:
+    """上一次 down 被强杀留下的意图，必须在 supervisor 启动时清掉。
+
+    留着它的后果不是"没效果"：下一次普通重启会把 ``restart`` 误切成 ``offline``
+    （解绑 + 排空），把本该补投的积压丢掉。
+    """
+    asyncio.run(_stale_intent_flow(tmp_path))
+
+
+async def _stale_intent_flow(tmp_path: Path) -> None:
+    desired = _desired(tmp_path, services={"demo": ("sleep", ())})
+    stale = shutdown_intent_path("demo", state_dir=desired.supervisor.state_dir)
+    stale.parent.mkdir(parents=True, exist_ok=True)
+    stale.write_text(
+        json.dumps({"mode": "offline", "ts": time.time()}), encoding="utf-8"
+    )
+    supervisor = _supervisor(desired)
+    try:
+        await supervisor.start()
+        assert not stale.exists(), "启动时必须清掉残留的下线意图"
+    finally:
+        await supervisor.stop()
+
+
+def test_shutdown_runs_waves_concurrently(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """按依赖分层倒序停：同层并发、跨层串行，且每个服务拿到完整的 stop_timeout。
+
+    期望的波次（依赖层级从高到低）：``top`` → ``left/mid/right`` → ``base``。
+    旧实现逐个串行停，一层里三个互不相干的服务也要排队，白白把总时长累加成
+    「Σ 各服务」；这里应该是「Σ 每层最慢」。
+    """
+    asyncio.run(_wave_shutdown_flow(tmp_path, monkeypatch))
+
+
+async def _wave_shutdown_flow(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    desired = _desired(
+        tmp_path,
+        services={
+            "base": ("sleep", ()),
+            "left": ("sleep", ("base",)),
+            "right": ("sleep", ("base",)),
+            "mid": ("sleep", ("base",)),
+            "top": ("sleep", ("mid", "left")),
+        },
+    )
+    desired = desired.model_copy(
+        update={
+            "supervisor": desired.supervisor.model_copy(
+                update={"shutdown_timeout": 60.0}
+            )
+        }
+    )
+    state = StateStore(desired.supervisor.state_dir)
+    logs = LogManager(state.log_dir)
+    runner = ProcessRunner(logs, uv_frozen=False)
+    supervisor = Supervisor(
+        config_path=desired.config_path,
+        desired=desired,
+        state=state,
+        logs=logs,
+        runner=runner,
+    )
+
+    events: list[tuple[str, float]] = []
+    original_stop = runner.stop
+
+    async def recording_stop(handle: ProcessHandle, *, timeout: float) -> int | None:
+        events.append((handle.service.meta.name, time.monotonic()))
+        await asyncio.sleep(0.2)  # 让同层并发可观测：串行的话每层要多花 0.2×N
+        return await original_stop(handle, timeout=timeout)
+
+    monkeypatch.setattr(runner, "stop", recording_stop)
+    await supervisor.start()
+    try:
+        await _wait_for(
+            lambda: all(
+                _status(state, name) is ServiceStatus.READY
+                for name in ("base", "left", "right", "mid", "top")
+            )
+        )
+        started = time.monotonic()
+    finally:
+        await supervisor.stop()
+    elapsed = time.monotonic() - started
+
+    order = [name for name, _ in events]
+    assert order[0] == "top", f"依赖别人的先停，实际顺序：{order}"
+    assert order[-1] == "base", f"被别人依赖的最后停，实际顺序：{order}"
+    assert set(order[1:4]) == {"left", "mid", "right"}, f"中间层三个应当同波：{order}"
+
+    # 串行要 5 × 0.2 = 1.0s，三层并发只需 3 × 0.2 = 0.6s（留足抖动余量）
+    assert elapsed < 0.95, f"同层没有并发：整场花了 {elapsed:.2f}s"
+
+
+def test_shutdown_waves_follow_dependency_levels() -> None:
+    """波次划分：层级高的先停，同层归一，独立服务与「无依赖者」同层。"""
+    dependencies = {
+        "bus": (),
+        "session": ("bus",),
+        "agent": ("bus", "session"),
+        "webui": ("agent", "session"),
+        "clock": ("bus",),
+    }
+
+    levels = dependency_levels(dependencies)
+
+    assert levels == {
+        "bus": 0,
+        "session": 1,
+        "agent": 2,
+        "webui": 3,
+        "clock": 1,
+    }
+    assert shutdown_waves(levels) == [
+        ["webui"],
+        ["agent"],
+        ["clock", "session"],
+        ["bus"],
+    ]
+
+
+def test_shutdown_worst_case_counts_per_layer_not_per_service() -> None:
+    """上界是「每波最慢之和」，不是「所有服务之和」——并发的收益就体现在这。"""
+    levels = {"a": 0, "b": 0, "c": 1, "d": 2}
+    timeouts = {"a": 30.0, "b": 30.0, "c": 30.0, "d": 30.0}
+
+    assert shutdown_worst_case(levels, timeouts) == pytest.approx(90.0)  # 3 层
+    assert sum(timeouts.values()) == pytest.approx(120.0)  # 串行才是 4 个 30s
+
+
+def test_dependency_levels_survive_a_cycle() -> None:
+    """成环的配置不该让收尾路径挂死（配置校验本来就会拒绝它）。"""
+    levels = dependency_levels({"a": ("b",), "b": ("a",)})
+
+    assert set(levels) == {"a", "b"}
+
+
+def test_default_shutdown_is_60s_and_each_service_30s() -> None:
+    """默认值：整场 60 秒、每服务 30 秒。
+
+    ``shutdown_timeout`` 是"整场墙钟"，``ServiceMeta.stop_timeout`` 是"单个服务的
+    优雅停止预算"；两者一起决定了最坏时长是「层数 × 30s」而不是「服务数 × 30s」。
+    """
+    assert SupervisorSettings().shutdown_timeout == 60.0
+    assert ServiceMeta(
+        name="demo", kind="tool", package="p", module="m"
+    ).stop_timeout == pytest.approx(30.0)

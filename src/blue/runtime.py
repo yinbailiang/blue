@@ -17,14 +17,15 @@ import logging
 import os
 import sys
 from collections.abc import Iterable, Mapping
+from contextlib import suppress
 from pathlib import Path
 from typing import Any, Literal, TypeVar, cast
 
 from infinity_bus import EventDeclaration
-from infinity_bus.templates import SqliteIdempotencyRecorder
 from pydantic import BaseModel, ConfigDict, Field
 
 from blue.errors import RuntimeConfigError
+from blue.idempotency import SqliteDedupeRecorder
 from blue.lifecycle import LifecycleService, serve_forever
 from blue.transport import RabbitRuntime
 
@@ -34,14 +35,18 @@ __all__ = [
     "DEFAULT_RUNTIME_CONFIG",
     "INFRA_SECTION",
     "RUNTIME_CONFIG_VERSION",
+    "SHUTDOWN_INTENT_DIRNAME",
     "InfraConfig",
     "Workspace",
     "WorkspaceConfig",
     "build_runtime",
     "bus_url",
+    "clear_shutdown_intents",
     "configure_logging",
     "configure_workspace",
     "contract_modules",
+    "drain_budget_for",
+    "idempotency_recorder",
     "load_contract_events",
     "load_infra_config",
     "load_runtime_config",
@@ -53,6 +58,9 @@ __all__ = [
     "run_service",
     "runtime_config_path",
     "service_name",
+    "shutdown_drain_timeout",
+    "shutdown_intent_dir",
+    "shutdown_intent_path",
     "state_dir",
     "tool_attachment",
     "workspace",
@@ -155,7 +163,17 @@ class InfraConfig(BaseModel):
     )
     idempotency: bool = Field(
         default=True,
-        description="是否启用事件去重（业务不必自己写幂等）",
+        description="是否启用事件去重（业务不必自己写幂等）；由 supervisor 下发",
+    )
+    idempotency_retention: float = Field(
+        default=7 * 24 * 3600.0,
+        gt=0,
+        description="去重记录保留时长（秒）：超出即删，必须覆盖任何重投窗口",
+    )
+    idempotency_sweep_interval: float = Field(
+        default=600.0,
+        gt=0,
+        description="去重表清理巡检间隔（秒）：每这么久最多清一次，避免每条都扫表",
     )
     registry_sweep_interval: float = Field(
         default=2.0, gt=0, description="工具租约巡检间隔（秒）"
@@ -366,47 +384,88 @@ def workspace() -> Workspace:
     return _workspace
 
 
-def shutdown_drain_timeout() -> float:
-    """停机排空预算（秒）：在 supervisor 的 ``stop_timeout`` 之前收尾。
+def drain_budget_for(stop_timeout: float) -> float:
+    """按 supervisor 的 ``stop_timeout`` 算出服务自己的排空预算（秒）。
 
-    留 2 秒给进程退出、日志刷盘。
+    必须**严格小于** ``stop_timeout``：超预算的后果不是"慢一点"，supervisor 到点
+    SIGKILL，已投递到本地却还没派发的消息会被 broker 重投（at-least-once）。
 
-    超预算的后果不是"慢一点"：supervisor 到点 SIGKILL，未 ack 的消息被 broker
-    重投（AMQP at-least-once），非幂等处理器会重复执行。所以预算必须**小于**
-    ``stop_timeout``——原来是库的默认值（队列空只等 1 秒、最长 15 秒）跟
-    supervisor 的 10 秒各说各话，慢处理器必然走不到优雅收尾。
+    留的余量给进程退出与日志刷盘，取 ``min(2 秒, 一半)``：小预算（``stop_timeout``
+    只有一两秒）时固定减 2 会直接减成负数，再被下游的 ``max`` 兜回来，反而把
+    "预算小于 stop_timeout"这条不变量破掉。
     """
-    budget = load_infra_config().stop_timeout
-    return max(1.0, budget - 2.0)
+    budget = max(0.0, stop_timeout)
+    return max(0.1, budget - min(2.0, budget * 0.5))
 
 
-def idempotency_recorder() -> SqliteIdempotencyRecorder | None:
+def shutdown_drain_timeout() -> float:
+    """本服务的排空预算（秒）：由 supervisor 下发的 ``stop_timeout`` 推导。"""
+    return drain_budget_for(load_infra_config().stop_timeout)
+
+
+def idempotency_recorder() -> SqliteDedupeRecorder | None:
     """按配置创建事件去重记录器；关闭时返回 ``None``。
 
-    库存在 ``state_dir`` 下、按服务名分文件：去重表跟着服务走，``restart`` 之后
-    还能认出「这条已经处理过」——而进程内集合做不到，重复恰恰发生在重启之后。
+    库存在 ``state_dir/dedupe`` 下、按服务名分文件：去重表跟着服务走，``restart``
+    之后还能认出「这条已经处理过」——而进程内集合做不到，重复恰恰发生在重启之后。
     """
     infra = load_infra_config()
     if not infra.idempotency:
         return None
     directory = infra.state_dir.expanduser().resolve() / "dedupe"
     directory.mkdir(parents=True, exist_ok=True)
-    return SqliteIdempotencyRecorder(str(directory / f"{service_name()}.sqlite"))
+    return SqliteDedupeRecorder(
+        directory / f"{service_name()}.sqlite",
+        retention=infra.idempotency_retention,
+        sweep_interval=infra.idempotency_sweep_interval,
+    )
 
 
-SHUTDOWN_INTENT_FILENAME = "shutdown-intent.json"
-"""下线意图文件名：supervisor 在 down 前写，服务停机时读一次即删。"""
+SHUTDOWN_INTENT_DIRNAME = "shutdown-intent"
+"""下线意图目录名：supervisor 在 down 前按服务写一份，服务停机时读自己的那份。"""
 
 
-def shutdown_intent_path() -> Path:
-    """下线意图文件路径：supervisor 在 ``blue down`` 前写，服务停机时读一次即删。
+def shutdown_intent_dir(state_dir: Path | None = None) -> Path:
+    """下线意图目录；``state_dir`` 缺省取本进程的运行时配置。
+
+    ``supervisor`` 侧没有运行时配置文件，于是显式传入它的 ``state_dir``；服务侧
+    走默认分支。两侧必须算出同一个目录，所以路径拼装只留这一处。
+    """
+    base = state_dir if state_dir is not None else load_infra_config().state_dir
+    return base.expanduser().resolve() / SHUTDOWN_INTENT_DIRNAME
+
+
+def shutdown_intent_path(
+    service: str | None = None, *, state_dir: Path | None = None
+) -> Path:
+    """本服务的下线意图文件：supervisor 在 ``blue down`` 前写，停机时读一次即删。
 
     用文件而不是信号传递「这次是下线」——文件写完后 supervisor 才发 ``SIGTERM``，
     可见性由内核保证，不依赖两个信号在事件循环里的处理顺序。
+
+    按服务分文件是必需的：共享一份时第一个停机的服务读走就删，后面的服务全看不到，
+    于是只有它走 ``offline``，其余按 ``restart`` 留着积压——`blue down` 之后队列里
+    还留着本不该留的消息。
     """
-    return (
-        load_infra_config().state_dir.expanduser().resolve() / SHUTDOWN_INTENT_FILENAME
-    )
+    return shutdown_intent_dir(state_dir) / f"{service or service_name()}.json"
+
+
+def clear_shutdown_intents(state_dir: Path | None = None) -> list[str]:
+    """删除遗留的下线意图文件，返回被清掉的服务名。
+
+    supervisor 启动时清一次：上一次 ``down`` 若在"写完意图、还没停完"时被强杀，文件
+    会留在盘上，而它只对那一次下线有意义；留到下一次普通重启，就会把本该
+    ``restart`` 的停机误切成 ``offline``（解绑 + 排空 = 丢积压）。
+    """
+    directory = shutdown_intent_dir(state_dir)
+    if not directory.is_dir():
+        return []
+    removed: list[str] = []
+    for path in sorted(directory.glob("*.json")):
+        with suppress(OSError):
+            path.unlink()
+            removed.append(path.stem)
+    return removed
 
 
 def build_runtime(

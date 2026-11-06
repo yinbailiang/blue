@@ -55,6 +55,7 @@ __all__ = [
     "redact_state",
     "remove_runtime_config",
     "render_state",
+    "runtime_config_content",
     "scan_package",
     "topological_order",
     "write_runtime_configs",
@@ -153,8 +154,12 @@ def topological_order(services: dict[str, DesiredService]) -> list[str]:
     return order
 
 
-def _runtime_config_content(service: DesiredService, desired: DesiredState) -> str:
-    """生成服务的运行时配置文件内容：业务配置 + 共享基础设施参数。"""
+def runtime_config_content(service: DesiredService, desired: DesiredState) -> str:
+    """生成服务的运行时配置文件内容：业务配置 + 共享基础设施参数。
+
+    公开出来是为了可测：``infra`` 段的每个键都必须来自真实配置来源（supervisor 设置
+    或服务元数据），写死常量会让对应配置项永远改不动——``idempotency`` 就这么死过一次。
+    """
     settings = desired.supervisor
     payload = {
         CONFIG_SECTION: service.config,
@@ -170,10 +175,13 @@ def _runtime_config_content(service: DesiredService, desired: DesiredState) -> s
             "registry_ttl": settings.registry_ttl,
             "registry_sweep_interval": settings.registry_sweep_interval,
             # 服务据此把自己的停机排空超时压在这个预算内——supervisor 到点就 SIGKILL，
-            # 排空超时若比它大，未 ack 的消息会被 broker 重投（at-least-once）。
+            # 排空超时若比它大，已投递未派发的消息会被 broker 重投（at-least-once）。
             "stop_timeout": service.meta.stop_timeout,
-            # 事件去重（业务不必自己写幂等）；去重库落在 state_dir/dedupe 下
-            "idempotency": True,
+            # 事件去重（业务不必自己写幂等）；去重库落在 state_dir/dedupe 下。
+            # 由 supervisor 配置下发，别在这里写死——写死等于这项配置永远改不动。
+            "idempotency": settings.idempotency,
+            "idempotency_retention": settings.idempotency_retention,
+            "idempotency_sweep_interval": settings.idempotency_sweep_interval,
         },
     }
     return (
@@ -197,7 +205,7 @@ def write_runtime_configs(
     """
     changed: list[str] = []
     for name, service in desired.services.items():
-        content = _runtime_config_content(service, desired)
+        content = runtime_config_content(service, desired)
         path = service.config_path
         if only_changed and path.is_file():
             try:
@@ -773,13 +781,26 @@ def _project(value: object) -> str:
 
     ``path → POSIX 字符串``、``Decimal → 数字`` 都是 emit 层的职责
     （``EmitConfig.full_path / full_float`` 默认即有损投影），这里不自己写转换。
+
+    注意投影是**有损**的：``Decimal("2.0")`` 落成 ``2``、``PurePosixPath`` 落成字符串。
+    所以任何基于投影的哈希（见 :func:`_hash_json`）都绑定了当前 emit 语义——改投影
+    等于改指纹，见该函数的说明。
     """
     return to_json(value, config=_COMPACT_EMIT)
 
 
 def _hash_json(value: object) -> str:
-    # 投影交给 emit（path → 字符串、Decimal → 数字），紧凑格式自己定，
-    # 保证与历史指纹逐字节一致，不因换实现而重启全部服务
+    """对 JSON 原生值取稳定指纹。
+
+    ``value`` 必须已经过 :func:`_project`（:func:`load_desired` 在入口统一投影一次），
+    否则 ``Decimal``/``Path`` 会直接抛 ``TypeError``。
+
+    **投影语义不是"随便换个等价实现都零成本"**：e365780 之前是 ``Decimal → float``
+    （``Decimal("2.0")`` → ``2.0``），现在走 emit（整值落成 ``2``），canonical JSON
+    不同 → ``config_hash`` 变 → ``generation`` 变。那次实测让 10 个服务的指纹变了，
+    只是当时 state.json 已经按新代码写过一次，所以事后看不到差异。以后再动投影层，
+    请预期一次全量重启，别按"逐字节一致"来假设。
+    """
     projected = json.loads(_project(value))
     canonical = json.dumps(
         projected, ensure_ascii=False, sort_keys=True, separators=(",", ":")

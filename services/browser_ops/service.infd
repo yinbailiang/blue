@@ -16,7 +16,7 @@ service {
   depends_contracts = ["tool"]
   depends_sdk = ["tool"]
   restart = "always"
-  stop_timeout = 15.0
+  stop_timeout = 30.0
   startup_timeout = 40.0
   readiness = "process"
 

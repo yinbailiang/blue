@@ -20,7 +20,7 @@ service {
   depends_on = ["bus"]
   depends_contracts = ["session"]
   restart = "always"
-  stop_timeout = 10.0
+  stop_timeout = 30.0
   startup_timeout = 15.0
   readiness = "process"
 

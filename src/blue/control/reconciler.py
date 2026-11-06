@@ -9,7 +9,7 @@ import os
 import signal
 import time
 import uuid
-from collections.abc import Callable
+from collections.abc import Callable, Iterable, Mapping
 from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
@@ -45,12 +45,67 @@ from blue.errors import BlueError, ConfigError
 from blue.runtime import (
     DEFAULT_RUNTIME_CONFIG,
     RUNTIME_CONFIG_VERSION,
-    SHUTDOWN_INTENT_FILENAME,
+    clear_shutdown_intents,
+    shutdown_intent_dir,
 )
 
 logger = logging.getLogger(__name__)
 
-__all__ = ["Supervisor"]
+__all__ = ["Supervisor", "dependency_levels", "shutdown_waves", "shutdown_worst_case"]
+
+
+def dependency_levels(dependencies: Mapping[str, Iterable[str]]) -> dict[str, int]:
+    """每个服务的依赖层级：没有（在场的）依赖为 0，其余为「依赖的最大层级 + 1」。
+
+    层级就是停机的并发边界：**同一层之间没有依赖关系**，可以同时停；跨层必须按层级
+    从高到低串行——依赖别人的先停、被别人依赖的后停（bus 永远在最后一层，这样前面
+    的服务停的时候还有总可用，能正常收尾 / ack）。
+
+    ``dependencies`` 里出现环时按 0 兜底（配置校验已经会拒绝成环，这里只是不让
+    收尾路径被一个坏配置拖住）。
+    """
+    levels: dict[str, int] = {}
+
+    def compute(name: str, trail: frozenset[str]) -> int:
+        known = levels.get(name)
+        if known is not None:
+            return known
+        deps = [dep for dep in dependencies.get(name, ()) if dep in dependencies]
+        if not deps or name in trail:
+            levels[name] = 0
+            return 0
+        value = 1 + max(compute(dep, trail | {name}) for dep in deps)
+        levels[name] = value
+        return value
+
+    for name in dependencies:
+        compute(name, frozenset())
+    return levels
+
+
+def shutdown_waves(levels: Mapping[str, int]) -> list[list[str]]:
+    """把服务按层级分成停机波次：层级高的先停，同一波内丢给 ``asyncio.gather``。
+
+    波内排序只为让日志与测试稳定，不承载任何语义。
+    """
+    buckets: dict[int, list[str]] = {}
+    for name, level in levels.items():
+        buckets.setdefault(level, []).append(name)
+    return [sorted(buckets[level]) for level in sorted(buckets, reverse=True)]
+
+
+def shutdown_worst_case(
+    levels: Mapping[str, int], stop_timeouts: Mapping[str, float]
+) -> float:
+    """最坏停机时长：波与波串行，每波要等这波里最慢的服务。
+
+    并发把「Σ 各服务」压成了「Σ 每波最慢」——18 个服务的 30 秒不再是 540 秒，
+    而是「波数 × 30 秒」。
+    """
+    total = 0.0
+    for wave in shutdown_waves(levels):
+        total += max((stop_timeouts.get(name, 0.0) for name in wave), default=0.0)
+    return total
 
 
 def _changed_contracts(
@@ -177,6 +232,13 @@ class Supervisor:
             cleaned = await self._state.cleanup_orphans(previous)
             if cleaned:
                 logger.info("已清理上一次遗留的服务进程：%s", ", ".join(cleaned))
+            stale = clear_shutdown_intents(self._desired.supervisor.state_dir)
+            if stale:
+                logger.warning(
+                    "清理了上一次停机残留的下线意图：%s（那次 down 没停完，"
+                    "留着会把普通重启误切成 offline 并丢掉积压）",
+                    ", ".join(stale),
+                )
             self._recover_generation(previous)
             if self._generations.current() is None:
                 # 尚未世代化（首次启动或从旧版本升上来）：沿用工作区配置
@@ -202,28 +264,40 @@ class Supervisor:
         )
 
     def request_offline_shutdown(self) -> bool:
-        """写「下线意图」文件，让各服务在停机时切到 ``offline``。
+        """按服务写「下线意图」文件，让它们在停机时切到 ``offline``。
 
         用文件而不是信号：``write_text`` 返回后才发 ``SIGTERM``，服务一定能读到；
         两个信号则要靠事件循环的处理顺序，早一轮晚一轮都会让切换失效。
 
+        **每个服务一份文件**：服务读到后先删再切策略，共享一份时第一个停机的服务
+        会把它删掉，后面的服务全按 ``restart`` 留着按队列——于是 ``blue down`` 之后
+        队列里还留着本不该留的积压（实测复现过：三个服务只有第一个走 offline）。
+
         服务读到后把策略从 ``restart`` 切成 ``offline``（解绑 + 排空），于是
-        ``blue down`` 之后不留积压；普通重启不写这个文件，保持 ``restart`` 的
+        ``blue down`` 之后不留积压；普通重启不写这些文件，保持 ``restart`` 的
         「保留积压、启动后补投」语义。
 
-        返回是否写成功。写失败不要紧：服务会按 ``restart`` 处理——积压留下而不是
-        丢消息，这个降级方向是安全的。
+        返回是否至少写成功一份。写失败不要紧：那个服务会按 ``restart`` 处理——积压
+        留下而不是丢消息，这个降级方向是安全的。
         """
-        path = self._desired.supervisor.state_dir / SHUTDOWN_INTENT_FILENAME
+        directory = shutdown_intent_dir(self._desired.supervisor.state_dir)
         try:
-            path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text(
-                json.dumps({"mode": "offline", "ts": time.time()}), encoding="utf-8"
-            )
+            directory.mkdir(parents=True, exist_ok=True)
         except OSError:
             logger.warning("写下线意图失败，本次 down 按 restart 处理（积压保留）")
             return False
-        return True
+        payload = json.dumps({"mode": "offline", "ts": time.time()})
+        written = 0
+        for name in sorted(self._desired.services):
+            try:
+                (directory / f"{name}.json").write_text(payload, encoding="utf-8")
+            except OSError:
+                logger.warning(
+                    "服务 %s 的下线意图写入失败，它将按 restart 处理（积压保留）", name
+                )
+                continue
+            written += 1
+        return written > 0
 
     async def stop(self) -> None:
         """请求调谐循环退出，并等待全部服务停止。"""
@@ -797,19 +871,79 @@ class Supervisor:
 
     async def _shutdown(self) -> None:
         services = {name: runtime.desired for name, runtime in self._runtimes.items()}
-        try:
-            order = topological_order(services)
-        except ConfigError:
-            order = list(services)
-        deadline = time.monotonic() + self._desired.supervisor.shutdown_timeout
-        for name in reversed(order):
-            runtime = self._runtimes.get(name)
-            if runtime is None:
+        dependencies = {
+            name: service.meta.depends_on for name, service in services.items()
+        }
+        levels = dependency_levels(dependencies)
+        waves = shutdown_waves(levels)
+        timeouts = {
+            name: service.meta.stop_timeout for name, service in services.items()
+        }
+        configured = self._desired.supervisor.shutdown_timeout
+        worst = shutdown_worst_case(levels, timeouts)
+        first_wave = (
+            max((timeouts.get(name, 0.0) for name in waves[0]), default=0.0)
+            if waves
+            else 0.0
+        )
+        if first_wave > configured:
+            logger.warning(
+                "shutdown_timeout=%.1fs 连第一波（%s）都装不下："
+                "这波最慢的服务要 %.1fs，必然会 SIGKILL；建议提到 %.1fs 以上",
+                configured,
+                ", ".join(waves[0]),
+                first_wave,
+                first_wave,
+            )
+        else:
+            logger.info(
+                "停机开始：%d 个服务分 %d 波（同波并发、跨波串行），总预算 %.1fs，"
+                "每波最多等最慢的那个服务，各层都跑满时的上界 %.1fs",
+                len(services),
+                len(waves),
+                configured,
+                worst,
+            )
+        deadline = time.monotonic() + configured
+        for index, wave in enumerate(waves, start=1):
+            runtimes = [self._runtimes[name] for name in wave if name in self._runtimes]
+            if not runtimes:
                 continue
-            runtime.stop_requested = True
+            for runtime in runtimes:
+                runtime.stop_requested = True
             remaining = max(0.1, deadline - time.monotonic())
-            timeout = min(runtime.desired.meta.stop_timeout, remaining)
-            await self._stop_runtime(runtime, ServiceStatus.STOPPED, timeout=timeout)
+            wave_budget = max(runtime.desired.meta.stop_timeout for runtime in runtimes)
+            if remaining < wave_budget:
+                # 只有真被压缩时才告警：上界（层数 × 30s）超过总预算本身是常态，
+                # 每次都报反而没人看；这里指的是"钱真的花完了，这一波要打折停"。
+                logger.warning(
+                    "第 %d/%d 波只剩 %.1fs，本层最慢的服务要 %.1fs：被截断的服务会"
+                    " SIGKILL，已投递未派发的消息可能被重投",
+                    index,
+                    len(waves),
+                    remaining,
+                    wave_budget,
+                )
+            results = await asyncio.gather(
+                *(
+                    self._stop_runtime(
+                        runtime,
+                        ServiceStatus.STOPPED,
+                        timeout=min(runtime.desired.meta.stop_timeout, remaining),
+                    )
+                    for runtime in runtimes
+                ),
+                return_exceptions=True,
+            )
+            # 一个服务停不下来不能拖住后面的波次（尤其不能让 bus 永远等不到停止）
+            for runtime, result in zip(runtimes, results, strict=True):
+                if isinstance(result, BaseException):
+                    logger.error(
+                        "停止服务 %s 失败：%s",
+                        runtime.desired.meta.name,
+                        result,
+                        exc_info=result,
+                    )
         for runtime in self._runtimes.values():
             runtime.restart_pending = False
         self._write_state()

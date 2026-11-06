@@ -52,7 +52,14 @@ class ServiceMeta(BaseModel):
         default=(), description="依赖的 SDK 运行时包名（sdk/* 目录名）"
     )
     restart: RestartPolicy = Field(default="on-failure", description="重启策略")
-    stop_timeout: float = Field(default=10.0, gt=0, description="优雅停止超时（秒）")
+    stop_timeout: float = Field(
+        default=30.0,
+        gt=0,
+        description=(
+            "本服务的优雅停止预算（秒）：supervisor 到点 SIGKILL。服务据此把总线的"
+            "排空/任务超时压在它之内"
+        ),
+    )
     startup_timeout: float = Field(default=30.0, gt=0, description="启动就绪超时（秒）")
     readiness: ReadinessProbe = Field(default="process", description="就绪探针")
     ready_tcp: str | None = Field(
@@ -92,7 +99,14 @@ class SupervisorSettings(BaseModel):
     reconcile_interval: float = Field(
         default=2.0, gt=0, description="调谐轮询间隔（秒）"
     )
-    shutdown_timeout: float = Field(default=10.0, gt=0, description="整体停机超时")
+    shutdown_timeout: float = Field(
+        default=60.0,
+        gt=0,
+        description=(
+            "整场停机的墙钟预算（秒）：按依赖层级倒序、层内并发，每层最多等最慢的那个"
+            "服务；到点仍未退出的进程被 SIGKILL"
+        ),
+    )
     log_max_bytes: int = Field(default=10 * 1024 * 1024, gt=0, description="单日志上限")
     log_backups: int = Field(default=3, ge=0, le=20, description="日志轮转保留数")
     restart_backoff: float = Field(default=0.5, gt=0, description="重启退避基数（秒）")
@@ -108,6 +122,20 @@ class SupervisorSettings(BaseModel):
     registry_ttl: float = Field(default=15.0, gt=0, description="工具租约时长")
     registry_sweep_interval: float = Field(
         default=2.0, gt=0, description="工具租约巡检间隔"
+    )
+    idempotency: bool = Field(
+        default=True,
+        description="事件去重总开关；下发到各服务的 infra.idempotency",
+    )
+    idempotency_retention: float = Field(
+        default=7 * 24 * 3600.0,
+        gt=0,
+        description="去重记录保留时长（秒）；必须覆盖任何重投窗口",
+    )
+    idempotency_sweep_interval: float = Field(
+        default=600.0,
+        gt=0,
+        description="去重表清理巡检间隔（秒）",
     )
     uv_frozen: bool = Field(default=True, description="uv run 是否使用 --frozen")
     activation_timeout: float = Field(
