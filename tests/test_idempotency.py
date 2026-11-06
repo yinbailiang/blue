@@ -187,6 +187,48 @@ def test_failed_handler_keeps_its_claim() -> None:
     asyncio.run(run())
 
 
+class _BrokenRecorder:
+    """碰一下就炸的记录器（模拟 SQLite 锁表 / 磁盘故障）。"""
+
+    async def is_processed(self, consumer: str, event_id: str) -> bool:
+        raise sqlite3.OperationalError("database is locked")
+
+    async def mark_processed(self, consumer: str, event_id: str) -> None:
+        raise sqlite3.OperationalError("database is locked")
+
+    async def claim(self, consumer: str, event_id: str) -> bool:
+        raise sqlite3.OperationalError("database is locked")
+
+    async def release(self, consumer: str, event_id: str) -> None:
+        raise sqlite3.OperationalError("database is locked")
+
+
+def test_dedupe_store_failure_fails_open() -> None:
+    """去重库炸了必须放行：查询失败当没执行过，认领写失败只记日志。"""
+
+    async def run() -> None:
+        handlers = EventHandlerRegistry()
+        handler_id = await handlers.register(_Counter())
+        middleware = IdempotencyMiddleware(
+            _BrokenRecorder(), consumer="member.one", handlers=handlers
+        )
+        event = Event(name=_Tick.name)
+
+        passed: list[list[str]] = []
+
+        async def proceed(_event: Event, ids: list[str]) -> None:
+            passed.append(ids)
+
+        await middleware.before_dispatch(event, [handler_id], proceed)
+        assert passed == [[handler_id]], "查询失败要放行（at-least-once），不能丢事件"
+
+        # 认领写失败只记日志：跟踪状态清掉，任务照常执行，后续重复也不会卡在这里
+        await middleware.on_task_start(_record(handler_id, "_Counter", event))
+        assert middleware.tracked_events == 0
+
+    asyncio.run(run())
+
+
 def test_only_unclaimed_handlers_are_dispatched() -> None:
     """per-handler 粒度：A 已有认领，同一事件的 B 仍应被派发。"""
 

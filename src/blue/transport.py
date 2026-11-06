@@ -69,17 +69,17 @@ def shutdown_config_for(drain_budget: float) -> ShutdownConfig:
 
     - ``queue_timeout_*`` 限的是 ``EventBus.stop()`` 里的 ``queue.join()``。
       ``task_done()``（= ``basic_ack``）在该事件**所有处理器任务都获得执行权**之后就发
-      （6.1 起由 ``_DispatchFence`` 保证），所以 join 等的是「事件全部**启动**」——
-      通常几十毫秒，与处理器跑多久无关，只占预算零头；没起来的那些走
-      ``task_abandoned`` 直接不再等。
+      （库 6.1 起由 ``_DispatchFence`` 保证，blue pin 的 6.2 沿用），所以 join 等的是
+      「事件全部**启动**」——通常几十毫秒，与处理器跑多久无关，只占预算零头；没起来的
+      那些走 ``task_abandoned`` 直接不再等。
     - ``tasks_timeout`` 才是等**正在跑的处理器收尾**的时限，占预算大头。
 
     两段是**串行**的，所以和必须 ≤ ``drain_budget``；后者应当已小于 supervisor 的
     ``stop_timeout``（见 :func:`blue.runtime.drain_budget_for`）。
 
     > 这条方向**跟着库的 ack 语义走**，历史上翻过两次：6.0「派发即 ack」→ tasks 大头；
-    > 中间版本「全部处理器结束才 ack」→ queue 大头；6.1+「处理器启动即 ack」→ 回到
-    > tasks 大头。改库的 ack 语义必须同步改这里，
+    > 中间版本「全部处理器结束才 ack」→ queue 大头；6.1+（含 blue pin 的 6.2）「处理器
+    > 启动即 ack」→ 回到 tasks 大头。改库的 ack 语义必须同步改这里，
     > ``tests/test_shutdown_budget.py`` 里那条方向断言就是哨兵。
     """
     total = max(0.1, drain_budget)
@@ -305,8 +305,9 @@ class RabbitRuntime(BusRuntime):
             url=self._url,
             registry=self._events,
             strategy=self._strategy,
-            # join 内部排空的上限：必须与总线侧 queue_timeout 对齐，否则库那层
-            # 硬编码的 15 秒会先于/晚于 supervisor 的 SIGKILL 到点，两边说法不一。
+            # join 内部排空的上限：跟整个排空预算对齐（总线侧还会用 queue_timeout
+            # 再截一次）。不传的话库会用自己的 15 秒默认值，与 supervisor 的
+            # stop_timeout 各说各话。
             drain_timeout=self._drain_timeout or 15.0,
         )
         self._queue = queue

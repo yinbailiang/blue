@@ -16,7 +16,7 @@ at-least-once 语义下（未 ack 断连重投 / ``restart`` 补投）事件可�
   「模块.类名」，并允许处理器用 ``dedupe_key`` 属性显式覆盖（同类多实例、或类名会重命名
   时用）。
 
-由此有两条必须知道的后果：
+由此有三条必须知道的后果：
 
 1. **失败不自动重试**：认领在启动时就写死了，重投回来会被挡掉。失败由
    ``TaskErrorEvent`` 上报；要重试得另配机制（``release`` + 显式重发重试事件）。
@@ -24,6 +24,9 @@ at-least-once 语义下（未 ack 断连重投 / ``restart`` 补投）事件可�
    不确认的话，持久队列上会留下永不 ack 的消息——每次重连重投一次，还占着 prefetch
    配额。同一进程内还有原始任务排队等执行权时例外：这条重复保持未确认，因为原任务若
    在启动前被放弃，事件还得靠它重投。
+3. **去重库出故障时放行**：查询失败当作「没执行过」，认领写失败只记日志。
+   ``before_dispatch`` 里的异常会被总线当成派发链失败直接 ack，事件就丢了——去重
+   是优化，不能把库的问题升级成丢事件。
 
 认领粒度是 **per-handler**：上游 ``claim(consumer, event_id)`` 是事件级的，把处理器身份
 编进 ``consumer``（见 :func:`consumer_key`）才能在 blue 侧拿到「只补跑没起来的那个」的
@@ -35,6 +38,7 @@ at-least-once 语义下（未 ack 断连重投 / ``restart`` 补投）事件可�
 
 from __future__ import annotations
 
+import logging
 from typing import Any
 
 from infinity_bus import (
@@ -52,6 +56,8 @@ from infinity_bus.templates import IdempotencyRecorder
 from pydantic import BaseModel
 
 __all__ = ["IdempotencyMiddleware", "consumer_key", "handler_dedupe_key"]
+
+logger = logging.getLogger(__name__)
 
 
 def handler_dedupe_key(handler: EventHandler) -> str:
@@ -156,7 +162,14 @@ class IdempotencyMiddleware(Middleware):
                 # 得靠它重投；等它真的启动或放弃之后，下一次投递自然会被判成重复。
                 awaiting_in_flight = True
                 continue
-            if await self._recorder.is_processed(key, event.id):
+            try:
+                processed = await self._recorder.is_processed(key, event.id)
+            except Exception:
+                # 去重库不可用（锁 / 磁盘）：放行本次派发，退化成 at-least-once。
+                # 抛出去会被总线当成「派发链失败」直接 ack 扔掉事件。
+                logger.exception("去重查询失败，放行派发（event=%s）", event.id)
+                processed = False
+            if processed:
                 continue
             pending[handler_id] = key
             keep.append(handler_id)
@@ -176,8 +189,23 @@ class IdempotencyMiddleware(Middleware):
         key = pending.pop(record.handler_id, None)
         if not pending:
             self._dispatched.pop(record.event.id, None)
-        if key is not None:
-            await self._recorder.claim(key, record.event.id)
+        if key is None:
+            return
+        try:
+            claimed = await self._recorder.claim(key, record.event.id)
+        except Exception:
+            # 认领写失败：继续执行（退化成 at-least-once），不能让去重库的问题
+            # 变成「处理器不跑」。
+            logger.exception(
+                "写入去重认领失败（event=%s, consumer=%s）", record.event.id, key
+            )
+            return
+        if not claimed:
+            logger.warning(
+                "认领已存在，本次可能是重复执行（event=%s, consumer=%s）",
+                record.event.id,
+                key,
+            )
 
     async def on_dispatch_abandoned(self, event: Event) -> None:
         """派发被放弃：清掉内存跟踪即可。
