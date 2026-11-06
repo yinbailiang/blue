@@ -196,6 +196,27 @@ class Supervisor:
             self._desired.generation,
         )
 
+    def request_offline_shutdown(self) -> int:
+        """给所有在跑的服务发 ``SIGUSR2``：预告「这次是下线，不是重启」。
+
+        服务侧的 ``RabbitRuntime`` 收到后把停机策略从 ``restart`` 切成 ``offline``
+        （解绑 + 排空），于是 ``blue down`` 之后不会留下积压消息；普通重启不发这个
+        信号，保持 ``restart`` 的「保留积压、启动后补投」语义。
+
+        返回成功发出的信号数量（给调用方判断是否需要等一小会儿）。
+        """
+        sent = 0
+        for runtime in self._runtimes.values():
+            handle = runtime.handle
+            if handle is None or handle.process.returncode is not None:
+                continue
+            try:
+                os.kill(handle.process.pid, signal.SIGUSR2)
+            except ProcessLookupError, PermissionError:
+                continue
+            sent += 1
+        return sent
+
     async def stop(self) -> None:
         """请求调谐循环退出，并等待全部服务停止。"""
         if self._stopped:

@@ -12,6 +12,8 @@
 from __future__ import annotations
 
 import asyncio
+import logging
+import signal
 from abc import ABC, abstractmethod
 from collections.abc import Iterable
 from typing import Literal, Protocol, runtime_checkable
@@ -38,6 +40,8 @@ __all__ = [
     "MemoryRuntime",
     "RabbitRuntime",
 ]
+
+logger = logging.getLogger(__name__)
 
 
 def shutdown_config_for(drain_budget: float) -> ShutdownConfig:
@@ -109,6 +113,29 @@ class BusRuntime(ABC):
             return ShutdownConfig()
         return shutdown_config_for(self._drain_timeout)
 
+    def set_shutdown_strategy(self, strategy: Literal["restart", "offline"]) -> None:
+        """切换停机策略；默认实现什么也不做（内存运行时没有队列策略）。"""
+        _ = strategy
+
+    def _install_offline_signal(self) -> None:
+        """把 ``SIGUSR2`` 当作「这次是下线，不是重启」的预告。
+
+        supervisor 在 ``blue down`` 时先发 ``SIGUSR2``、稍候再发 ``SIGTERM``；普通
+        重启（apply / crash 拉起）不发这个信号，于是保持 ``restart``——积压留着，
+        重启后补投。
+        """
+        try:
+            asyncio.get_running_loop().add_signal_handler(
+                signal.SIGUSR2, self._on_offline_signal
+            )
+        except NotImplementedError, RuntimeError, ValueError:
+            # 非主线程 / 平台不支持：维持默认策略即可
+            logger.debug("无法注册 SIGUSR2 处理器，停机策略保持不变")
+
+    def _on_offline_signal(self) -> None:
+        logger.info("收到 SIGUSR2：本次停机走 offline（解绑并排空，不留积压）")
+        self.set_shutdown_strategy("offline")
+
     @property
     def member_id(self) -> str:
         """本成员在总线上的唯一标识。"""
@@ -159,6 +186,7 @@ class BusRuntime(ABC):
             middleware_chain=chain,
         )
         self._bus = bus
+        self._install_offline_signal()
         try:
             await bus.start()
         except Exception:
@@ -220,6 +248,21 @@ class RabbitRuntime(BusRuntime):
         )
         self._queue = queue
         return queue
+
+    def set_shutdown_strategy(self, strategy: Literal["restart", "offline"]) -> None:
+        """切换停机策略（``blue down`` 前由 supervisor 经 ``SIGUSR2`` 触发）。
+
+        ``infinity_bus`` 没有提供运行时切换——``RabbitFanoutQueue`` 在构造时就把
+        ``_strategy`` 固定了，而 :meth:`EventQueue.join` 只在停机那一刻读它。所以
+        直接改那个字段即可生效。库升级要复核字段名，这里用 ``hasattr`` 探测，
+        缺失就保持原策略而不是崩掉。
+        """
+        queue = self._queue
+        if queue is None or not hasattr(queue, "_strategy"):
+            logger.warning("队列不支持运行时切换策略，保持 %s", self._strategy)
+            return
+        setattr(queue, "_strategy", strategy)  # noqa: B010 - 库未暴露公开接口
+        self._strategy = strategy
 
     async def _close_queue(self) -> None:
         queue, self._queue = self._queue, None

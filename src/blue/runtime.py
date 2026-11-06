@@ -398,7 +398,7 @@ def build_runtime(
     role: str | None = None,
     events: Iterable[type[EventDeclaration]] | None = None,
     url: str | None = None,
-    strategy: Literal["restart", "offline"] = "offline",
+    strategy: Literal["restart", "offline"] = "restart",
 ) -> RabbitRuntime:
     """创建一个 RabbitMQ 总线成员。
 
@@ -407,8 +407,12 @@ def build_runtime(
     ``BLUE_INSTANCE_ID`` 会让队列名每次启动都变，durable 队列永远复用不上，
     旧队列无人消费却仍绑定在 fanout 上，无限积压。
 
-    ``strategy`` 决定停机时的队列语义，默认 ``offline``：``join()`` 会解绑
-    队列，退出后不再接收广播；``restart`` 保留绑定与积压，重启后补投。
+    ``strategy`` 决定停机时的队列语义，默认 ``restart``：停机只停消费、保留绑定
+    与积压，重启后**补投**——重启期间发布的消息不会丢。
+
+    真正下线（``blue down``）时 supervisor 会先给本进程发 ``SIGUSR2``，运行时
+    收到后把策略切成 ``offline``（解绑 + 排空，不留积压），见
+    :meth:`RabbitRuntime.set_shutdown_strategy`。
 
     ``role`` 缺省取服务名；``events`` 缺省按服务配置里的 ``depends_contracts``
     自动扫描各契约包的 ``EVENTS``——服务代码不再手写事件列表。传入 ``events``
