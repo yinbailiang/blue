@@ -65,6 +65,30 @@ Agent 在模型流式输出期间同时发布 `session.stream`，携思考增量
 工具进程启动时发布 `tool.register`，周期补发注册并发布 `tool.heartbeat`，
 退出时发布 `tool.unregister`；agent 按 TTL 回收失联工具。
 
+## 开发环境
+
+需要 **Python 3.14** 与 **RabbitMQ**，两条路任选：
+
+```bash
+# 方式一：Nix（flake 已固定 nixpkgs 与工具版本；Linux / macOS）
+nix develop
+uv sync --all-packages
+
+# 方式二：本机已有 Python 3.14 + RabbitMQ
+uv sync --all-packages
+```
+
+首次运行前复制密钥模板并填入自己的值（`secrets.toml` 已被 `.gitignore`）：
+
+```bash
+cp secrets.example.toml secrets.toml
+```
+
+devShell 里已带 `uv`、`python3.14`、`rabbitmq-server`，进入后会打印启动与管理台命令。
+服务默认连 `amqp://guest:guest@127.0.0.1:5672/blue`，可用 `BLUE_BUS_URL` 覆盖。
+`flake.lock` 已提交；升级工具链时改 `flake.nix` 里的 nixpkgs URL 再 `nix flake lock`，
+并确认 Python 3.14 仍在。
+
 ## 目录结构
 
 ```text

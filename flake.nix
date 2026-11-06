@@ -2,11 +2,11 @@
   description = "blue —— Infinity 系统开发环境（uv + RabbitMQ）";
 
   inputs = {
-    # 复用系统 registry 中的 nixpkgs（NixOS 26.05 自带，本机为 f3a73bc），
-    # 无需访问 GitHub，适合网络受限环境。
-    # 网络可用时可改成固定 rev 以便完全复现：
-    #   nixpkgs.url = "github:NixOS/nixpkgs/f3a73bcf5d1c5b75a66cf35a48957e30d41d647a";
-    nixpkgs.url = "nixpkgs";
+    # 固定到 NixOS 官方发布 tarball：既不用 GitHub，也不依赖本机 registry。
+    # `nixpkgs.url = "nixpkgs"` 是 indirect 写法，结果取决于每台机器的 registry，
+    # 公开仓库里必须钉死；flake.lock 里同时记了 narHash，下载内容不会漂移。
+    # 升级：换成新的 release tarball URL，再 `nix flake lock`。
+    nixpkgs.url = "https://releases.nixos.org/nixpkgs/nixpkgs-26.11pre1107035.f9887a8a434b/nixexprs.tar.zst";
   };
 
   outputs =
@@ -23,7 +23,7 @@
       devShells = nixpkgs.lib.genAttrs systems (
         system:
         let
-          pkgs = import nixpkgs { inherit system; };
+          pkgs = nixpkgs.legacyPackages.${system};
         in
         {
           default = pkgs.mkShell {

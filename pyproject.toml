@@ -4,6 +4,8 @@ version = "0.1.0"
 description = "分布式 Agent 系统的控制面与共享 SDK"
 readme = "README.md"
 requires-python = ">=3.14"
+license = "MIT"
+license-files = ["LICENSE.md"]
 dependencies = [
     "infinity-agent>=0.3.0",
     "infinity-agent-kit>=1.0.0",
