@@ -24,6 +24,7 @@ from infinity_bus import (
     EventHandlerRegistry,
     EventQueue,
     EventRegistry,
+    ShutdownConfig,
 )
 from infinity_bus.templates.queues import RabbitFanoutQueue
 
@@ -34,6 +35,27 @@ __all__ = [
     "MemoryRuntime",
     "RabbitRuntime",
 ]
+
+
+def shutdown_config_for(drain_budget: float) -> ShutdownConfig:
+    """按排空预算推导 ``EventBus`` 的停机配置。
+
+    库的默认值（队列空只等 1 秒、最长 15 秒、且随积压条数缩水）与 supervisor 的
+    ``stop_timeout`` 无关，容易出现「库还在排空、supervisor 已经 SIGKILL」——那样
+    未 ack 的消息会被 broker 重投（at-least-once），非幂等处理器就重复执行了。
+
+    ``drain_budget`` 应当已经小于 ``stop_timeout``（见
+    :func:`blue.runtime.shutdown_drain_timeout`）。
+    """
+    return ShutdownConfig(
+        # 大头给 queue.join()：restart 策略下它要等 inbound 排空 + unacked 全 ack，
+        # 也就是「正在跑的处理器收尾」。
+        queue_timeout_min=drain_budget,
+        queue_timeout_max=drain_budget,
+        avg_wait_time=0.0,  # 让超时恒等于预算，不随 qsize 波动
+        # 尾巴只做兜底：join 已经把队列排空，这里等残余任务即可。
+        tasks_timeout=1.0,
+    )
 
 
 class BusRuntime(ABC):
@@ -47,6 +69,7 @@ class BusRuntime(ABC):
         *,
         member_id: str,
         events: Iterable[type[EventDeclaration]],
+        drain_timeout: float | None = None,
     ) -> None:
         if not member_id.strip():
             raise ValueError("member_id 不能为空")
@@ -56,6 +79,13 @@ class BusRuntime(ABC):
             self._events.register(event)
         self._handlers = EventHandlerRegistry()
         self._bus: EventBus | None = None
+        self._drain_timeout = drain_timeout
+
+    def _shutdown_config(self) -> ShutdownConfig:
+        """停机超时配置；未指定预算时沿用库默认值。"""
+        if self._drain_timeout is None:
+            return ShutdownConfig()
+        return shutdown_config_for(self._drain_timeout)
 
     @property
     def member_id(self) -> str:
@@ -90,7 +120,12 @@ class BusRuntime(ABC):
         if self._bus is not None:
             return
         queue = await self._open_queue()
-        bus = EventBus(self._events, self._handlers, queue=queue)
+        bus = EventBus(
+            self._events,
+            self._handlers,
+            queue=queue,
+            shutdown=self._shutdown_config(),
+        )
         self._bus = bus
         try:
             await bus.start()
@@ -127,8 +162,11 @@ class RabbitRuntime(BusRuntime):
         member_id: str,
         events: Iterable[type[EventDeclaration]],
         strategy: Literal["restart", "offline"] = "restart",
+        drain_timeout: float | None = None,
     ) -> None:
-        super().__init__(member_id=member_id, events=events)
+        super().__init__(
+            member_id=member_id, events=events, drain_timeout=drain_timeout
+        )
         self._url = url
         self._strategy: Literal["restart", "offline"] = strategy
         self._queue: RabbitFanoutQueue | None = None

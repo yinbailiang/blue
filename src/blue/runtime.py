@@ -147,6 +147,11 @@ class InfraConfig(BaseModel):
         description="契约名 → 事件模块；由 supervisor 按 depends_contracts 注入",
     )
     registry_ttl: float = Field(default=15.0, gt=0, description="工具租约时长（秒）")
+    stop_timeout: float = Field(
+        default=10.0,
+        gt=0,
+        description="supervisor 给本服务的优雅停止预算（秒）；到点即 SIGKILL",
+    )
     registry_sweep_interval: float = Field(
         default=2.0, gt=0, description="工具租约巡检间隔（秒）"
     )
@@ -356,6 +361,20 @@ def workspace() -> Workspace:
     return _workspace
 
 
+def shutdown_drain_timeout() -> float:
+    """停机排空预算（秒）：在 supervisor 的 ``stop_timeout`` 之前收尾。
+
+    留 2 秒给进程退出、日志刷盘。
+
+    超预算的后果不是"慢一点"：supervisor 到点 SIGKILL，未 ack 的消息被 broker
+    重投（AMQP at-least-once），非幂等处理器会重复执行。所以预算必须**小于**
+    ``stop_timeout``——原来是库的默认值（队列空只等 1 秒、最长 15 秒）跟
+    supervisor 的 10 秒各说各话，慢处理器必然走不到优雅收尾。
+    """
+    budget = load_infra_config().stop_timeout
+    return max(1.0, budget - 2.0)
+
+
 def build_runtime(
     role: str | None = None,
     events: Iterable[type[EventDeclaration]] | None = None,
@@ -385,6 +404,7 @@ def build_runtime(
         member_id=f"{role or member}.{member}",
         events=declarations,
         strategy=strategy,
+        drain_timeout=shutdown_drain_timeout(),
     )
 
 
