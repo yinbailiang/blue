@@ -62,6 +62,26 @@ supervisor {
   # 清理巡检间隔（秒）：每这么久最多清一次，不把扫表摊到每条事件上。
   idempotency_sweep_interval: <float, positive> = 600.0
 
+  # —— 审计日志：全量记录各服务**发射**的事件（实现见 src/blue/journal.py）——
+  # 每服务一个库：.blue/journal/<service>.sqlite。只增不减，靠下面三项回收。
+  # 必须挂在发射侧（on_publish）：一个事件只有一个发射者 → 1 行/事件；
+  # 挂接收侧会被 fanout 放大成「成员数」份。
+  #
+  # 代价（实测量级）：webui 一天 291k 事件、registry 229k。digest 模式下负载只存
+  # size+sha256，每库约 20~60MB/天，所以保留期与字节上限必须一起设。
+  journal = true
+  journal_retention = 86400.0
+  # 单库文件软上限（字节）：到顶后从最老的成批删除并 incremental_vacuum。
+  journal_max_bytes = 67108864
+  # 负载存储：digest 只存 size+sha256；full 存正文（仍受 payload_max_bytes 限制）。
+  journal_payload_mode = "digest"
+  # 想看某个事件的正文就把名字加进白名单，例如：
+  #   journal_payload_allowlist = ["tool.call", "tool.result"]
+  journal_payload_max_bytes = 8192
+  journal_sweep_interval = 600.0
+  # 需要“行数上限”再打开（默认只按时间 + 字节回收）：
+  #   journal_max_rows = 500000
+
   # —— 世代（generation）机制，见 docs/generations.md ——
   # 激活新世代后等全部服务 Ready 的上限；超时按"激活失败"处理。
   activation_timeout: <float, positive> = 120.0

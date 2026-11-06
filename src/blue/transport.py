@@ -29,6 +29,7 @@ from infinity_bus import (
     EventHandlerRegistry,
     EventQueue,
     EventRegistry,
+    Middleware,
     MiddlewareChain,
     ShutdownConfig,
 )
@@ -122,6 +123,7 @@ class BusRuntime(ABC):
         events: Iterable[type[EventDeclaration]],
         drain_timeout: float | None = None,
         idempotency: IdempotencyRecorder | None = None,
+        journal: Middleware | None = None,
         intent_path: Path | None = None,
     ) -> None:
         if not member_id.strip():
@@ -134,6 +136,7 @@ class BusRuntime(ABC):
         self._bus: EventBus | None = None
         self._drain_timeout = drain_timeout
         self._idempotency = idempotency
+        self._journal = journal
         self._intent_path = intent_path
 
     def _shutdown_config(self) -> ShutdownConfig:
@@ -218,6 +221,10 @@ class BusRuntime(ABC):
         if self._bus is not None:
             return
         chain = MiddlewareChain()
+        if self._journal is not None:
+            # 审计日志挂在发射侧（on_publish）：一个事件只有一个发射者，
+            # 因此是 1 行/事件；挂接收侧会被 fanout 放大成成员数份。
+            await chain.add(self._journal)
         if self._idempotency is not None:
             if isinstance(self._idempotency, _ManagedRecorder):
                 await self._idempotency.start()
@@ -286,6 +293,7 @@ class RabbitRuntime(BusRuntime):
         strategy: Literal["restart", "offline"] = "restart",
         drain_timeout: float | None = None,
         idempotency: IdempotencyRecorder | None = None,
+        journal: Middleware | None = None,
         intent_path: Path | None = None,
     ) -> None:
         super().__init__(
@@ -293,6 +301,7 @@ class RabbitRuntime(BusRuntime):
             events=events,
             drain_timeout=drain_timeout,
             idempotency=idempotency,
+            journal=journal,
             intent_path=intent_path,
         )
         self._url = url
@@ -413,8 +422,9 @@ class MemoryRuntime(BusRuntime):
         hub: MemoryFanout,
         member_id: str,
         events: Iterable[type[EventDeclaration]],
+        journal: Middleware | None = None,
     ) -> None:
-        super().__init__(member_id=member_id, events=events)
+        super().__init__(member_id=member_id, events=events, journal=journal)
         self._hub = hub
         self._queue: MemoryMemberQueue | None = None
 

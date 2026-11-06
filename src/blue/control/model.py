@@ -137,6 +137,46 @@ class SupervisorSettings(BaseModel):
         gt=0,
         description="去重表清理巡检间隔（秒）",
     )
+    journal: bool = Field(
+        default=False,
+        description=(
+            "审计日志总开关：全量记录各服务**发射**的事件（含因果链）；"
+            "下发到 infra.journal。库里只增不减，必须配 retention/max_rows/max_bytes"
+        ),
+    )
+    journal_retention: float = Field(
+        default=24 * 3600.0,
+        gt=0,
+        description="审计日志保留时长（秒）；到期由后台 GC 删除",
+    )
+    journal_max_rows: int | None = Field(
+        default=None,
+        ge=1,
+        description="审计表单库行数上限；None 表示只按时间回收",
+    )
+    journal_max_bytes: int | None = Field(
+        default=None,
+        ge=1,
+        description="审计库文件软上限（字节）；超出后从最老的成批删除",
+    )
+    journal_payload_mode: Literal["digest", "full"] = Field(
+        default="digest",
+        description="负载存储：digest 只存 size+sha256，full 存正文",
+    )
+    journal_payload_allowlist: tuple[str, ...] = Field(
+        default=(),
+        description="这些事件名即使 digest 模式也存正文，用于定位关键事件",
+    )
+    journal_payload_max_bytes: int = Field(
+        default=8192,
+        gt=0,
+        description="单个负载正文上限；超过只留摘要（避免把图片/长输出灌进库）",
+    )
+    journal_sweep_interval: float = Field(
+        default=600.0,
+        gt=0,
+        description="审计表 GC 巡检间隔（秒）：每这么久最多清一次",
+    )
     uv_frozen: bool = Field(default=True, description="uv run 是否使用 --frozen")
     activation_timeout: float = Field(
         default=120.0,

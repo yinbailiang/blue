@@ -26,6 +26,7 @@ from infinity_bus.templates import SqliteIdempotencyRecorder
 from pydantic import BaseModel, ConfigDict, Field
 
 from blue.errors import RuntimeConfigError
+from blue.journal import JOURNAL_DIRNAME, JournalMiddleware
 from blue.lifecycle import LifecycleService, serve_forever
 from blue.transport import RabbitRuntime
 
@@ -174,6 +175,43 @@ class InfraConfig(BaseModel):
         default=600.0,
         gt=0,
         description="去重表清理巡检间隔（秒）：每这么久最多清一次，避免每条都扫表",
+    )
+    journal: bool = Field(
+        default=False,
+        description="是否全量记录本服务发射的事件（审计日志）",
+    )
+    journal_retention: float = Field(
+        default=24 * 3600.0,
+        gt=0,
+        description="审计日志保留时长（秒）",
+    )
+    journal_max_rows: int | None = Field(
+        default=None,
+        gt=0,
+        description="审计表单库行数上限；None 表示只按时间回收",
+    )
+    journal_max_bytes: int | None = Field(
+        default=None,
+        gt=0,
+        description="审计库文件软上限（字节）",
+    )
+    journal_payload_mode: Literal["digest", "full"] = Field(
+        default="digest",
+        description="负载存储：digest 只存 size+sha256，full 存正文",
+    )
+    journal_payload_allowlist: tuple[str, ...] = Field(
+        default=(),
+        description="这些事件名即使 digest 模式也存正文",
+    )
+    journal_payload_max_bytes: int = Field(
+        default=8192,
+        gt=0,
+        description="单个负载正文上限；超过只留摘要",
+    )
+    journal_sweep_interval: float = Field(
+        default=600.0,
+        gt=0,
+        description="审计表 GC 巡检间隔（秒）",
     )
     registry_sweep_interval: float = Field(
         default=2.0, gt=0, description="工具租约巡检间隔（秒）"
@@ -421,6 +459,34 @@ def idempotency_recorder() -> SqliteIdempotencyRecorder | None:
     )
 
 
+def journal_middleware() -> JournalMiddleware | None:
+    """按配置创建审计日志中间件；关闭时返回 ``None``。
+
+    库存在 ``state_dir/journal`` 下、按服务名分文件。**必须一服务一库**：SQLite
+    只有一个写者，25 个进程共用一个文件时写入方互相等锁。
+
+    挂在总线的**发射侧**（``on_publish``）：fanout 会把每个事件广播给所有成员，
+    挂到接收侧就会产生「成员数」份重复。
+    """
+    infra = load_infra_config()
+    if not infra.journal:
+        return None
+    directory = infra.state_dir.expanduser().resolve() / JOURNAL_DIRNAME
+    directory.mkdir(parents=True, exist_ok=True)
+    name = service_name()
+    return JournalMiddleware(
+        directory / f"{name}.sqlite",
+        name,
+        retention=infra.journal_retention,
+        max_rows=infra.journal_max_rows,
+        max_bytes=infra.journal_max_bytes,
+        payload_mode=infra.journal_payload_mode,
+        payload_allowlist=infra.journal_payload_allowlist,
+        payload_max_bytes=infra.journal_payload_max_bytes,
+        sweep_interval=infra.journal_sweep_interval,
+    )
+
+
 SHUTDOWN_INTENT_DIRNAME = "shutdown-intent"
 """下线意图目录名：supervisor 在 down 前按服务写一份，服务停机时读自己的那份。"""
 
@@ -504,6 +570,7 @@ def build_runtime(
         strategy=strategy,
         drain_timeout=shutdown_drain_timeout(),
         idempotency=idempotency_recorder(),
+        journal=journal_middleware(),
         intent_path=shutdown_intent_path(),
     )
 

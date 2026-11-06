@@ -39,7 +39,8 @@ from blue.control.runner import ProcessRunner
 from blue.control.smoke import SmokeReport, run_smoke
 from blue.control.state import LockInfo, MaintenanceLock, StateStore
 from blue.errors import BlueError
-from blue.idempotency import vacuum_databases
+from blue.idempotency import DEDUPE_DIRNAME, vacuum_databases
+from blue.journal import JOURNAL_DIRNAME
 from blue.runtime import RUNTIME_CONFIG_VERSION
 
 logger = logging.getLogger(__name__)
@@ -101,6 +102,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     keep=args.keep,
                     dry_run=bool(args.dry_run),
                     vacuum=bool(args.vacuum_dedupe),
+                    vacuum_journal=bool(args.vacuum_journal),
                 )
             case "status":
                 return _status(config_path, as_json=bool(args.json))
@@ -773,7 +775,12 @@ def _generations(config_path: str, *, as_json: bool) -> int:
 
 
 def _gc(
-    config_path: str, *, keep: int | None, dry_run: bool, vacuum: bool = False
+    config_path: str,
+    *,
+    keep: int | None,
+    dry_run: bool,
+    vacuum: bool = False,
+    vacuum_journal: bool = False,
 ) -> int:
     """回收老世代与无人引用的产物 / wheel（数据面永不回收）。
 
@@ -794,7 +801,9 @@ def _gc(
         )
         return 1
     try:
-        return _gc_locked(desired, store, artifacts, keep_count, dry_run, vacuum)
+        return _gc_locked(
+            desired, store, artifacts, keep_count, dry_run, vacuum, vacuum_journal
+        )
     finally:
         lock.release()
 
@@ -806,6 +815,7 @@ def _gc_locked(
     keep_count: int,
     dry_run: bool,
     vacuum: bool,
+    vacuum_journal: bool = False,
 ) -> int:
     """``_gc`` 的主体：持着维护锁执行实际回收与输出。"""
 
@@ -855,19 +865,23 @@ def _gc_locked(
         )
     if vacuum:
         _vacuum_dedupe(desired.supervisor.state_dir, dry_run=dry_run)
+    if vacuum_journal:
+        _vacuum_journal(desired.supervisor.state_dir, dry_run=dry_run)
     return 0
 
 
-def _vacuum_dedupe(state_dir: Path, *, dry_run: bool) -> None:
-    """把 ``gc --vacuum-dedupe`` 的结果说成人话（真正的活在
+def _vacuum_databases(
+    state_dir: Path, *, dry_run: bool, dirname: str, label: str
+) -> None:
+    """把 ``gc --vacuum-*`` 的结果说成人话（真正的活在
     :func:`blue.idempotency.vacuum_databases` 里）。"""
-    report = vacuum_databases(state_dir, dry_run=dry_run)
+    report = vacuum_databases(state_dir, dry_run=dry_run, dirname=dirname)
     if not report.files:
-        print("去重库：没有可收拾的文件")
+        print(f"{label}：没有可收拾的文件")
         return
     verb = "可回收" if dry_run else "已回收"
     print(
-        f"{verb}去重库空间 {_human_size(report.reclaimed)}"
+        f"{verb}{label}空间 {_human_size(report.reclaimed)}"
         f"（扫描时共 {_human_size(report.total_bytes)}，"
         f"空闲页 {report.free_pages} 个）"
     )
@@ -880,6 +894,20 @@ def _vacuum_dedupe(state_dir: Path, *, dry_run: bool) -> None:
             + ", ".join(report.skipped[:4])
             + (" …" if len(report.skipped) > 4 else "")
         )
+
+
+def _vacuum_dedupe(state_dir: Path, *, dry_run: bool) -> None:
+    """``gc --vacuum-dedupe``：收拾去重库。"""
+    _vacuum_databases(
+        state_dir, dry_run=dry_run, dirname=DEDUPE_DIRNAME, label="去重库"
+    )
+
+
+def _vacuum_journal(state_dir: Path, *, dry_run: bool) -> None:
+    """``gc --vacuum-journal``：收拾审计日志库。"""
+    _vacuum_databases(
+        state_dir, dry_run=dry_run, dirname=JOURNAL_DIRNAME, label="审计日志库"
+    )
 
 
 def _human_size(size: int) -> str:
@@ -1647,6 +1675,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--vacuum-dedupe",
         action="store_true",
         help="顺带 VACUUM 去重库（服务占用时会跳过，停机窗口跑更彻底）",
+    )
+    gc_parser.add_argument(
+        "--vacuum-journal",
+        action="store_true",
+        help="顺带 VACUUM 审计日志库（删行不缩文件，靠它把空间还回去）",
     )
 
     status_parser = subparsers.add_parser("status", help="查看服务状态")

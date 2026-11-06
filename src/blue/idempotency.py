@@ -126,17 +126,23 @@ class VacuumReport:
 
 # VACUUM 要独占访问，服务开着库时必然 database is locked；那种情况只报告、不重试，
 # 等停机窗口（blue down / 激活重启）再跑一次。
-def vacuum_databases(state_dir: Path, *, dry_run: bool = False) -> VacuumReport:
-    """收拾 ``state_dir/dedupe`` 下去重库的碎片空间。
+def vacuum_databases(
+    state_dir: Path, *, dry_run: bool = False, dirname: str = DEDUPE_DIRNAME
+) -> VacuumReport:
+    """收拾 ``state_dir/<dirname>`` 下 SQLite 库的碎片空间。
 
     去重记录会被保留期按行删除，但 **SQLite 删行不缩文件**（只剩空闲页，除非
     ``auto_vacuum``）。于是库会停在一个历史峰值上不回落——这是“调小 retention
     却不省磁盘”的真正原因。这里显式 ``VACUUM`` 一次把它压回去。
 
-    :param state_dir: 成员状态目录（去重库在它的 ``dedupe`` 子目录下）
+    审计日志库（``journal``）是同样的形态，因此共用这一份实现，靠 ``dirname``
+    区分目录。
+
+    :param state_dir: 成员状态目录（库在它的 ``dirname`` 子目录下）
     :param dry_run: 只统计空闲页占用，不动文件
+    :param dirname: 子目录名，缺省为去重库目录
     """
-    directory = state_dir / DEDUPE_DIRNAME
+    directory = state_dir / dirname
     files = sorted(directory.glob("*.sqlite")) if directory.is_dir() else []
     reclaimed = 0
     total_bytes = 0

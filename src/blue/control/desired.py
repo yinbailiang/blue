@@ -184,6 +184,16 @@ def runtime_config_content(service: DesiredService, desired: DesiredState) -> st
             "idempotency": settings.idempotency,
             "idempotency_retention": settings.idempotency_retention,
             "idempotency_sweep_interval": settings.idempotency_sweep_interval,
+            # 审计日志（全量记录本服务**发射**的事件）；库落在 state_dir/journal 下。
+            # 同样是“不写死”：写死等于这些配置项永远改不动。
+            "journal": settings.journal,
+            "journal_retention": settings.journal_retention,
+            "journal_max_rows": settings.journal_max_rows,
+            "journal_max_bytes": settings.journal_max_bytes,
+            "journal_payload_mode": settings.journal_payload_mode,
+            "journal_payload_allowlist": list(settings.journal_payload_allowlist),
+            "journal_payload_max_bytes": settings.journal_payload_max_bytes,
+            "journal_sweep_interval": settings.journal_sweep_interval,
         },
     }
     return (
