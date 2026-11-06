@@ -1,0 +1,60 @@
+# 家族标准质量门（见 .agents/SKILLS/init-project.md）。
+#
+# 本地一次性安装：uv run pre-commit install
+# 全量执行：      uv run pre-commit run --all-files
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v5.0.0
+    hooks:
+      - id: check-ast
+      - id: check-toml
+      - id: check-yaml
+      - id: check-json
+      - id: check-merge-conflict
+      - id: check-case-conflict
+      # vendored 代码与测试 fixture 是字节敏感的产物（校验和、快照对比），
+      # 不参与“补末尾换行 / 去行尾空白”这类格式修正。
+      - id: end-of-file-fixer
+        exclude: '\.py$|/vendor/|/fixtures/'
+      - id: trailing-whitespace
+        exclude: '\.py$|/vendor/|/fixtures/'
+
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.17.3
+    hooks:
+      - id: ruff-check
+        args: ["--fix"]
+        files: ^(src|tests|services|sdk|contracts|mcp_servers)/
+      - id: ruff-format
+        files: ^(src|tests|services|sdk|contracts|mcp_servers)/
+
+  # pyright 用**项目自己的**那一份，不用上游 hook：
+  # 上游 hook 会把改动文件作为参数逐个传给 pyright，于是 pyright 以"单文件模式"
+  # 分析——本仓库靠 pyproject 的 extraPaths 才能解析 28 个 workspace 成员，
+  # 单文件模式丢掉这层上下文，服务里的导入全变成 Unknown（实测 8344 个误报）。
+  # 走 `uv run pyright` 才是与 CI 完全一致的那条路径。
+  - repo: local
+    hooks:
+      - id: pyright
+        name: pyright (strict)
+        entry: uv run pyright
+        language: system
+        pass_filenames: false
+        always_run: true
+
+  - repo: https://github.com/econchick/interrogate
+    rev: 1.7.0
+    hooks:
+      - id: interrogate
+        files: ^src/
+
+  # 家族标准是 --cov-fail-under=90，本仓库实测 83%（health / logs / lifecycle /
+  # journal 偏低）。这里先按**只升不降**的棘轮落 83：回归立刻失败，等补上测试再往上抬。
+  - repo: local
+    hooks:
+      - id: pytest-cov
+        name: pytest coverage
+        entry: uv run pytest --cov=blue --cov-fail-under=83 -q
+        language: system
+        pass_filenames: false
+        always_run: true

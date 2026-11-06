@@ -1,5 +1,7 @@
 # blue
 
+[![Test](https://github.com/yinbailiang/blue/actions/workflows/test.yml/badge.svg)](https://github.com/yinbailiang/blue/actions/workflows/test.yml)
+
 基于 `infinity-agent` / `infinity-bus` / `infinity-data` 的**分布式 Agent 系统**。
 
 - **控制面**：`blue` 包与 `blue` 命令，负责服务发现、进程编排、状态与日志；
@@ -88,6 +90,34 @@ devShell 里已带 `uv`、`python3.14`、`rabbitmq-server`，进入后会打印�
 服务默认连 `amqp://guest:guest@127.0.0.1:5672/blue`，可用 `BLUE_BUS_URL` 覆盖。
 `flake.lock` 已提交；升级工具链时改 `flake.nix` 里的 nixpkgs URL 再 `nix flake lock`，
 并确认 Python 3.14 仍在。
+
+## 持续集成
+
+质量门与本地完全一致（`.agents/SKILLS/setup-cicd.md`）：
+
+```bash
+uv sync --all-packages
+uv run pre-commit install          # 一次性
+uv run pre-commit run --all-files  # 与 CI 同一个门
+```
+
+`.github/workflows/test.yml`：
+
+| 作业 | 内容 |
+| --- | --- |
+| `pre-commit` | ruff lint/format、pyright strict、interrogate、pytest + 覆盖率 |
+| `test` | `pytest`，Linux 与 macOS 双平台（无 Windows：`fcntl.flock`） |
+| `integration` | 起一个 RabbitMQ，真跑跨进程 fanout 往返 |
+
+`.github/workflows/publish.yml`：推送 `v*` 标签 → 同一套质量门 → `uv build --all-packages`
+→ GitHub Release。PyPI 发布默认关闭，需先在仓库变量里设 `PYPI_ENABLED=true`
+（并完成 Trusted Publisher 注册与 workspace 包发布）。
+
+覆盖率门槛当前是 **83%**，家族标准是 90%——先按“只升不降”的棘轮落下，
+补上 `health` / `logs` / `lifecycle` / `journal` 的用例后再抬高。
+
+需要 broker 的用例（`services/agent/tests/test_integration_rabbit.py`）在不可达时
+自动跳过，所以本地不启 RabbitMQ 也能跑全量测试。
 
 ## 目录结构
 

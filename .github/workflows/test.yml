@@ -1,0 +1,113 @@
+name: Test
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+    branches: [main, master]
+  workflow_dispatch:
+
+concurrency:
+  group: test-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+# CI 与本地共用同一把质量门：pre-commit 通过才允许跑测试。
+jobs:
+  pre-commit:
+    name: pre-commit
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+
+      - name: Set up Python 3.14
+        run: uv python install 3.14
+
+      # 工作区有 28 个成员，`uv sync --all-packages` 才能让 services/ 下的测试
+      # 导入到各自的包（单包项目用 --extra dev 即可，这里不行）。
+      - name: Install dependencies
+        run: uv sync --all-packages
+
+      - name: Run pre-commit
+        run: uv run pre-commit run --all-files
+
+  test:
+    name: test (${{ matrix.os }})
+    needs: pre-commit
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        # 只写 3.14：requires-python >= 3.14，下界即唯一版本。
+        # 不含 windows：控制面用 fcntl.flock 做跨进程锁，Windows 无此模块。
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+
+      - name: Set up Python 3.14
+        run: uv python install 3.14
+
+      - name: Install dependencies
+        run: uv sync --all-packages
+
+      # 覆盖率门槛与 .pre-commit-config.yaml 保持一致（家族标准 90，当前棘轮 83）。
+      - name: Run tests with coverage
+        run: |
+          uv run pytest \
+            --cov=blue --cov-report=term-missing --cov-fail-under=83 -v
+
+      # 需要 broker 的用例自带 skipif，这里不启 RabbitMQ；真跑总线的是 integration。
+      - name: Integration（无 broker 时自动 skip）
+        run: uv run pytest services/agent/tests/test_integration_rabbit.py -q
+
+  integration:
+    name: integration (RabbitMQ)
+    needs: pre-commit
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    services:
+      rabbitmq:
+        image: rabbitmq:4-management
+        ports:
+          - 5672:5672
+        options: >-
+          --health-cmd "rabbitmq-diagnostics -q ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 12
+    env:
+      # 用默认 vhost "/"：guest 只能访问它（仓库默认是 /blue）。
+      BLUE_RABBIT_URL: amqp://guest:guest@127.0.0.1:5672/
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+
+      - name: Set up Python 3.14
+        run: uv python install 3.14
+
+      - name: Install dependencies
+        run: uv sync --all-packages
+
+      - name: 跨进程 fanout 往返
+        run: uv run pytest services/agent/tests/test_integration_rabbit.py -q

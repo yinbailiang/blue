@@ -1,0 +1,109 @@
+name: Publish
+
+# 推送 v* 标签触发；GitHub Release 由本工作流创建，不要手动建。
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+jobs:
+  pre-commit:
+    name: pre-commit
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+
+      - name: Set up Python 3.14
+        run: uv python install 3.14
+
+      - name: Install dependencies
+        run: uv sync --all-packages
+
+      - name: Run pre-commit
+        run: uv run pre-commit run --all-files
+
+  test:
+    name: test (${{ matrix.os }})
+    needs: pre-commit
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+
+      - name: Set up Python 3.14
+        run: uv python install 3.14
+
+      - name: Install dependencies
+        run: uv sync --all-packages
+
+      - name: Run tests with coverage
+        run: |
+          uv run pytest \
+            --cov=blue --cov-report=term-missing --cov-fail-under=83 -q
+
+  release:
+    name: build & release
+    needs: [test]
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      id-token: write # PyPI Trusted Publisher（OIDC）
+      contents: write # 创建 GitHub Release
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+
+      - name: Set up Python 3.14
+        run: uv python install 3.14
+
+      - name: Install dependencies
+        run: uv sync --all-packages
+
+      # 工作区有 28 个成员：blue 依赖 blue-contracts-* / blue-tool-sdk，
+      # 只 build 根包会得到一个指向不存在依赖的 wheel，所以整仓一起构建。
+      - name: Build packages
+        run: uv build --all-packages
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/*.whl
+            dist/*.tar.gz
+          generate_release_notes: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      # 默认不发布到 PyPI：
+      #   1. 需要在 PyPI 为 **每个** 项目注册 Trusted Publisher（工作流名 publish.yml）；
+      #   2. blue 的依赖里有 workspace 包（blue-contracts-tool / -session、blue-tool-sdk），
+      #      它们必须先发布，否则 blue 的 wheel 在 PyPI 上不可安装。
+      # 两项都就绪后，在仓库 Settings → Variables 里设 PYPI_ENABLED=true 即启用。
+      - name: Publish to PyPI
+        if: vars.PYPI_ENABLED == 'true'
+        run: uv publish dist/*
