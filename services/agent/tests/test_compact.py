@@ -324,3 +324,36 @@ def test_learn_profiles_maps_tool_names() -> None:
     # 观测到 1000 字符 > LONG_TEXT(400)，判定为大文本
     assert profiles["run_shell"]["stdout"].is_text is True
     assert profiles["read_file"]["content"].is_text is True
+
+
+def test_list_items_is_configurable() -> None:
+    """列表保留条数要能调——它曾经是写死的常量，配置改了也不生效。"""
+    message = _tool({"results": [{"title": f"t{index}"} for index in range(10)]})
+
+    folded = compact_history([message], keep_messages=0, list_items=5)
+    results = _json(folded[0])["results"]
+
+    assert isinstance(results, list)
+    assert results[:5] == [{"title": f"t{index}"} for index in range(5)]
+    assert results[-1] == "…5 more"
+
+
+def test_compact_settings_are_all_wired() -> None:
+    """每个 ``compact_*`` 配置都必须真的被 agent 读取。
+
+    这道守卫针对的正是「死参数」：``compact_list_items`` 曾经既写死在 compact.py 的
+    常量里、config 里也没有字段、agent 调用时更没传——配置改了什么也不会变。
+    """
+    import inspect
+
+    from blue_service_agent import agent as agent_module
+    from blue_service_agent.config import AgentConfig
+
+    source = inspect.getsource(agent_module)
+    unwired = [
+        name
+        for name in AgentConfig.model_fields
+        if name.startswith("compact_") and f"_settings.{name}" not in source
+    ]
+
+    assert not unwired, f"这些 compact 配置从未被读取：{unwired}"

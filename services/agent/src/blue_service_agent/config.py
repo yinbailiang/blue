@@ -79,6 +79,15 @@ class AgentConfig(BaseModel):
     compact_keep_messages: int = Field(
         default=300, ge=0, description="尾部保留原文的消息条数（最近几轮不动）"
     )
+    compact_list_items: int = Field(
+        default=3,
+        ge=0,
+        description=(
+            "列表字段保留的条数，超出部分折叠成「…N more」。"
+            "此前这个值写死在 compact.py 的 COMPACT_LIST_ITEMS 里、"
+            "agent 侧也没把它传给 compact_history，等于不可配置。"
+        ),
+    )
     compact_text_chars: int = Field(
         default=200, ge=20, description="成功结果里大文本字段保留的字符数"
     )

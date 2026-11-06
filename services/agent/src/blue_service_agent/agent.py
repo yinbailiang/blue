@@ -567,6 +567,7 @@ class AgentCore:
                         keep_messages=self._settings.compact_keep_messages,
                         text_chars=self._settings.compact_text_chars,
                         error_chars=self._settings.compact_error_chars,
+                        list_items=self._settings.compact_list_items,
                         rules=self._settings.compact_rules,
                         profiles=learn_profiles(messages),
                         target_chars=self._settings.compact_target_chars,
