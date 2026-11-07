@@ -405,9 +405,12 @@ class TerminalSession:
         整个进程组收到 SIGHUP 而退出）。
         """
         if not self.closed and not self._reaped:
-            with contextlib.suppress(ProcessLookupError):
+            # ``PermissionError`` 与 ``ProcessLookupError`` 等价：子进程已被回收、
+            # pid 落到别人的进程组上时，macOS 回 EPERM（Linux 回 ESRCH）。两种都
+            # 说明「目标已经不是我们能杀的那个进程了」。与 control/process.py 一致。
+            with contextlib.suppress(ProcessLookupError, PermissionError):
                 os.killpg(self._pid, signal.SIGHUP)
-            with contextlib.suppress(ProcessLookupError):
+            with contextlib.suppress(ProcessLookupError, PermissionError):
                 os.killpg(self._pid, signal.SIGTERM)
             self._mark_closed()
         with contextlib.suppress(OSError):
