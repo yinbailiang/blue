@@ -62,6 +62,16 @@ class ServiceMeta(BaseModel):
     )
     startup_timeout: float = Field(default=30.0, gt=0, description="启动就绪超时（秒）")
     readiness: ReadinessProbe = Field(default="process", description="就绪探针")
+    ready_settle: float = Field(
+        default=0.3,
+        gt=0,
+        description=(
+            "readiness=process 的观察期（秒）：先等这么久再看进程是否还活着。"
+            "它是「进程起来后立刻崩溃」与「真的起来了」之间的分界——太短会把"
+            "起来就崩的服务误判成就绪（python 解释器启动本身就要 30~100ms，"
+            "负载高时更久）。"
+        ),
+    )
     ready_tcp: str | None = Field(
         default=None, description="TCP 就绪目标（host:port）；缺省时 bus 自动推导"
     )

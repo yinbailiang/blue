@@ -92,7 +92,9 @@ async def wait_ready(
     if meta.readiness == "none":
         return True
     if meta.readiness == "process":
-        await asyncio.sleep(min(0.1, timeout))
+        # 观察期可配（``service.infd`` 的 ``ready_settle``）：只观察一个固定短窗口
+        # 猜不出「起来了」和「起来就崩」，而 python 解释器本身启动就要 30~100ms。
+        await asyncio.sleep(min(meta.ready_settle, timeout))
         return process.returncode is None
     if meta.readiness == "tcp":
         if target is None:

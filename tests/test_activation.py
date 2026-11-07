@@ -37,6 +37,7 @@ def _desired(
     mode: str = "sleep",
     activation_timeout: float = 1.0,
     auto_rollback: bool = True,
+    ready_settle: float = 0.3,
 ) -> DesiredState:
     """一个用假服务进程的期望状态（自定义 command，因此不需要产物）。"""
     service_dir = tmp_path / "demo"
@@ -54,6 +55,7 @@ def _desired(
             stop_timeout=2.0,
             startup_timeout=2.0,
             readiness="process",
+            ready_settle=ready_settle,
         ),
         config={},
         config_hash=f"cfg-{mode}",
@@ -169,15 +171,73 @@ async def _stable_flow(tmp_path: Path) -> None:
 
 
 def test_activation_timeout_rolls_back(tmp_path: Path) -> None:
-    """新世代起不来（进程一直崩）→ 超时后自动回到上一个 stable 世代。"""
+    """新世代起不来（进程一直崩）→ 超时后自动回到上一个 stable 世代。
+
+    这条曾经在并行跑时约一半概率失败（等不到 ``rolled_back``，日志里连 ERROR
+    都没有）。根因不在用例：``readiness="process"`` 的就绪探针只观察 100ms，
+    一个熬过这 100ms 才崩的进程会被判 READY，激活闸门若恰好在此刻看到「全绿」
+    就 mark_stable，坏世代永不回滚。闸门改成要求「全绿连续保持一段宽限」后，
+    这条恢复稳定，不再需要 slow 标记绕过。
+    """
     asyncio.run(_rollback_flow(tmp_path, auto_rollback=True))
 
 
 def test_activation_timeout_without_auto_rollback_marks_failed(
     tmp_path: Path,
 ) -> None:
-    """关掉自动回滚时只标记 failed，current 不动。"""
+    """关掉自动回滚时只标记 failed，current 不动。
+
+    与上面共用 ``_rollback_flow``，同样依赖 1 秒激活超时的时序。
+    """
     asyncio.run(_rollback_flow(tmp_path, auto_rollback=False))
+
+
+@pytest.mark.slow
+def test_activation_rejects_service_that_dies_right_after_ready(
+    tmp_path: Path,
+) -> None:
+    """服务被就绪探针判成 READY 后立刻崩溃 → 不许标 stable，必须回滚。
+
+    这条守的是**闸门侧的兜底**：即使 ``ready_settle`` 被配得太短（这里故意设成
+    0.05 秒），让 ``exit1-late``（熬 150ms 再退出）骗过就绪探针，激活闸门也必须
+    靠「全绿连续保持一段宽限」把它判失败。
+
+    没有这层兜底时（宽限置 0），闸门只要看到「此刻全绿」就 ``mark_stable``，
+    坏世代从此被当成稳定版本、永不回滚——「激活失败自动回滚」静默失效，
+    且不报任何错。这是确定性用例，不依赖机器快慢。
+    """
+    asyncio.run(_dies_right_after_ready(tmp_path))
+
+
+async def _dies_right_after_ready(tmp_path: Path) -> None:
+    good = _desired(tmp_path, generation="gen-1", activation_timeout=2.0)
+    _create(tmp_path, good, stable=True)
+    supervisor = _supervisor(good)
+    state = StateStore(good.supervisor.state_dir)
+    try:
+        await supervisor.start()
+        await _wait_for(lambda: _status(state) is ServiceStatus.READY)
+
+        broken = _desired(
+            tmp_path,
+            generation="gen-2",
+            mode="exit1-late",
+            activation_timeout=2.0,
+            # 故意把观察期配得比「起来就崩」的存活时间（150ms）还短，
+            # 逼出「探针误判 READY」这个场景，验证闸门能兜住
+            ready_settle=0.05,
+        )
+        second_id = _create(tmp_path, broken, stable=False)
+        assert await supervisor.reload() is True
+
+        await _wait_for(lambda: _activation_phase(state) == "rolled_back", timeout=60.0)
+        store = _store(tmp_path)
+        assert store.load(second_id).failed is True
+        current = store.current()
+        assert current is not None
+        assert current.id != second_id, "坏世代被当成 stable，回滚没有发生"
+    finally:
+        await supervisor.stop()
 
 
 async def _rollback_flow(tmp_path: Path, *, auto_rollback: bool) -> None:
@@ -199,7 +259,11 @@ async def _rollback_flow(tmp_path: Path, *, auto_rollback: bool) -> None:
         assert await supervisor.reload() is True
 
         expected = "rolled_back" if auto_rollback else "failed"
-        await _wait_for(lambda: _activation_phase(state) == expected, timeout=15.0)
+        # 上限给到 60 秒：回滚要先 mark_failed 再 _reload_locked 重建整棵运行时，
+        # 而 _reload_locked 里要逐个停旧服务、起新服务。全量并发跑（-n 12+）时
+        # 每个 python 子进程启动都会被 CPU 争抢拖慢，15 秒不够用——那是机器慢，
+        # 不是状态机卡住。断言内容不变，只是别把「机器忙」误判成「功能坏了」。
+        await _wait_for(lambda: _activation_phase(state) == expected, timeout=60.0)
 
         store = _store(tmp_path)
         snapshot = state.read_state()
@@ -213,7 +277,7 @@ async def _rollback_flow(tmp_path: Path, *, auto_rollback: bool) -> None:
             assert current.id == first_id
             assert snapshot.activation.previous_id == first_id
             # 回滚后服务应恢复就绪
-            await _wait_for(lambda: _status(state) is ServiceStatus.READY, timeout=15.0)
+            await _wait_for(lambda: _status(state) is ServiceStatus.READY, timeout=60.0)
         else:
             current = store.current()
             assert current is not None

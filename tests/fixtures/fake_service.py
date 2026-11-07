@@ -25,6 +25,13 @@ def main() -> int:
         case "exit1":
             print("boom", file=sys.stderr, flush=True)
             return 1
+        case "exit1-late":
+            # 熬过 readiness="process" 的 100ms 观察期再退出：探针因此会把它判成
+            # READY，而它随即崩溃。用来验证激活闸门不会把这种「起来就死」的服务
+            # 当成激活成功（否则坏世代会被标成 stable，永不回滚）。
+            time.sleep(0.15)
+            print("late-boom", file=sys.stderr, flush=True)
+            return 1
         case "crash-once":
             path = Path(args.state_file or "fake.state")
             if not path.exists():

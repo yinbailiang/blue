@@ -175,6 +175,7 @@ class Supervisor:
         self._config_error: str | None = None
         self._activation: ActivationState | None = None
         self._activation_deadline = 0.0
+        self._activation_green_since = 0.0
         self._active_id: int | None = None
         # 世代优先于 blue.infd：只要 current 指向一个完好世代，就是它说了算
         active = self._generations.current()
@@ -370,11 +371,15 @@ class Supervisor:
             await self._start(runtime, now)
 
         stable_after = self._desired.supervisor.stable_after
+        # 这里必须用 time.time()：``runtime.ready_at`` 存的是墙钟（写进 state.json
+        # 供展示），而 ``now`` 是 monotonic。两者相减恒为负，这段「稳定够了就清零
+        # 失败计数」的逻辑此前从不生效。
+        wall_now = time.time()
         for runtime in self._runtimes.values():
             if (
                 runtime.status is ServiceStatus.READY
                 and runtime.ready_at is not None
-                and now - runtime.ready_at >= stable_after
+                and wall_now - runtime.ready_at >= stable_after
                 and runtime.consecutive_failures
             ):
                 runtime.consecutive_failures = 0
@@ -463,6 +468,7 @@ class Supervisor:
         self, generation: Generation | None, *, previous_id: int | None
     ) -> None:
         """登记一次"等待验证"的激活（到期未全绿就按失败处理）。"""
+        self._activation_green_since = 0.0
         if generation is None:
             self._activation = None
             self._activation_deadline = 0.0
@@ -485,8 +491,23 @@ class Supervisor:
             previous_id,
         )
 
+    @property
+    def _activation_grace(self) -> float:
+        """全绿要「连续」保持多久才承认激活通过（秒）。
+
+        不能是 0：``readiness="process"`` 的就绪探针只观察
+        ``min(0.1, timeout)``，而一个「起来就崩」的进程在高负载下能活过这 100ms
+        （实测 20 个忙进程时，exit1 进程存活 104ms）——那一刻它会被判成 READY。
+        若闸门恰在此刻看到全绿就 ``mark_stable``，坏世代就被标成稳定、从此不再
+        回滚，「激活失败自动回滚」这个核心保证直接失效。
+
+        取 ``activation_timeout`` 的 0.4 倍、封顶 1 秒：既远大于崩溃窗口
+        （毫秒级），又给超时判定留下 2.5 倍余量。
+        """
+        return min(1.0, max(0.05, self._desired.supervisor.activation_timeout * 0.4))
+
     async def _check_activation(self, now: float) -> None:
-        """健康闸门：全部服务就绪才算激活成功，超时就回滚。"""
+        """健康闸门：全部服务就绪**并连续保持一段宽限**才算激活成功，超时就回滚。"""
         activation = self._activation
         if activation is None or activation.phase != "pending":
             return
@@ -498,29 +519,45 @@ class Supervisor:
             for name, runtime in self._runtimes.items()
             if runtime.status is not ServiceStatus.READY
         )
-        if not pending:
-            self._generations.mark_stable(generation)
-            activation.phase = "stable"
-            activation.message = ""
-            activation.failures = []
-            self._activation_deadline = 0.0
+        if pending:
+            # 有服务没就绪：连续计时作废，下次全绿要重新计时
+            self._activation_green_since = 0.0
+            activation.failures = pending
+            if now < self._activation_deadline:
+                return
             self._dirty = True
-            logger.info(
-                "世代 %s 已稳定：%s 个服务全部就绪", generation.id, len(self._runtimes)
+            await self._fail_activation(
+                generation,
+                f"未在 {self._desired.supervisor.activation_timeout:.0f}s 内就绪："
+                + "、".join(pending),
             )
             return
-        activation.failures = pending
-        if now < self._activation_deadline:
+
+        # 全绿：先记下起点，连续保持够宽限才承认「真的起来了」
+        if self._activation_green_since == 0.0:
+            self._activation_green_since = now
+            self._dirty = True
             return
+        if now - self._activation_green_since < self._activation_grace:
+            return
+
+        self._activation_green_since = 0.0
+        self._generations.mark_stable(generation)
+        activation.phase = "stable"
+        activation.message = ""
+        activation.failures = []
+        self._activation_deadline = 0.0
         self._dirty = True
-        await self._fail_activation(
-            generation,
-            f"未在 {self._desired.supervisor.activation_timeout:.0f}s 内就绪："
-            + "、".join(pending),
+        logger.info(
+            "世代 %s 已稳定：%s 个服务全部就绪并保持 %.1fs",
+            generation.id,
+            len(self._runtimes),
+            self._activation_grace,
         )
 
     async def _fail_activation(self, generation: Generation, message: str) -> None:
         """激活失败：标记并（按配置）自动回滚到上一个 stable 世代。"""
+        self._activation_green_since = 0.0
         failures = list(self._activation.failures) if self._activation else []
         self._generations.mark_failed(generation, message)
         fallback = self._generations.latest_stable(exclude=generation.id)
