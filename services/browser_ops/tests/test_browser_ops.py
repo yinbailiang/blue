@@ -91,6 +91,7 @@ def test_rejects_non_http_url() -> None:
         asyncio.run(browser_operate("file:///etc/passwd"))
 
 
+@pytest.mark.slow
 @pytest.mark.skipif(
     not (HAS_DRIVER and HAS_FIREFOX), reason="需要 geckodriver 与 firefox"
 )
@@ -175,6 +176,7 @@ async def _serve(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> 
     writer.close()
 
 
+@pytest.mark.slow
 @pytest.mark.skipif(
     not (HAS_DRIVER and HAS_FIREFOX), reason="需要 geckodriver 与 firefox"
 )
@@ -209,6 +211,7 @@ async def _click_covered() -> None:
         await server.wait_closed()
 
 
+@pytest.mark.slow
 @pytest.mark.skipif(
     not (HAS_DRIVER and HAS_FIREFOX), reason="需要 geckodriver 与 firefox"
 )
@@ -240,6 +243,7 @@ async def _click_far_element() -> None:
         await server.wait_closed()
 
 
+@pytest.mark.slow
 @pytest.mark.skipif(
     not (HAS_DRIVER and HAS_FIREFOX), reason="需要 geckodriver 与 firefox"
 )

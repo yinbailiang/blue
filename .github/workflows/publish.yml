@@ -56,10 +56,12 @@ jobs:
       - name: Install dependencies
         run: uv sync --all-packages
 
-      - name: Run tests with coverage
-        run: |
-          uv run pytest \
-            --cov=blue --cov-report=term-missing --cov-fail-under=83 -q
+      # 覆盖率门槛由 test.yml 在每次推送时把守；发布只要求测试全过。
+      # （macOS 的覆盖率天然比 Linux 低 1%——POSIX-only 分支不执行——所以这里不卡门。）
+      # -n 2 -m ""：覆盖 pyproject 默认的「-n 8 + 跳过 slow」。发布前要全量，
+      # 且 runner 核数少，高并行反而会让墙钟敏感用例抖。
+      - name: Run tests
+        run: uv run pytest -n 2 -m "" -q
 
   release:
     name: build & release

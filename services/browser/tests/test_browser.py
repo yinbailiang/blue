@@ -27,6 +27,7 @@ def test_capture_rejects_bad_url() -> None:
 
 
 @pytest.mark.skipif(not HAS_FIREFOX, reason="环境里没有 firefox")
+@pytest.mark.slow
 def test_capture_returns_image_attachment() -> None:
     """对本地 HTTP 服务截图，返回图片附件。"""
     asyncio.run(_capture_local())
@@ -65,8 +66,14 @@ async def _serve(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> 
 
 
 @pytest.mark.skipif(not HAS_FIREFOX, reason="环境里没有 firefox")
+@pytest.mark.slow
 def test_capture_reports_unreachable_url() -> None:
-    """连不上时给出明确错误，而不是抛底层异常。"""
-    configure(BrowserConfig(firefox_bin=FIREFOX, timeout=8.0))
+    """连不上时给出明确错误，而不是抛底层异常。
+
+    超时给 1 秒就够：``127.0.0.1:9``（discard 端口）连接会被立刻拒绝，走的是
+    「Firefox 报错」那条分支，不是在等网络慢慢超时。此前写 8 秒，等于把
+    「Firefox 启动 + 失败」的整体预算放大到 8 秒，单个用例白烧 8 秒。
+    """
+    configure(BrowserConfig(firefox_bin=FIREFOX, timeout=1.0))
     with pytest.raises(ValueError, match=r"Firefox 截图失败|超时"):
         asyncio.run(capture("http://127.0.0.1:9/", 320, 240))

@@ -114,7 +114,7 @@ class FlakyClient(ScriptedClient):
         self._failures = failures
         self.attempts = 0
 
-    async def stream_chat(  # pyright: ignore[reportIncompatibleMethodOverride]
+    async def stream_chat(
         self,
         messages: Messages,
         config: RequestConfig | None = None,
@@ -134,7 +134,7 @@ class PartialThenFailClient(ScriptedClient):
         super().__init__([])
         self.attempts = 0
 
-    async def stream_chat(  # pyright: ignore[reportIncompatibleMethodOverride]
+    async def stream_chat(
         self,
         messages: Messages,
         config: RequestConfig | None = None,

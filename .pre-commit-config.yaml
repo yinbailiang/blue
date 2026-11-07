@@ -46,15 +46,24 @@ repos:
     rev: 1.7.0
     hooks:
       - id: interrogate
-        files: ^src/
+        # 整包统计，不按 staged 文件：文档覆盖率是包级指标，
+        # 只看改动涉及的几个文件会得到无意义的偏低比例（实测 74.5%）。
+        args: ["-q", "src/blue"]
+        pass_filenames: false
+        always_run: true
 
   # 家族标准是 --cov-fail-under=90，本仓库实测 83%（health / logs / lifecycle /
   # journal 偏低）。这里先按**只升不降**的棘轮落 83：回归立刻失败，等补上测试再往上抬。
+  #
+  # -m "" 覆盖 pyproject 默认的「跳过 slow」：覆盖率门槛必须按**全量**算。
+  # 排除 slow 会让覆盖率从 83% 掉到 82.29%——掉的正是在 test_activation 里
+  # 验证回滚路径的那两条（它们覆盖 reconciler.py 的 _fail_activation/_reload_locked）。
+  # -n 2 而非默认的 -n 8：那两条对负载敏感，低并发才稳（见 README「跑法」）。
   - repo: local
     hooks:
       - id: pytest-cov
         name: pytest coverage
-        entry: uv run pytest --cov=blue --cov-fail-under=83 -q
+        entry: uv run pytest -n 2 -m "" --cov=blue --cov-fail-under=83 -q
         language: system
         pass_filenames: false
         always_run: true

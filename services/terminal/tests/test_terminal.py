@@ -296,7 +296,9 @@ async def _send_raw_bytes() -> None:
         # é = c3 a9，加 A 凑够 3 字节；换行让 canonical 模式交付输入
         session.send(b"\xc3\xa9A\n")
         await asyncio.sleep(0.8)
-        text = session.text(20)
+        # ``od`` 的排版跟平台有关：GNU 版字节间是一个空格，BSD（macOS）是两个。
+        # 断言关心的是**字节**，不是排版，所以先把空白压平。
+        text = " ".join(session.text(20).split())
         assert "c3 a9 41" in text
     finally:
         await manager.stop()

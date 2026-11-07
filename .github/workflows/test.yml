@@ -66,15 +66,28 @@ jobs:
       - name: Install dependencies
         run: uv sync --all-packages
 
-      # 覆盖率门槛与 .pre-commit-config.yaml 保持一致（家族标准 90，当前棘轮 83）。
-      - name: Run tests with coverage
+      # 覆盖率门槛只在 Linux 上强制：macOS 有若干仅在 POSIX/Linux 才走到的分支
+      # （control/process.py 的信号路径、control/state.py 的锁等待），实测 82% vs 83%。
+      # 两边都出报告，只有 Linux 用 --cov-fail-under 卡门。
+      #
+      # -n 2：GitHub runner 只有 2–4 核，pyproject 的默认 -n 8 在这里会过载
+      # （还会让 test_activation 那类墙钟敏感的用例抖）。-m "" 覆盖默认的
+      # 「排除 slow」——CI 要跑全量，包括真起 firefox/geckodriver 的集成用例；
+      # 环境里没有二进制的用例自带 skipif，会自己跳过。
+      - name: Run tests with coverage (gate)
+        if: matrix.os == 'ubuntu-latest'
         run: |
-          uv run pytest \
+          uv run pytest -n 2 -m "" \
             --cov=blue --cov-report=term-missing --cov-fail-under=83 -v
+
+      - name: Run tests with coverage (report only)
+        if: matrix.os != 'ubuntu-latest'
+        run: |
+          uv run pytest -n 2 -m "" --cov=blue --cov-report=term-missing -v
 
       # 需要 broker 的用例自带 skipif，这里不启 RabbitMQ；真跑总线的是 integration。
       - name: Integration（无 broker 时自动 skip）
-        run: uv run pytest services/agent/tests/test_integration_rabbit.py -q
+        run: uv run pytest -n 0 services/agent/tests/test_integration_rabbit.py -q
 
   integration:
     name: integration (RabbitMQ)
@@ -110,4 +123,4 @@ jobs:
         run: uv sync --all-packages
 
       - name: 跨进程 fanout 往返
-        run: uv run pytest services/agent/tests/test_integration_rabbit.py -q
+        run: uv run pytest -n 0 services/agent/tests/test_integration_rabbit.py -q

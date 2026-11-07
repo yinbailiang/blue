@@ -249,6 +249,7 @@ service {
   stop_timeout = 30.0           # 本服务的优雅停止预算（supervisor 到点 SIGKILL）
   startup_timeout = 30.0
   readiness = "process"         # process / tcp / none
+  ready_settle = 0.3            # process 探针的观察期（秒）：先等这么久再看进程还活着没
   ready_tcp = null              # bus 可省略，从 url/proxy_listen 推导
   env = {}
 }
@@ -881,7 +882,7 @@ at-least-once 下事件可能重复投递（崩溃重连 / `restart` 补投）�
 uv run ruff check .
 uv run ruff format --check .
 uv run pyright
-uv run pytest -q
+uv run pytest -q          # 默认并行 + 跳过 slow：约 15 秒
 ```
 
 - `tests/`：控制面、配置、状态、进程管理、调谐、CLI；
@@ -890,6 +891,66 @@ uv run pytest -q
 - `tests/test_service_manifests.py`：服务目录、manifest、配置契约；
 - RabbitMQ 集成测试在 broker 不可达时自动跳过，可用 `BLUE_RABBIT_URL` 覆盖；
   默认使用项目的 `blue` vhost（也可通过 `BLUE_BUS_URL` 指定）。
+
+### 跑法：默认并行，重活按需
+
+`pyproject.toml` 里 `addopts = "-n 8 -m 'not slow'"`，所以不带参数的 `uv run pytest`
+就是**日常该用的那条命令**：896 个用例并行跑完约 15 秒（此前串行 116 秒）。
+
+```bash
+uv run pytest                      # 日常：并行 + 跳过 slow
+uv run pytest -m ""                # 全量：把 slow 也算上（真起 firefox / geckodriver）
+uv run pytest -m slow              # 只跑依赖真实外部环境的集成用例
+uv run pytest services/agent       # 只跑改动涉及的模块，约 2 秒
+uv run pytest -n 0 -k 某个用例     # 调试：-n 0 关掉并行，断点/print 才看得见
+uv run pytest -n 2                 # 低并发的确定性模式（CI 与排查 flaky 用）
+```
+
+几条经验值：
+
+| 并行度 | 耗时（899 个） | 说明 |
+|---|---|---|
+| `-n 0` | ~70s | 串行，仅用于调试 |
+| `-n 2` | ~36s | **CI 用这个**：GitHub runner 只有 2–4 核，再多会过载 |
+| `-n 8` | **~15.5s** | 本地默认。22 核机器上的甜点，连跑 6 次稳定 |
+| `-n auto` | 12–69s 抖动 | **不要用**：22 worker 会互相抢，偶发超时 |
+
+`slow` 标记只留给**依赖真实外部环境**的用例：`browser` / `browser_ops` 里真起
+firefox、geckodriver 的那 6 条（并行时互相抢 GPU/进程资源，单个从 2.5s 涨到 11s，
+是唯一拖住关键路径的瓶颈）。纯时序敏感的用例不再需要它，见下。
+
+> **曾经 flaky 的两条回滚用例已根治**（`test_activation_timeout_rolls_back` 等）。
+> 症状：`-n 8` 下约一半概率等不到 `rolled_back`，日志里连 ERROR 都没有。
+> 根因是就绪探针与时序的配合缺陷，不是用例写错，也不在 `_reload_locked`：
+> `readiness="process"` 的探针原先只观察固定 100ms，而一个「起来就崩」的进程在
+> 高负载下能活过这 100ms（实测 20 个忙进程时 exit1 存活 104ms），于是被判 READY；
+> 激活闸门若恰好在此刻看到「全绿」就 `mark_stable`，**坏世代被标成稳定、永不回滚**
+> ——「激活失败自动回滚」这个核心保证静默失效。
+>
+> 修了两层：
+> 1. 探针观察期改为可配（`service.infd` 的 `ready_settle`，默认 0.3s）；
+> 2. 闸门要求全绿**连续保持一段宽限**（`activation_timeout` 的 0.4 倍、封顶 1s）
+>    才承认激活通过，中间任何一次崩溃都会打断计时。这一层不依赖 `ready_settle`
+>    配得对不对，是兜底。
+>
+> 回归用例 `test_activation_rejects_service_that_dies_right_after_ready` 是确定性的
+> （故意把 `ready_settle` 配成 0.05 秒，让 fixture 的 `exit1-late` 骗过探针），
+> 把 grace 置 0 它必挂。
+
+### 测试里不该有的固定等待
+
+- 工具下线注销租约走 `blue_tool_sdk.worker.WITHDRAW_TIMEOUT`（默认 1.5 秒）。测试里
+  注册中心从不应答，每个用到 `ToolWorker` / `ToolRegistrar` 的用例都会白等满——
+  根 `conftest.py` 的 `_fast_tool_withdraw` 已把它压到 0.05 秒（28 个用例、约 28 秒）。
+
+- **新写用例**别再用 `await asyncio.sleep(1.0)` 这种固定等待：慢机器上不够、快机器上
+  白等。要等某件事发生就用条件轮询（`tests/support.py` 有 `wait_until(pred)`）。
+
+  > `services/terminal/tests/` 里还留着十来处固定 sleep，暂未改动：那些用例里有好几处
+  > 断言的字符串**本身就出现在命令回显里**（如 `echo hello-terminal-test`），改成
+  > `wait_until(lambda: needle in text)` 会在「命令回显」那一刻就返回，等于悄悄把断言
+  > 从「输出已产生」弱化成「命令已回显」。要改得逐个区分回显与输出（例如数出现次数），
+  > 收益只有约 2 秒，不值当在没测试覆盖的情况下动——留作后续单独处理。
 
 ## 工程约束
 

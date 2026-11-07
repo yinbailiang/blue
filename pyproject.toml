@@ -22,6 +22,7 @@ blue = "blue.cli:main"
 test = [
     "pytest>=9.2.0",
     "pytest-cov>=6.0.0",
+    "pytest-xdist>=3.8.0",
 ]
 
 [build-system]
@@ -50,6 +51,7 @@ dev = [
     "pyright>=1.1.414",
     "pytest>=9.2.0",
     "pytest-cov>=6.0.0",
+    "pytest-xdist>=3.8.0",
     "ruff>=0.17.3",
     "pre-commit",
 ]
@@ -102,3 +104,25 @@ typeCheckingMode = "strict"
 testpaths = ["tests", "services"]
 pythonpath = ["src", "sdk/tool/src", "."]
 filterwarnings = ["ignore::starlette.exceptions.StarletteDeprecationWarning"]
+# 默认并行：882 个用例里绝大多数是进程内总线 + 临时目录，天然可并行，
+# 串行跑纯属浪费（实测 116s → 19s）。调试单个用例时用 `-n 0` 覆盖，
+# 免得 pdb 断在 worker 子进程里看不到。
+# 同时默认排除 slow：那 6 个用例真起 firefox / geckodriver，并行时会互相抢
+# 资源（单个从 2.5s 涨到 11s），是唯一拖住整条关键路径的瓶颈。全量跑用
+# `-m ""` 覆盖（CI 就是这么干的）。
+addopts = "-n 8 -m 'not slow'"
+markers = [
+    "slow: 依赖真实外部环境（浏览器 / geckodriver / PTY / 真实子进程）的集成测试；日常用 -m 'not slow' 跳过",
+]
+
+[tool.interrogate]
+# 文档覆盖率是**整包**属性：不能按 staged 文件子集算（单看几个文件会掉到 74%）。
+# pre-commit 的 interrogate 钩子已改成 `pass_filenames: false` + 固定路径。
+fail-under = 90
+ignore-init-method = true
+ignore-init-module = true
+ignore-magic = true
+ignore-private = true
+ignore-semiprivate = true
+ignore-nested-functions = true
+exclude = ["tests"]
