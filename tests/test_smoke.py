@@ -25,6 +25,7 @@ from blue.control.smoke import (
     _command_for,
     _declared,
     _Plan,
+    _query_tools,
     _run_command,
     run_smoke,
 )
@@ -261,3 +262,48 @@ def test_service_meta_accepts_smoke_declarations(name: str, value: object) -> No
     meta = _meta("demo", **{name: value})
 
     assert getattr(meta, name) == value
+
+
+def test_query_tools_uses_offline_so_no_durable_queue_survives(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """冒烟查目录用的是一次性成员，必须 ``offline``，别在 broker 上留持久队列。
+
+    用默认的 ``restart``：停机只停「消费」、保留「路由」，这个成员队列会继续
+    接收整个 fanout 的全部事件，直到队列守卫的 expires（30 分钟）才消失——
+    每次 ``blue apply`` 漏一个。``offline`` 停机时解绑路由并排空，不再累积。
+    """
+    captured: dict[str, object] = {}
+    stopped: list[bool] = []
+
+    class _Stub:
+        async def start(self) -> None:
+            raise RuntimeError("到此为止：不真连 broker")
+
+        async def stop(self) -> None:
+            stopped.append(True)
+
+        def proxy(self, role: str) -> object:
+            return object()
+
+    def fake_build(
+        role: str | None = None,
+        events: object = None,
+        url: str | None = None,
+        strategy: str = "restart",
+    ) -> object:
+        captured["role"] = role
+        captured["strategy"] = strategy
+        return _Stub()
+
+    monkeypatch.setattr("blue.runtime.build_runtime", fake_build)
+
+    tools, reason = asyncio.run(_query_tools(_desired(tmp_path), timeout=1.0))
+
+    assert tools is None
+    assert "到此为止" in reason
+    assert captured["role"] == "agent.smoke"
+    assert captured["strategy"] == "offline", (
+        "冒烟成员必须是 offline，否则每次 apply 都在 broker 上留一个持久队列"
+    )
+    assert stopped == [True], "无论成败都要停掉运行时，否则连接泄漏"

@@ -221,8 +221,15 @@ async def _query_tools(
     role = "agent.smoke"
     previous = os.environ.get("BLUE_SERVICE_NAME")
     os.environ["BLUE_SERVICE_NAME"] = role
+    # ``strategy="offline"``：这是一次性查询，不是长驻服务。用默认的 ``restart``
+    # 会让停机只停「消费」、保留「路由」，于是这个成员队列留在 broker 上继续
+    # 接收整个 fanout 的全部事件，直到队列守卫的 expires（30 分钟）把它清掉——
+    # 每次 apply 都漏一个。offline 在停机时解绑路由并排空，不再累积。
     runtime = build_runtime(
-        role, events=[CatalogQueryEvent, CatalogReplyEvent], url=desired.bus_url
+        role,
+        events=[CatalogQueryEvent, CatalogReplyEvent],
+        url=desired.bus_url,
+        strategy="offline",
     )
     try:
         await runtime.start()

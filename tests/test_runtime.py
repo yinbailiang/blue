@@ -291,14 +291,38 @@ def test_infra_config_falls_back_for_manual_run_without_section(
 ) -> None:
     """手工运行时缺少 infra 段仍回退开发默认值。"""
     monkeypatch.delenv("BLUE_CONFIG_FILE", raising=False)
-    # 在 supervisor 拉起的服务进程里跑测试时，这个变量还在，会被当成「由
-    # supervisor 启动」而拒绝回退；清掉才能模拟单进程手工运行
-    monkeypatch.delenv("BLUE_SERVICE_NAME", raising=False)
     monkeypatch.delenv("BLUE_SERVICE_NAME", raising=False)
     monkeypatch.chdir(tmp_path)
     (tmp_path / DEFAULT_RUNTIME_CONFIG).write_text(
         json.dumps({runtime.CONFIG_SECTION: {}}), encoding="utf-8"
     )
+
+    config = runtime.load_infra_config()
+
+    assert config.bus_url == runtime.DEFAULT_BUS_URL
+    assert config.state_dir == Path(".blue")
+
+
+def test_infra_config_falls_back_when_only_service_name_is_set(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """只有 ``BLUE_SERVICE_NAME``、没有 ``BLUE_CONFIG_FILE`` 时按手工运行处理。
+
+    回归：``control/smoke.py::_query_tools`` 查工具目录时会给自己临时设一个
+    ``BLUE_SERVICE_NAME``（总线地址是显式传进去的，它不需要配置文件）。旧判据把
+    「有服务名」当成「配置由 supervisor 下发」，于是 ``runtime_config_path()``
+    回退到 cwd 又找不到文件，报：
+
+        supervisor 下发的运行时配置不可用：运行时配置不存在：
+        <项目根>/service_runtime_config.json
+
+    ``blue apply`` 一旦走到冒烟（控制面代码变化 → 通知 supervisor execv 自重启
+    → 自动等验证结果）就 100% 撞上。配置只可能来自 ``BLUE_CONFIG_FILE``，
+    单独一个服务名不足以证明「由 supervisor 启动」。
+    """
+    monkeypatch.delenv("BLUE_CONFIG_FILE", raising=False)
+    monkeypatch.setenv("BLUE_SERVICE_NAME", "agent.smoke")
+    monkeypatch.chdir(tmp_path)
 
     config = runtime.load_infra_config()
 
@@ -327,9 +351,30 @@ def test_build_runtime_scans_contract_events_from_config(
 
     bus = runtime.build_runtime()
 
-    assert bus.member_id == "demo.demo"
+    # 成员 ID 是队列名，必须唯一且不冗余：缺省 role 时用服务名本身。
+    # 这里以前断言的是 "demo.demo"——那正是因为旧实现拼了
+    # ``f"{role or member}.{member}"``，把双份名字当成了预期（broker 上实际就是
+    # agent.agent / registry.registry）。
+    assert bus.member_id == "demo"
     names = set(bus._events.list_names())  # pyright: ignore[reportPrivateUsage]
     assert names == {event.name for event in TOOL_EVENTS}
+
+
+def test_build_runtime_member_id_is_role_without_duplication(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """显式给 role 时直接用它当成员 ID，不再和服务名拼成双份。
+
+    回归：旧实现是 ``f"{role or member}.{member}"``，于是 broker 上出现
+    ``agent.agent`` / ``registry.registry`` / ``tool.shell.shell``，
+    冒烟查目录那条更是 ``agent.smoke.agent.smoke``。
+    """
+    _install_infra(tmp_path, monkeypatch, contracts={"tool": "blue_contracts_tool"})
+    monkeypatch.setenv("BLUE_SERVICE_NAME", "shell")
+
+    bus = runtime.build_runtime("tool.shell")
+
+    assert bus.member_id == "tool.shell"
 
 
 def test_build_runtime_explicit_events_override_scan(

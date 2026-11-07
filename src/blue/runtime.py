@@ -231,10 +231,27 @@ def _default_infra() -> InfraConfig:
 
 
 def _running_under_supervisor() -> bool:
-    """当前进程是否由 supervisor 启动（配置由 supervisor 下发）。"""
-    return bool(
-        os.environ.get("BLUE_CONFIG_FILE") or os.environ.get("BLUE_SERVICE_NAME")
-    )
+    """当前进程是否由 supervisor 启动（配置由 supervisor 下发）。
+
+    判据**只有** ``BLUE_CONFIG_FILE``：配置只可能来自那个文件，别的变量都证明不了
+    这件事。
+
+    这里曾经把 ``BLUE_SERVICE_NAME`` 也算进来，结果踩了个真实事故：``blue apply``
+    发现控制面代码变了会等验证结果，而验证会跑冒烟，冒烟里的
+    ``control/smoke.py::_query_tools`` 为了查工具目录，会给自己临时设一个
+    ``BLUE_SERVICE_NAME``（它并不需要配置文件，总线地址是显式传进去的）。于是
+    ``load_infra_config()`` 认为「配置本该由 supervisor 下发却没了」，
+    ``runtime_config_path()`` 又只认 ``BLUE_CONFIG_FILE``、回退到 cwd，
+    最后报：
+
+        supervisor 下发的运行时配置不可用：运行时配置不存在：
+        <项目根>/service_runtime_config.json
+
+    只要 ``apply`` 走到冒烟就 100% 复现。supervisor 启动服务时三个变量
+    （``BLUE_SERVICE_NAME`` / ``BLUE_INSTANCE_ID`` / ``BLUE_CONFIG_FILE``）是一起
+    注入的（``control/runner.py``），所以正常服务行为不变。
+    """
+    return bool(os.environ.get("BLUE_CONFIG_FILE"))
 
 
 def load_infra_config(path: str | Path | None = None) -> InfraConfig:
@@ -563,9 +580,15 @@ def build_runtime(
     """
     member = service_name()
     declarations = tuple(events) if events is not None else load_contract_events()
+    # 成员 ID 就是队列名（``infinity_bus.fanout.<member_id>``），必须唯一且稳定。
+    # ``role`` 由调用方给，本身已经够唯一（``agent`` / ``ui.chat`` / ``tool.shell``）；
+    # 缺省时才退回服务名。**不要**再拼一次 ``member``：早先写成
+    # ``f"{role or member}.{member}"``，于是每个服务都得到双份名字——
+    # 实测 broker 上是 ``agent.agent`` / ``registry.registry`` / ``tool.shell.shell``。
+    # 冒烟那条更是拼成 ``agent.smoke.agent.smoke``。
     return RabbitRuntime(
         url=url or bus_url(),
-        member_id=f"{role or member}.{member}",
+        member_id=role or member,
         events=declarations,
         strategy=strategy,
         drain_timeout=shutdown_drain_timeout(),

@@ -94,7 +94,7 @@ from blue_contracts_session import (
     sha256_hex,
 )
 from infinity_bus import Event, EventBus
-from infinity_bus.templates.handlers.service import (  # pyright: ignore[reportMissingTypeStubs]
+from infinity_bus.templates import (
     ConflictError,
     NotFoundError,
     ServiceHandler,
