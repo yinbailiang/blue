@@ -203,18 +203,14 @@ contracts/tool/
 !from p"services/agent/service.infd" import ServiceTemplate as AgentService
 !from p"services/webui/service.infd" import ServiceTemplate as WebUIService
 !from p"services/echo/service.infd" import ServiceTemplate as EchoService
+!from p"supervisor.inft" import Supervisor, Idempotency, Journal
 
-supervisor {
-  state_dir: str = ".blue"
-  reconcile_interval: <float, positive> = 2.0
-  shutdown_timeout: <float, positive> = 60.0   # 整场停机墙钟，见「优雅停机」
-  restart_backoff: <float, positive> = 0.5
-  restart_max_attempts: <int, range(1, 100)> = 10
-  registry_ttl: <float, positive> = 15.0
-  idempotency: bool = true                      # 事件去重总开关，见「事件去重」
-  idempotency_retention: <float, positive> = 86400.0
-  idempotency_sweep_interval: <float, positive> = 600.0
-}
+# supervisor 的字段、约束与说明集中定义在 supervisor.inft 里（模板即约束），
+# 这里只写要覆盖的项，其余取模板默认。
+supervisor Supervisor(
+  idempotency = Idempotency(retention = 86400.0),      # 事件去重，见「事件去重」
+  journal = Journal(enabled = true, max_bytes = 67108864),
+)
 
 bus = BusService(mode = "managed", vhost = "blue", password = $bus_password)
 session = SessionService()
@@ -229,6 +225,17 @@ echo = EchoService()
 - `!file` 从工作区文件导入数据，沙盒只授权 `secrets.toml` / `secrets.json`
   两个具体文件；导入其它文件会直接报错。
 - 顶层值必须满足对应模板（编译期由 infinity-data 校验）。
+- `supervisor` 由项目根的 `supervisor.inft` 约束：三十来个字段按职责分成
+  `log` / `restart` / `registry` / `idempotency` / `journal` / `activation` /
+  `generation` 七组。字段名拼错、类型不对、值超出范围都在**编译期**报出来，
+  不用等 `blue apply` 跑到一半；只写要改的项，其余取模板默认。
+- 这份分组结构与 `SupervisorSettings` 模型**同构**——配置里写 `activation.timeout`，
+  代码里就是 `settings.activation.timeout`，中间**没有**映射层。加一个配置项只改
+  两处（模板 + 模型），不会出现"漏改映射表导致某项配置永远改不动"。
+- 旧的平铺写法（`activation_timeout = 120.0` 之类）会**报错**而不是静默忽略：
+  静默忽略等于那项配置永远改不动，正是分组化要消灭的那类 bug。
+- 沙盒另外授权了项目根的 `supervisor.inft`（与两个 secrets 文件同理：只放行
+  具体文件，不放开整个根目录）。
 
 ### `service.infd`：服务模板 + 通用系统元数据
 
@@ -706,8 +713,8 @@ verify → 等全部服务 Ready；超时/失败 → 自动翻回上一个 stabl
    `smoke_tools = ["get_weather"]`。实测：正常 13/13 通过；故意写错一个工具名 →
    自动回滚 + 退出码 1。
 3. **控制面变化会自动等结果**：`src/blue/**` 变了会 execv，这种 apply 即使没带
-   `--wait` 也会等验证（`supervisor.await_control_change`），免得"命令返回 0 但其实没起来"。
-4. **控制面设置随世代冻结**。`activation_timeout`、`generation_auto_rollback`
+   `--wait` 也会等验证（`supervisor.activation.await_control_change`），免得"命令返回 0 但其实没起来"。
+4. **控制面设置随世代冻结**。`activation.timeout`、`generation.auto_rollback`
    这些属于"这一代怎么跑"，存进 `generation.json`；所以 `apply --config other.infd`
    改这些值会生效（早期版本没存，实测就是这里翻的车：设 12s 却在跑 120s）。
 5. **gc 至少保留两个 stable**。自动回滚的目标是"上一个 stable"，只留一个等于
@@ -947,7 +954,7 @@ firefox / geckodriver / neovim，并跑一步「缺件即失败」的检查，�
 >
 > 修了两层：
 > 1. 探针观察期改为可配（`service.infd` 的 `ready_settle`，默认 0.3s）；
-> 2. 闸门要求全绿**连续保持一段宽限**（`activation_timeout` 的 0.4 倍、封顶 1s）
+> 2. 闸门要求全绿**连续保持一段宽限**（`activation.timeout` 的 0.4 倍、封顶 1s）
 >    才承认激活通过，中间任何一次崩溃都会打断计时。这一层不依赖 `ready_settle`
 >    配得对不对，是兜底。
 >

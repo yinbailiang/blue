@@ -768,10 +768,15 @@ def test_unknown_supervisor_key_warns_but_does_not_fail(
 
     with caplog.at_level(logging.WARNING):
         settings = load_supervisor(
-            {"state_dir": ".blue", "future_knob": 1, "smoke_enabled": False}, tmp_path
+            {
+                "state_dir": ".blue",
+                "future_knob": 1,
+                "activation": {"smoke": {"enabled": False}},
+            },
+            tmp_path,
         )
 
-    assert settings.smoke_enabled is False
+    assert settings.activation.smoke.enabled is False
     assert settings.model_extra == {"future_knob": 1}
     assert "future_knob" in caplog.text
 

@@ -8,6 +8,7 @@ from collections.abc import Callable
 from pathlib import Path
 
 import pytest
+from blue_service_terminal import resolve_shell
 from blue_service_terminal.config import TerminalConfig
 from blue_service_terminal.session import SessionManager, TerminalSession
 
@@ -39,7 +40,7 @@ def _open(
 ) -> TerminalSession:
     config = _config()
     return manager.open(
-        shell=config.resolve_shell(),
+        shell=resolve_shell(config),
         cwd=Path("/tmp"),
         cols=100,
         rows=30,
@@ -92,7 +93,7 @@ def test_osc_answer_carries_configured_color(tmp_path: Path) -> None:
         await manager.start()
         try:
             session = manager.open(
-                shell=_config().resolve_shell(),
+                shell=resolve_shell(_config()),
                 cwd=Path("/tmp"),
                 cols=100,
                 rows=30,

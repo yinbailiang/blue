@@ -95,8 +95,176 @@ class ServiceMeta(BaseModel):
     smoke_timeout: float = Field(default=20.0, gt=0, description="冒烟命令超时（秒）")
 
 
+class LogSettings(BaseModel):
+    """日志轮转：每个服务一份，落在 ``state_dir/logs/<service>.log``。"""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    max_bytes: int = Field(
+        default=10 * 1024 * 1024, gt=0, description="单日志上限（字节）"
+    )
+    backups: int = Field(default=3, ge=0, le=20, description="日志轮转保留数")
+
+
+class RestartSettings(BaseModel):
+    """进程重启退避与「这次崩溃算不算数」的判定。"""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    backoff: float = Field(default=0.5, gt=0, description="重启退避基数（秒）")
+    backoff_max: float = Field(default=30.0, gt=0, description="重启退避上限（秒）")
+    max_attempts: int = Field(
+        default=10, ge=1, description="连续失败多少次后进入 CrashLoopBackOff"
+    )
+    stable_after: float = Field(
+        default=60.0, gt=0, description="稳定运行多久后重置失败计数（秒）"
+    )
+
+
+class RegistrySettings(BaseModel):
+    """工具注册中心的租约：工具靠心跳续约，过期即从目录摘除。"""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    ttl: float = Field(default=15.0, gt=0, description="工具租约时长（秒）")
+    sweep_interval: float = Field(default=2.0, gt=0, description="租约巡检间隔（秒）")
+
+
+class IdempotencySettings(BaseModel):
+    """事件去重（at-least-once 的兜底）；去重库落在 ``state_dir/dedupe``。"""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    enabled: bool = Field(
+        default=True, description="总开关；下发到各服务的 infra.idempotency"
+    )
+    retention: float = Field(
+        default=24 * 3600.0,
+        gt=0,
+        description="去重记录保留时长（秒）；必须覆盖任何重投窗口",
+    )
+    sweep_interval: float = Field(
+        default=600.0, gt=0, description="去重表清理巡检间隔（秒）"
+    )
+
+
+class JournalPayloadSettings(BaseModel):
+    """审计日志里事件正文的存储策略。"""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    mode: Literal["digest", "full"] = Field(
+        default="digest", description="负载存储：digest 只存 size+sha256，full 存正文"
+    )
+    allowlist: tuple[str, ...] = Field(
+        default=(),
+        description="这些事件名即使 digest 模式也存正文，用于定位关键事件",
+    )
+    max_bytes: int = Field(
+        default=8192,
+        gt=0,
+        description="单个负载正文上限；超过只留摘要（避免把图片/长输出灌进库）",
+    )
+
+
+class JournalSettings(BaseModel):
+    """审计日志：全量记录各服务**发射**的事件，每服务一个库。"""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    enabled: bool = Field(
+        default=False,
+        description=(
+            "总开关；下发到 infra.journal。库里只增不减，"
+            "必须配 retention/max_rows/max_bytes"
+        ),
+    )
+    retention: float = Field(
+        default=24 * 3600.0, gt=0, description="保留时长（秒）；到期由后台 GC 删除"
+    )
+    max_rows: int | None = Field(
+        default=None, ge=1, description="单库行数上限；None 表示只按时间回收"
+    )
+    max_bytes: int | None = Field(
+        default=None, ge=1, description="库文件软上限（字节）；超出后从最老的成批删除"
+    )
+    payload: JournalPayloadSettings = Field(
+        default_factory=JournalPayloadSettings, description="正文存储策略"
+    )
+    sweep_interval: float = Field(
+        default=600.0, gt=0, description="GC 巡检间隔（秒）：每这么久最多清一次"
+    )
+
+
+class SmokeSettings(BaseModel):
+    """闸门通过后跑服务自己声明的冒烟检查，失败按激活失败处理并回滚。"""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    enabled: bool = Field(
+        default=True,
+        description="闸门通过后是否跑冒烟探针（验证「行为对」，不只是「起来了」）",
+    )
+    timeout: float = Field(
+        default=20.0,
+        gt=0,
+        description="冒烟里总线请求的超时（命令超时由服务自己声明）",
+    )
+
+
+class ActivationSettings(BaseModel):
+    """新世代激活后的健康验证。"""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    timeout: float = Field(
+        default=120.0,
+        gt=0,
+        description="激活后等全部服务 Ready 的上限（秒）；超时按失败处理",
+    )
+    await_control_change: bool = Field(
+        default=True,
+        description="检测到控制面代码变化（会 execv 自重启）时，apply 自动等待验证结果",
+    )
+    smoke: SmokeSettings = Field(
+        default_factory=SmokeSettings, description="闸门通过后的冒烟阶段"
+    )
+
+
+class ArtifactSettings(BaseModel):
+    """构建产物（每个世代一份 venv）的生成方式。"""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    python: str = Field(
+        default="3.14", description="建 artifact venv 用的解释器（交给 uv 解析/下载）"
+    )
+    link_mode: str = Field(default="hardlink", description="uv 安装产物时的 link mode")
+    warn_cross_device: bool = Field(
+        default=True, description="硬链接跨分区（会退化成拷贝）时是否告警"
+    )
+
+
+class GenerationSettings(BaseModel):
+    """世代（generation）机制：原子切换与回滚，见 ``docs/generations.md``。"""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    keep: int = Field(default=5, ge=1, le=1000, description="gc 至少保留多少个最近世代")
+    auto_rollback: bool = Field(
+        default=True, description="激活验证失败时自动回滚到上一个 stable 世代"
+    )
+    artifact: ArtifactSettings = Field(
+        default_factory=ArtifactSettings, description="产物的构建方式"
+    )
+
+
 class SupervisorSettings(BaseModel):
     """`blue.infd` 中 `supervisor` 块的配置。
+
+    结构与 ``supervisor.inft`` 的模板**同构**：配置怎么写、模型就怎么读，中间
+    没有映射层。加一个配置项只改两处（模板 + 这里），不会出现"漏改映射表导致
+    某项配置永远改不动"——``desired.py`` 里记过 ``idempotency`` 就这么死过一次。
 
     ``extra="allow"`` 是**升级路径**的必需品：这份配置由当前正在跑的调谐器解析，
     拒绝未知键会让"加了新配置项"变成既不能热重载、又不能自重启的死锁。
@@ -117,107 +285,25 @@ class SupervisorSettings(BaseModel):
             "服务；到点仍未退出的进程被 SIGKILL"
         ),
     )
-    log_max_bytes: int = Field(default=10 * 1024 * 1024, gt=0, description="单日志上限")
-    log_backups: int = Field(default=3, ge=0, le=20, description="日志轮转保留数")
-    restart_backoff: float = Field(default=0.5, gt=0, description="重启退避基数（秒）")
-    restart_backoff_max: float = Field(
-        default=30.0, gt=0, description="重启退避上限（秒）"
-    )
-    restart_max_attempts: int = Field(
-        default=10, ge=1, description="连续失败多少次后进入 CrashLoopBackOff"
-    )
-    stable_after: float = Field(
-        default=60.0, gt=0, description="稳定运行多久后重置失败计数（秒）"
-    )
-    registry_ttl: float = Field(default=15.0, gt=0, description="工具租约时长")
-    registry_sweep_interval: float = Field(
-        default=2.0, gt=0, description="工具租约巡检间隔"
-    )
-    idempotency: bool = Field(
-        default=True,
-        description="事件去重总开关；下发到各服务的 infra.idempotency",
-    )
-    idempotency_retention: float = Field(
-        default=24 * 3600.0,
-        gt=0,
-        description="去重记录保留时长（秒）；必须覆盖任何重投窗口",
-    )
-    idempotency_sweep_interval: float = Field(
-        default=600.0,
-        gt=0,
-        description="去重表清理巡检间隔（秒）",
-    )
-    journal: bool = Field(
-        default=False,
-        description=(
-            "审计日志总开关：全量记录各服务**发射**的事件（含因果链）；"
-            "下发到 infra.journal。库里只增不减，必须配 retention/max_rows/max_bytes"
-        ),
-    )
-    journal_retention: float = Field(
-        default=24 * 3600.0,
-        gt=0,
-        description="审计日志保留时长（秒）；到期由后台 GC 删除",
-    )
-    journal_max_rows: int | None = Field(
-        default=None,
-        ge=1,
-        description="审计表单库行数上限；None 表示只按时间回收",
-    )
-    journal_max_bytes: int | None = Field(
-        default=None,
-        ge=1,
-        description="审计库文件软上限（字节）；超出后从最老的成批删除",
-    )
-    journal_payload_mode: Literal["digest", "full"] = Field(
-        default="digest",
-        description="负载存储：digest 只存 size+sha256，full 存正文",
-    )
-    journal_payload_allowlist: tuple[str, ...] = Field(
-        default=(),
-        description="这些事件名即使 digest 模式也存正文，用于定位关键事件",
-    )
-    journal_payload_max_bytes: int = Field(
-        default=8192,
-        gt=0,
-        description="单个负载正文上限；超过只留摘要（避免把图片/长输出灌进库）",
-    )
-    journal_sweep_interval: float = Field(
-        default=600.0,
-        gt=0,
-        description="审计表 GC 巡检间隔（秒）：每这么久最多清一次",
-    )
     uv_frozen: bool = Field(default=True, description="uv run 是否使用 --frozen")
-    activation_timeout: float = Field(
-        default=120.0,
-        gt=0,
-        description="激活新世代后等全部服务 Ready 的上限（秒）；超时按失败处理",
+    log: LogSettings = Field(default_factory=LogSettings, description="日志轮转")
+    restart: RestartSettings = Field(
+        default_factory=RestartSettings, description="重启退避与失败判定"
     )
-    generation_keep: int = Field(
-        default=5, ge=1, le=1000, description="gc 至少保留多少个最近世代"
+    registry: RegistrySettings = Field(
+        default_factory=RegistrySettings, description="工具注册中心租约"
     )
-    generation_auto_rollback: bool = Field(
-        default=True, description="激活验证失败时自动回滚到上一个 stable 世代"
+    idempotency: IdempotencySettings = Field(
+        default_factory=IdempotencySettings, description="事件去重"
     )
-    artifact_python: str = Field(
-        default="3.14", description="建 artifact venv 用的解释器（交给 uv 解析/下载）"
+    journal: JournalSettings = Field(
+        default_factory=JournalSettings, description="审计日志"
     )
-    artifact_link_mode: str = Field(
-        default="hardlink", description="uv 安装产物时的 link mode"
+    activation: ActivationSettings = Field(
+        default_factory=ActivationSettings, description="激活验证"
     )
-    artifact_warn_cross_device: bool = Field(
-        default=True, description="硬链接跨分区（会退化成拷贝）时是否告警"
-    )
-    await_control_change: bool = Field(
-        default=True,
-        description="检测到控制面代码变化（会 execv 自重启）时，apply 自动等待验证结果",
-    )
-    smoke_enabled: bool = Field(
-        default=True,
-        description="闸门通过后是否跑冒烟探针（验证「行为对」，不只是「起来了」）",
-    )
-    smoke_timeout: float = Field(
-        default=20.0, gt=0, description="冒烟里总线请求的超时（命令超时由服务自己声明）"
+    generation: GenerationSettings = Field(
+        default_factory=GenerationSettings, description="世代机制"
     )
 
 

@@ -1,0 +1,143 @@
+# supervisor（调谐器）的期望状态模板。
+#
+# 把原来平铺在 blue.infd 里的三十来个字段按**职责分组**，好处是三重的：
+#
+# 1. **校验是自动的**：模板即约束（neo_desg §2.3）。以前每个字段要在 blue.infd 里
+#    手抄一遍 `<float, positive>` 之类的约束，漏抄就少一道防线；现在写在模板里一次，
+#    所有实例都受约束，写错字段名还会命中 `extra_field`。
+# 2. **提示是完整的**：字段的取值、单位、边界都在这里，LSP 和阅读者只有一处真相。
+# 3. **结构是分层的**：`activation.timeout` 比裸 `activation_timeout` 更能说明它属于
+#    哪一块；改一组参数时也只动一个子块。
+#
+# 注意：本文件是 .inft（只放模板），不承载任何配置实例——实例在 blue.infd 里。
+
+~Log(description="日志文件轮转：每个服务一份，落在 state_dir/logs/<service>.log") {
+    # 单个日志文件的上限（字节）；到顶后按 backups 轮转。默认 10 MiB。
+    max_bytes: <int, positive> = 10485760,
+    # 保留多少个历史轮转文件（.1 / .2 ...）。0 表示不保留。
+    backups: <int, range(0, 20)> = 3,
+}
+
+~Restart(description="进程重启退避与「这次崩溃算不算数」的判定") {
+    # 首次退避基数（秒），之后按指数增长。
+    backoff: <float, positive> = 0.5,
+    # 退避上限（秒）：增长到顶就不再等更久。
+    backoff_max: <float, positive> = 30.0,
+    # 连续失败多少次后判为 CrashLoopBackOff（不再自动重启）。
+    max_attempts: <int, range(1, 100)> = 10,
+    # 稳定运行多久（秒）后把失败计数清零——不够久就崩，计数会累积。
+    stable_after: <float, positive> = 60.0,
+}
+
+~Registry(description="工具注册中心的租约：工具靠心跳续约，过期即从目录摘除") {
+    # 租约时长（秒）；工具必须在这个周期内至少续约一次。
+    ttl: <float, positive> = 15.0,
+    # 巡检间隔（秒）：多久扫一次过期租约。
+    sweep_interval: <float, positive> = 2.0,
+}
+
+~Idempotency(description="事件去重（at-least-once 的兜底），业务不必自己写幂等") {
+    # 总开关。关掉它会退回「可能重复执行」。
+    enabled: bool = true,
+    # 去重记录保留时长（秒）：只要覆盖任何重投窗口即可，避免库无限增长。
+    # 重投窗口由「消息未被 ack 的滞留时间」决定：ack 在**处理器启动**时发，
+    # 所以常见情形（断连 / 重启补投）是秒级。实测（2026-11-07）webui 一天
+    # 291k 行 ≈ 69MB、registry 229k 行 ≈ 55MB——按 7 天保留，稳态会到 1GB 量级。
+    # 注意：**调小只停止增长**，已有文件要 VACUUM 才缩（SQLite 删行不缩文件）：
+    #   blue gc --vacuum-dedupe
+    retention: <float, positive> = 86400.0,
+    # 清理巡检间隔（秒）：每这么久最多清一次，不把扫表摊到每条事件上。
+    sweep_interval: <float, positive> = 600.0,
+}
+
+~JournalPayload(description="审计日志里事件正文的存储策略") {
+    # digest = 只存 size + sha256；full = 存正文（仍受 max_bytes 限制）。
+    mode: <in("digest", "full")> = "digest",
+    # 想看正文的事件名白名单，例如 ["tool.call", "tool.result"]。
+    allowlist: <list, each(str)> = [],
+    # 单条正文最多存多少字节（超出部分截断）。
+    max_bytes: <int, positive> = 8192,
+}
+
+~Journal(description="审计日志：全量记录各服务**发射**的事件，每服务一个库") {
+    # 总开关。库落在 state_dir/journal/<service>.sqlite，只增不减。
+    # 必须挂在发射侧（on_publish）：一个事件只有一个发射者 → 1 行/事件；
+    # 挂接收侧会被 fanout 放大成「成员数」份。
+    # 代价（实测量级）：webui 一天 291k 事件、registry 229k；digest 模式下每个库
+    # 约 20~60MB/天，所以保留期与字节上限必须一起设。
+    enabled: bool = false,
+    # 保留时长（秒）。库只增不减，靠 retention + max_bytes 回收。
+    retention: <float, positive> = 86400.0,
+    # 行数软上限；null 表示只按时间 + 字节回收。
+    max_rows: <int?> = null,
+    # 文件大小软上限（字节）：到顶后从最老的成批删除并 incremental_vacuum。
+    max_bytes: <int?> = null,
+    # 正文存储策略。
+    payload: JournalPayload = JournalPayload(),
+    # 回收巡检间隔（秒）。
+    sweep_interval: <float, positive> = 600.0,
+}
+
+~Smoke(description="闸门通过后跑服务自己声明的冒烟检查，失败按激活失败处理并回滚") {
+    # 总开关。检查内容由各服务 service.infd 的 smoke_tools / smoke_min_tools /
+    # smoke_command 声明，控制面只负责执行与判定。
+    enabled: bool = true,
+    # 冒烟里总线请求的超时（秒）；命令超时由各服务自己的 smoke_timeout 决定。
+    timeout: <float, positive> = 20.0,
+}
+
+~Activation(description="新世代激活后的健康验证：多久算超时、等待期间做什么") {
+    # 等全部服务 Ready 的上限（秒）；超时按「激活失败」处理。
+    timeout: <float, positive> = 120.0,
+    # 控制面代码变化会触发 execv 自重启；这种 apply 默认也等验证结果，
+    # 免得「命令返回 0 但其实没起来」。
+    await_control_change: bool = true,
+    # 闸门通过后的冒烟阶段。
+    smoke: Smoke = Smoke(),
+}
+
+~Artifact(description="构建产物（每个世代一份 venv）的生成方式") {
+    # 建产物 venv 用的解释器（交给 uv 解析，必要时自动下载）。
+    python: <str, regex("^[0-9]+[.][0-9]+$")> = "3.14",
+    # hardlink 省空间；跨分区时会退化为拷贝。
+    link_mode: <in("hardlink", "copy", "symlink")> = "hardlink",
+    # 产物目录与 .venv 跨分区、硬链接退化为拷贝时是否告警。
+    warn_cross_device: bool = true,
+}
+
+~Generation(description="世代（generation）机制：原子切换与回滚，见 docs/generations.md") {
+    # gc 至少保留多少个最近世代（另有当前世代与最新 stable 世代始终保留）。
+    keep: <int, range(1, 1000)> = 5,
+    # 激活验证失败时，是否自动回退到上一个 stable 世代。
+    auto_rollback: bool = true,
+    # 产物的构建方式。
+    artifact: Artifact = Artifact(),
+}
+
+~Supervisor(description="控制面调谐器的期望状态：blue.infd 里唯一保留的非服务顶层键") {
+    # 状态 / 日志 / 锁 / 世代目录。
+    state_dir: str = ".blue",
+    # 调谐轮次间隔（秒）：多久检查一次进程、租约、激活闸门。
+    reconcile_interval: <float, positive> = 2.0,
+    # 整场停机的墙钟预算（秒）。停机按依赖层级倒序、层内并发：最坏时长 ≈
+    # 层数 × 单服务 stop_timeout，而不是它们的总和。blue 自己是 3 层
+    # （webui → 中间层 → bus）× 30s = 90s 上界；实际停机通常 2~3 秒完成。
+    # 到点仍未退出的会被 SIGKILL。
+    shutdown_timeout: <float, positive> = 60.0,
+    # uv run 是否使用 --frozen（产物安装时锁死依赖版本）。
+    uv_frozen: bool = true,
+    # 日志轮转。
+    log: Log = Log(),
+    # 重启退避与失败判定。
+    restart: Restart = Restart(),
+    # 工具注册中心租约。
+    registry: Registry = Registry(),
+    # 事件去重。
+    idempotency: Idempotency = Idempotency(),
+    # 审计日志。
+    journal: Journal = Journal(),
+    # 激活验证。
+    activation: Activation = Activation(),
+    # 世代机制。
+    generation: Generation = Generation(),
+}

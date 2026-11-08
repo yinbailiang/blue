@@ -2,10 +2,6 @@
 
 from __future__ import annotations
 
-import os
-import shutil
-from pathlib import Path
-
 from pydantic import BaseModel, ConfigDict, Field, ValidationInfo, field_validator
 
 from blue_service_terminal.colors import (
@@ -102,47 +98,3 @@ class TerminalConfig(BaseModel):
             )
             for entry in value
         ]
-
-    def palette_map(self) -> dict[str, str]:
-        """调色板覆盖项转成渲染层要的映射。"""
-        return {entry.name: entry.color for entry in self.palette}
-
-    def resolve_shell(self) -> str:
-        """选一个**带行编辑**的 shell。
-
-        显式配置的 ``shell`` 原样返回（哪怕它没有 readline——那是你的选择）。
-        否则依次试 ``$SHELL``、``bash``、系统 profile 的 bash、zsh、fish、sh，
-        跳过 ``bind -v`` 失败的 bash（NixOS 的 ``bash`` 常常就是这种）。
-        """
-        text = self.shell.strip()
-        if text:
-            return text
-        from blue_service_terminal.session import supports_line_editing
-
-        candidates = [
-            os.environ.get("SHELL", "").strip(),
-            "bash",
-            "/run/current-system/sw/bin/bash",
-            "/usr/bin/bash",
-            "zsh",
-            "fish",
-            "sh",
-        ]
-        fallback = ""
-        for candidate in candidates:
-            if not candidate:
-                continue
-            path = candidate if "/" in candidate else shutil.which(candidate) or ""
-            if not path or ("/" in candidate and not Path(path).is_file()):
-                continue
-            if not fallback:
-                fallback = candidate
-            if supports_line_editing(path) is not False:
-                return candidate
-        return fallback or "bash"
-
-    def resolve_workdir(self) -> Path:
-        """解析工作目录（相对路径按项目根）。"""
-        from blue.runtime import WorkspaceConfig, resolve_workspace
-
-        return resolve_workspace(WorkspaceConfig(workdir=self.workdir))

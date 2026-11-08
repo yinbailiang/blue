@@ -16,6 +16,8 @@ from blue.control.logs import LogManager
 from blue.control.model import (
     DesiredService,
     DesiredState,
+    RegistrySettings,
+    RestartSettings,
     ServiceMeta,
     ServiceStatus,
     SupervisorSettings,
@@ -69,12 +71,13 @@ def _desired(
         supervisor=SupervisorSettings(
             state_dir=tmp_path / ".blue",
             reconcile_interval=0.05,
-            restart_backoff=0.02,
-            restart_backoff_max=0.1,
-            restart_max_attempts=3,
-            stable_after=1.0,
-            registry_ttl=5.0,
-            registry_sweep_interval=0.5,
+            restart=RestartSettings(
+                backoff=0.02,
+                backoff_max=0.1,
+                max_attempts=3,
+                stable_after=1.0,
+            ),
+            registry=RegistrySettings(ttl=5.0, sweep_interval=0.5),
         ),
         services=desired_services,
         bus_url="amqp://guest:guest@127.0.0.1:5672/",
@@ -199,7 +202,7 @@ def _package_workspace(tmp_path: Path, *, version: str) -> Path:
         "supervisor {\n"
         '  state_dir: str = ".blue"\n'
         "  reconcile_interval: <float, positive> = 0.05\n"
-        "  restart_backoff: <float, positive> = 0.05\n"
+        "  restart = { backoff = 0.05 }\n"
         "  shutdown_timeout: <float, positive> = 5.0\n"
         "}\n"
         "\n"

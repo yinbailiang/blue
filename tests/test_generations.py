@@ -17,6 +17,7 @@ from blue.control.generations import (
     GenerationStore,
 )
 from blue.control.model import (
+    ActivationSettings,
     DesiredService,
     DesiredState,
     ServiceMeta,
@@ -419,23 +420,24 @@ def test_generation_freezes_supervisor_settings(tmp_path: Path) -> None:
     desired = _desired(tmp_path, generation="gen-1").model_copy(
         update={
             "supervisor": SupervisorSettings(
-                state_dir=tmp_path / ".blue", activation_timeout=12.0
+                state_dir=tmp_path / ".blue",
+                activation=ActivationSettings(timeout=12.0),
             )
         }
     )
     generation = store.create(desired, _artifacts(tmp_path), reason="apply")
 
     stored = json.loads((generation.path / GENERATION_FILE).read_text(encoding="utf-8"))
-    assert stored["supervisor"]["activation_timeout"] == 12.0
+    assert stored["supervisor"]["activation"]["timeout"] == 12.0
 
     rebuilt = store.load(generation.id).to_desired(
         supervisor=SupervisorSettings(
-            state_dir=tmp_path / ".blue", activation_timeout=999.0
+            state_dir=tmp_path / ".blue", activation=ActivationSettings(timeout=999.0)
         ),
         base_dir=tmp_path,
         artifacts=_artifacts(tmp_path),
     )
-    assert rebuilt.supervisor.activation_timeout == 12.0, "世代里的设置优先"
+    assert rebuilt.supervisor.activation.timeout == 12.0, "世代里的设置优先"
 
 
 def test_to_desired_falls_back_to_bootstrap_settings(tmp_path: Path) -> None:
@@ -450,13 +452,13 @@ def test_to_desired_falls_back_to_bootstrap_settings(tmp_path: Path) -> None:
 
     rebuilt = legacy.to_desired(
         supervisor=SupervisorSettings(
-            state_dir=tmp_path / ".blue", activation_timeout=33.0
+            state_dir=tmp_path / ".blue", activation=ActivationSettings(timeout=33.0)
         ),
         base_dir=tmp_path,
         artifacts=_artifacts(tmp_path),
     )
 
-    assert rebuilt.supervisor.activation_timeout == 33.0
+    assert rebuilt.supervisor.activation.timeout == 33.0
 
 
 def test_gc_keeps_two_stable_generations(tmp_path: Path) -> None:

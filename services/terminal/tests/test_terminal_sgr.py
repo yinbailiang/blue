@@ -6,6 +6,7 @@ import asyncio
 from pathlib import Path
 
 import pyte
+from blue_service_terminal import resolve_shell
 from blue_service_terminal.config import TerminalConfig
 from blue_service_terminal.session import SessionManager, rewrite_colon_sgr
 
@@ -71,7 +72,7 @@ async def _no_garbage(tmp_path: Path) -> None:
     await manager.start()
     try:
         session = manager.open(
-            shell=config.resolve_shell(),
+            shell=resolve_shell(config),
             cwd=Path("/tmp"),
             cols=100,
             rows=20,

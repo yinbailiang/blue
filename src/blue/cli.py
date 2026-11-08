@@ -222,8 +222,8 @@ async def _run_supervisor(desired: DesiredState) -> None:
     state = StateStore(settings.state_dir)
     logs = LogManager(
         state.log_dir,
-        max_bytes=settings.log_max_bytes,
-        backups=settings.log_backups,
+        max_bytes=settings.log.max_bytes,
+        backups=settings.log.backups,
     )
     runner = ProcessRunner(logs, uv_frozen=settings.uv_frozen)
     supervisor = Supervisor(
@@ -320,9 +320,9 @@ def _artifact_store(desired: DesiredState) -> ArtifactStore:
     return ArtifactStore(
         settings.state_dir,
         project_root=desired.base_dir,
-        python=settings.artifact_python,
-        link_mode=settings.artifact_link_mode,
-        warn_cross_device=settings.artifact_warn_cross_device,
+        python=settings.generation.artifact.python,
+        link_mode=settings.generation.artifact.link_mode,
+        warn_cross_device=settings.generation.artifact.warn_cross_device,
     )
 
 
@@ -477,7 +477,7 @@ def wait_for_activation(
     """等该世代通过健康闸门；失败/回滚返回非 0。"""
     state = StateStore(desired.supervisor.state_dir)
     limit = (
-        timeout if timeout is not None else desired.supervisor.activation_timeout + 30.0
+        timeout if timeout is not None else desired.supervisor.activation.timeout + 30.0
     )
     deadline = time.monotonic() + limit
     while time.monotonic() < deadline:
@@ -512,7 +512,9 @@ def _run_smoke(desired: DesiredState, generation: Generation) -> SmokeReport:
     artifacts = _artifact_store(desired)
     return asyncio.run(
         run_smoke(
-            desired, artifacts=artifacts, timeout=desired.supervisor.smoke_timeout
+            desired,
+            artifacts=artifacts,
+            timeout=desired.supervisor.activation.smoke.timeout,
         )
     )
 
@@ -572,7 +574,7 @@ def _apply(
     东西仍是 plan 里显示的那份）。两个一起用就是"世界没动、内容也没动”。
 
     控制面代码变化会触发 execv 自重启：那种情况下**默认也要等验证结果**
-    （``supervisor.await_control_change``），否则"命令返回 0 但其实没起来"。
+    （``supervisor.activation.await_control_change``），否则"命令返回 0 但其实没起来"。
     """
     desired, generation = _prepare_generation(
         config_path,
@@ -584,7 +586,7 @@ def _apply(
     store = _generation_store(desired)
     state = StateStore(desired.supervisor.state_dir)
     current = store.current()
-    smoke = smoke and desired.supervisor.smoke_enabled
+    smoke = smoke and desired.supervisor.activation.smoke.enabled
 
     if staged:
         print(
@@ -621,7 +623,7 @@ def _await_result(
 ) -> int:
     """按"要不要等"的规则收尾：``--wait``、或控制面自重启时自动等。"""
     should_wait = wait or (
-        restart and desired.supervisor.await_control_change and not wait
+        restart and desired.supervisor.activation.await_control_change and not wait
     )
     if not should_wait:
         return 0
@@ -650,7 +652,7 @@ def _activate(
         generation,
         wait,
         timeout,
-        smoke and desired.supervisor.smoke_enabled,
+        smoke and desired.supervisor.activation.smoke.enabled,
         restart=restart,
     )
 
@@ -789,7 +791,7 @@ def _gc(
     """
     desired = load_desired(config_path)
     settings = desired.supervisor
-    keep_count = keep if keep is not None else settings.generation_keep
+    keep_count = keep if keep is not None else settings.generation.keep
     store = _generation_store(desired)
     artifacts = _artifact_store(desired)
     lock = MaintenanceLock(desired.supervisor.state_dir)

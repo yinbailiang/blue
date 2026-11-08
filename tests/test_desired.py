@@ -14,8 +14,9 @@ from typing import cast
 import pytest
 
 from blue.config import load_desired
-from blue.control.desired import render_state, runtime_config_content
-from blue.control.model import DesiredState
+from blue.control.desired import load_supervisor, render_state, runtime_config_content
+from blue.control.model import DesiredState, IdempotencySettings
+from blue.errors import ConfigError
 from blue.runtime import InfraConfig
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -119,9 +120,9 @@ def test_idempotency_settings_follow_supervisor_config(desired: DesiredState) ->
         update={
             "supervisor": desired.supervisor.model_copy(
                 update={
-                    "idempotency": False,
-                    "idempotency_retention": 1234.0,
-                    "idempotency_sweep_interval": 56.0,
+                    "idempotency": IdempotencySettings(
+                        enabled=False, retention=1234.0, sweep_interval=56.0
+                    ),
                 }
             )
         }
@@ -159,3 +160,77 @@ def test_every_service_gets_a_30s_stop_budget(desired: DesiredState) -> None:
     """
     for name, service in desired.services.items():
         assert service.meta.stop_timeout >= 30.0, f"{name} 的 stop_timeout 被调小了"
+
+
+def test_supervisor_nested_block_maps_to_grouped_model(tmp_path: Path) -> None:
+    """supervisor 块的分组结构与 ``supervisor.inft`` 同构，pydantic 直接嵌套解析。
+
+    中间没有映射层：配置里叫什么、模型上就叫什么。加一个配置项只需改两处
+    （模板 + 模型），不存在"漏改映射表导致某项配置永远改不动"。
+    """
+    settings = load_supervisor(
+        {
+            "shutdown_timeout": "90.0",
+            "log": {"max_bytes": 2048, "backups": 7},
+            "registry": {"ttl": "30.0", "sweep_interval": "5.0"},
+            "idempotency": {"enabled": False, "retention": "60.0"},
+            "activation": {
+                "timeout": "300.0",
+                "await_control_change": False,
+                "smoke": {"enabled": False, "timeout": "5.0"},
+            },
+            "journal": {
+                "enabled": True,
+                "max_bytes": 67108864,
+                "max_rows": None,
+                "payload": {"mode": "full", "allowlist": ["tool.call"]},
+            },
+            "generation": {
+                "keep": 9,
+                "artifact": {"python": "3.13", "link_mode": "copy"},
+            },
+        },
+        tmp_path,
+    )
+
+    assert settings.shutdown_timeout == 90.0
+    assert (settings.log.max_bytes, settings.log.backups) == (2048, 7)
+    assert (settings.registry.ttl, settings.registry.sweep_interval) == (30.0, 5.0)
+    assert settings.idempotency.enabled is False
+    assert settings.idempotency.retention == 60.0
+    assert settings.activation.timeout == 300.0
+    assert settings.activation.await_control_change is False
+    assert settings.activation.smoke.enabled is False
+    assert settings.activation.smoke.timeout == 5.0
+    assert settings.journal.enabled is True
+    assert settings.journal.max_bytes == 67108864
+    assert settings.journal.max_rows is None
+    assert settings.journal.payload.mode == "full"
+    assert settings.journal.payload.allowlist == ("tool.call",)
+    assert settings.generation.keep == 9
+    assert settings.generation.artifact.python == "3.13"
+    assert settings.generation.artifact.link_mode == "copy"
+
+
+@pytest.mark.parametrize(
+    "legacy_key",
+    ["activation_timeout", "log_backups", "journal_max_bytes", "stable_after"],
+)
+def test_supervisor_legacy_flat_keys_are_rejected(
+    tmp_path: Path, legacy_key: str
+) -> None:
+    """旧的平铺键必须**报错**，绝不静默失效。
+
+    静默忽略的后果就是这项配置永远改不动——那正是分组化要消灭的那类 bug。
+    """
+    with pytest.raises(ConfigError, match=legacy_key):
+        load_supervisor({legacy_key: 1}, tmp_path)
+
+
+@pytest.mark.parametrize("name", ["journal", "idempotency"])
+def test_supervisor_boolean_switch_is_rejected_with_hint(
+    tmp_path: Path, name: str
+) -> None:
+    """``journal`` / ``idempotency`` 从布尔变成了分组对象，旧写法要给明确提示。"""
+    with pytest.raises(ConfigError, match="分组对象"):
+        load_supervisor({name: True}, tmp_path)

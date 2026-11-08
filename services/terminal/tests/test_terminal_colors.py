@@ -5,6 +5,7 @@ from __future__ import annotations
 import io
 
 import pytest
+from blue_service_terminal import palette_map
 from blue_service_terminal.colors import (
     ANSI_BASE,
     DEFAULT_BACKGROUND,
@@ -87,7 +88,7 @@ def test_config_normalises_colors_and_palette() -> None:
 
     assert config.background == "#111111"
     assert config.foreground == "#ffffff"
-    assert config.palette_map() == {"red": "#ff0000"}
+    assert palette_map(config) == {"red": "#ff0000"}
 
 
 def test_config_rejects_bad_colors() -> None:

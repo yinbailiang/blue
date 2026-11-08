@@ -30,92 +30,29 @@
 !from p"services/weather/service.infd" import ServiceTemplate as WeatherService
 !from p"services/web_search/service.infd" import ServiceTemplate as WebSearchService
 !from p"services/mcp_bridge/service.infd" import ServiceTemplate as McpBridgeService
+!from p"supervisor.inft" import Supervisor, Journal
 
-supervisor {
-  state_dir: path = p".blue"
-  reconcile_interval: <float, positive> = 2.0
-  # 整场停机的墙钟预算（秒）。停机按依赖层级倒序、**层内并发**：每层最多等最慢的
-  # 那个服务，所以最坏时长 ≈ 层数 × 单服务 stop_timeout，而不是它们的总和。
-  # 本仓库是 3 层（webui → 中间层 → bus）× 30s = 90s 的上界；实际停机通常在 2~3 秒
-  # 内完成，这里到点仍未退出的进程会被 SIGKILL。
-  shutdown_timeout: <float, positive> = 60.0
-  log_max_bytes: <int, positive> = 10485760
-  log_backups: <int, range(0, 20)> = 3
-  restart_backoff: <float, positive> = 0.5
-  restart_backoff_max: <float, positive> = 30.0
-  restart_max_attempts: <int, range(1, 100)> = 10
-  stable_after: <float, positive> = 60.0
-  registry_ttl: <float, positive> = 15.0
-  registry_sweep_interval: <float, positive> = 2.0
-  uv_frozen: bool = true
 
-  # —— 事件去重（at-least-once 的兜底，业务不必自己写幂等）——
-  # 去重库落在 .blue/dedupe/<service>.sqlite；关掉它会退回"可能重复执行"。
-  idempotency: bool = true
-  # 去重记录保留时长（秒）：只要覆盖任何重投窗口即可，避免库无限增长。
-  # 重投窗口由"消息未被 ack 的滞留时间"决定：ack 在**处理器启动**时发，所以常见情形
-  # （断连 / 重启补投）是秒级。实测（2026-11-07）webui 一天 291k 行 ≈ 69MB、
-  # registry 229k 行 ≈ 55MB——按 7 天保留，稳态会到 1GB 量级；1 天约 180MB。
-  # 注意：**调小只停止增长**，已有文件要 VACUUM 才缩（SQLite 删行不缩文件）：
-  #   blue gc --vacuum-dedupe
-  idempotency_retention: <float, positive> = 86400.0
-  # 清理巡检间隔（秒）：每这么久最多清一次，不把扫表摊到每条事件上。
-  idempotency_sweep_interval: <float, positive> = 600.0
+# supervisor（调谐器）的期望状态：字段、约束与说明全部在 supervisor.inft 里，
+# 这里只覆盖本仓库需要改的取值，其余一律取模板默认。
+supervisor Supervisor(
+    # 审计日志：本仓库开启；单库软上限 64 MiB（到顶后从最老的成批删除并 vacuum）。
+    journal = Journal(
+        enabled = true,
+        max_bytes = 67108864,
+    ),
+)
 
-  # —— 审计日志：全量记录各服务**发射**的事件（实现见 src/blue/journal.py）——
-  # 每服务一个库：.blue/journal/<service>.sqlite。只增不减，靠下面三项回收。
-  # 必须挂在发射侧（on_publish）：一个事件只有一个发射者 → 1 行/事件；
-  # 挂接收侧会被 fanout 放大成「成员数」份。
-  #
-  # 代价（实测量级）：webui 一天 291k 事件、registry 229k。digest 模式下负载只存
-  # size+sha256，每库约 20~60MB/天，所以保留期与字节上限必须一起设。
-  journal = true
-  journal_retention = 86400.0
-  # 单库文件软上限（字节）：到顶后从最老的成批删除并 incremental_vacuum。
-  journal_max_bytes = 67108864
-  # 负载存储：digest 只存 size+sha256；full 存正文（仍受 payload_max_bytes 限制）。
-  journal_payload_mode = "digest"
-  # 想看某个事件的正文就把名字加进白名单，例如：
-  #   journal_payload_allowlist = ["tool.call", "tool.result"]
-  journal_payload_max_bytes = 8192
-  journal_sweep_interval = 600.0
-  # 需要“行数上限”再打开（默认只按时间 + 字节回收）：
-  #   journal_max_rows = 500000
-
-  # —— 世代（generation）机制，见 docs/generations.md ——
-  # 激活新世代后等全部服务 Ready 的上限；超时按"激活失败"处理。
-  activation_timeout: <float, positive> = 120.0
-  # gc 至少保留多少个最近世代（另有当前世代与最新 stable 世代始终保留）。
-  generation_keep: <int, range(1, 1000)> = 5
-  # 激活验证失败时，是否自动回退到上一个 stable 世代。
-  generation_auto_rollback: bool = true
-  # 建产物 venv 用的解释器（交给 uv 解析，必要时自动下载）。
-  artifact_python: str = "3.14"
-  artifact_link_mode: str = "hardlink"
-  # 产物目录与 .venv 跨分区时硬链接会退化成拷贝，是否告警。
-  artifact_warn_cross_device: bool = true
-
-  # —— 激活验证 ——
-  # 控制面代码变化会触发 execv 自重启；这种 apply 默认也等验证结果，
-  # 免得"命令返回 0 但其实没起来"。
-  await_control_change: bool = true
-  # 闸门通过后跑服务自己声明的冒烟检查（service.infd 的 smoke_tools /
-  # smoke_min_tools / smoke_command），失败按激活失败处理并回滚。
-  smoke_enabled: bool = true
-  # 冒烟里总线请求的超时；命令超时由各服务自己的 smoke_timeout 决定。
-  smoke_timeout: <float, positive> = 20.0
-}
-
-bus = BusService(
+bus BusService(
   mode = "managed",
   vhost = "blue",
   user = "guest",
   password = $bus_password,
 )
 
-registry = RegistryService()
+registry RegistryService()
 
-session = SessionService()
+session SessionService()
 # 会话存储与保留策略：**默认不自动删除任何会话**（prune_enabled = false）。
 # 需要限制磁盘占用时再打开：
 #   session = SessionService(
@@ -126,7 +63,7 @@ session = SessionService()
 #     active_grace = 60.0,    # 容量淘汰时保护最近 60 秒活动过的会话
 #   )
 
-agent = AgentService(
+agent AgentService(
   provider = "deepseek",
   model = "deepseek-v4-flash",
   api_key = $agent_api_key,
@@ -148,24 +85,24 @@ agent = AgentService(
   ],
 )
 
-webui = WebUIService(
+webui WebUIService(
   host = "0.0.0.0"
 )
 
 # 小工具
 #echo = EchoService()
-clock = ClockService()
-history_search = HistorySearchService()
-history_read = HistoryReadService()
+clock ClockService()
+history_search HistorySearchService()
+history_read HistoryReadService()
 #text_stats = TextStatsService()
 
 # 文件类工具的 workdir 与 shell 同义：缺省为项目根，相对路径按项目根解析
-read_file = ReadFileService()
-write_file = WriteFileService()
-edit_file = EditFileService()
+read_file ReadFileService()
+write_file WriteFileService()
+edit_file EditFileService()
 
 # workdir 缺省为项目根（blue.infd 所在目录）；可设为绝对路径或相对项目根的路径
-shell = ShellService()
+shell ShellService()
 
 # 交互式终端（PTY）：多会话、不同 shell、终端截图与坐标点击。
 # shell 留空=自动挑选带 readline 的 shell（NixOS 的 bash 有两个构建，
@@ -173,14 +110,14 @@ shell = ShellService()
 # 配色：background / foreground 同时决定截图底色和「程序查询终端颜色」的应答
 # （OSC 10/11），配成真实终端色 nvim 才会判断出正确的明暗主题。palette 可覆盖
 # ANSI 基本色：palette = [ { name = "red", color = "#ff5555" } ]
-terminal = TerminalService()
+terminal TerminalService()
 
 # 天气查询：默认走 wttr.in，可改 base_url / timeout
-weather = WeatherService()
+weather WeatherService()
 
 # 网页搜索：抓 Bing 结果页（无需密钥）。默认走国际版，经本地代理出去；
 # 中文查询自动用 mkt=zh-CN，英文查询用 en-US。代理留空则直连（国内会落到 cn.bing.com）。
-web_search = WebSearchService(
+web_search WebSearchService(
   proxy = "http://127.0.0.1:7890",
 )
 
@@ -188,10 +125,10 @@ web_search = WebSearchService(
 # browser = BrowserService()
 
 # 可交互浏览器（WebDriver/geckodriver）：等待渲染、点击、输入、滚动后再截图
-browser_ops = BrowserOpsService()
+browser_ops BrowserOpsService()
 
 # 查看本地图片：把磁盘上的图（截图/图表/下载的图片）作为附件交给模型
-view_image = ViewImageService()
+view_image ViewImageService()
 
 # MCP 客户端桥：把外部 MCP server（stdio）的工具接进目录。
 # 工具集是声明式的：只有 tools 里列出的 <server>__<tool> 会注册；声明的工具在
@@ -253,7 +190,7 @@ view_image = ViewImageService()
   "kwin__dbus_call",
 ] import . as kwin_tools
 
-mcp_bridge = McpBridgeService(
+mcp_bridge McpBridgeService(
   # 两个 server 现在都 enabled = false，所以白名单必须为空；要恢复 kwin 的能力就写成
   # tools = [*$kwin_tools]（上面 !var 块里就是那份完整清单）。
   tools = []

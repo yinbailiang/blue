@@ -174,26 +174,26 @@ def runtime_config_content(service: DesiredService, desired: DesiredState) -> st
                 for name in sorted(service.meta.depends_contracts)
                 if name in desired.contracts
             },
-            "registry_ttl": settings.registry_ttl,
-            "registry_sweep_interval": settings.registry_sweep_interval,
+            "registry_ttl": settings.registry.ttl,
+            "registry_sweep_interval": settings.registry.sweep_interval,
             # 服务据此把自己的停机排空超时压在这个预算内——supervisor 到点就 SIGKILL，
             # 排空超时若比它大，已投递未派发的消息会被 broker 重投（at-least-once）。
             "stop_timeout": service.meta.stop_timeout,
             # 事件去重（业务不必自己写幂等）；去重库落在 state_dir/dedupe 下。
             # 由 supervisor 配置下发，别在这里写死——写死等于这项配置永远改不动。
-            "idempotency": settings.idempotency,
-            "idempotency_retention": settings.idempotency_retention,
-            "idempotency_sweep_interval": settings.idempotency_sweep_interval,
+            "idempotency": settings.idempotency.enabled,
+            "idempotency_retention": settings.idempotency.retention,
+            "idempotency_sweep_interval": settings.idempotency.sweep_interval,
             # 审计日志（全量记录本服务**发射**的事件）；库落在 state_dir/journal 下。
             # 同样是“不写死”：写死等于这些配置项永远改不动。
-            "journal": settings.journal,
-            "journal_retention": settings.journal_retention,
-            "journal_max_rows": settings.journal_max_rows,
-            "journal_max_bytes": settings.journal_max_bytes,
-            "journal_payload_mode": settings.journal_payload_mode,
-            "journal_payload_allowlist": list(settings.journal_payload_allowlist),
-            "journal_payload_max_bytes": settings.journal_payload_max_bytes,
-            "journal_sweep_interval": settings.journal_sweep_interval,
+            "journal": settings.journal.enabled,
+            "journal_retention": settings.journal.retention,
+            "journal_max_rows": settings.journal.max_rows,
+            "journal_max_bytes": settings.journal.max_bytes,
+            "journal_payload_mode": settings.journal.payload.mode,
+            "journal_payload_allowlist": list(settings.journal.payload.allowlist),
+            "journal_payload_max_bytes": settings.journal.payload.max_bytes,
+            "journal_sweep_interval": settings.journal.sweep_interval,
         },
     }
     return (
@@ -416,6 +416,41 @@ def redact_state(desired: DesiredState) -> dict[str, Any]:
     return render_state(desired, redact=True)
 
 
+#: 旧的平铺式 supervisor 字段名。它们已经不再生效，检测到就**报错**——
+#: 绝不静默忽略：静默忽略意味着这项配置永远改不动，而这正是本次重构要消灭的
+#: 那类 bug（``desired.py`` 里记过 ``idempotency`` 就这么死过一次）。
+_LEGACY_SUPERVISOR_FIELDS = frozenset(
+    {
+        "log_max_bytes",
+        "log_backups",
+        "restart_backoff",
+        "restart_backoff_max",
+        "restart_max_attempts",
+        "stable_after",
+        "registry_ttl",
+        "registry_sweep_interval",
+        "idempotency_retention",
+        "idempotency_sweep_interval",
+        "journal_retention",
+        "journal_max_rows",
+        "journal_max_bytes",
+        "journal_payload_mode",
+        "journal_payload_allowlist",
+        "journal_payload_max_bytes",
+        "journal_sweep_interval",
+        "activation_timeout",
+        "generation_keep",
+        "generation_auto_rollback",
+        "artifact_python",
+        "artifact_link_mode",
+        "artifact_warn_cross_device",
+        "await_control_change",
+        "smoke_enabled",
+        "smoke_timeout",
+    }
+)
+
+
 def load_supervisor(raw: object, base_dir: Path) -> SupervisorSettings:
     """解析 ``supervisor`` 块；未知键只告警、不报错。
 
@@ -430,8 +465,25 @@ def load_supervisor(raw: object, base_dir: Path) -> SupervisorSettings:
     if raw is None:
         settings = SupervisorSettings()
     elif isinstance(raw, dict):
+        payload = cast("dict[str, Any]", raw)
+        legacy = sorted(_LEGACY_SUPERVISOR_FIELDS & set(payload))
+        if legacy:
+            raise ConfigError(
+                "supervisor 配置已改为分组结构，这些顶层键不再生效："
+                + "、".join(legacy)
+                + "。改用 supervisor.inft 模板，见 README「配置模型」"
+            )
+        for name, example in (
+            ("journal", "Journal"),
+            ("idempotency", "Idempotency"),
+        ):
+            if isinstance(payload.get(name), bool):
+                raise ConfigError(
+                    f"supervisor.{name} 现在是分组对象，不再是布尔；"
+                    f"请写成 {name} = {example}(enabled = ...)"
+                )
         try:
-            settings = SupervisorSettings.model_validate(raw)
+            settings = SupervisorSettings.model_validate(payload)
         except ValidationError as error:
             raise ConfigError(f"supervisor 配置校验失败：{error}") from error
         unknown = sorted(settings.model_extra or {})
@@ -756,6 +808,13 @@ SECRET_FILES = ("secrets.toml", "secrets.json")
 从工作区读取的外部数据。
 """
 
+SYSTEM_TEMPLATES = ("supervisor.inft",)
+"""允许被 ``!from`` 导入的项目根模板文件。
+
+``blue.infd`` 里的 ``supervisor`` 块由这里定义的模板约束。只授权具体文件名，
+不放开整个项目根目录——根目录下还有 ``.venv`` 之类不该被配置读到的东西。
+"""
+
 
 def _sandbox_patterns(workspace_root: Path) -> list[str]:
     services = (workspace_root / "services").resolve()
@@ -770,6 +829,9 @@ def _sandbox_patterns(workspace_root: Path) -> list[str]:
         "sdk/**",
     ]
     for name in SECRET_FILES:
+        patterns.append(str(workspace_root / name))
+        patterns.append(name)
+    for name in SYSTEM_TEMPLATES:
         patterns.append(str(workspace_root / name))
         patterns.append(name)
     return patterns

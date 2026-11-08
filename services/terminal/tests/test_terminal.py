@@ -6,6 +6,7 @@ import asyncio
 from pathlib import Path
 
 import pytest
+from blue_service_terminal import resolve_shell
 from blue_service_terminal.config import TerminalConfig
 from blue_service_terminal.render import (
     FontSet,
@@ -35,7 +36,7 @@ async def _open(manager: SessionManager, cols: int = 80, rows: int = 16):
     """开一个会话（用配置挑出来的 shell）。"""
     config = _config()
     return manager.open(
-        shell=config.resolve_shell(),
+        shell=resolve_shell(config),
         cwd=Path("/tmp"),
         cols=cols,
         rows=rows,
@@ -55,7 +56,7 @@ def test_supports_line_editing_detects_readline() -> None:
 
 def test_resolve_shell_skips_bash_without_readline() -> None:
     """自动挑选的 shell 一定带行编辑（否则方向键会失效）。"""
-    shell = _config().resolve_shell()
+    shell = resolve_shell(_config())
 
     assert shell
     assert supports_line_editing(shell) is not False

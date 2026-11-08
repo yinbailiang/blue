@@ -85,8 +85,10 @@ service {{
 supervisor {{
   state_dir: str = ".blue"
   reconcile_interval: <float, positive> = 0.05
-  restart_backoff: <float, positive> = 0.02
-  restart_backoff_max: <float, positive> = 0.1
+  restart = {{
+    backoff = 0.02
+    backoff_max = 0.1
+  }}
 }}
 
 demo = DemoService(value = "{value}")

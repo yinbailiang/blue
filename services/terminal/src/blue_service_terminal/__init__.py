@@ -17,6 +17,8 @@ import base64
 import contextlib
 import io
 import logging
+import os
+import shutil
 import time
 from pathlib import Path
 from typing import Annotated, Any
@@ -63,6 +65,9 @@ __all__ = [
     "TerminalService",
     "TerminalView",
     "main",
+    "palette_map",
+    "resolve_shell",
+    "resolve_workdir",
     "terminal_click",
     "terminal_close",
     "terminal_drag",
@@ -95,6 +100,58 @@ def configure(config: TerminalConfig) -> None:
     global _config, _fonts_cache
     _config = config
     _fonts_cache = None
+
+
+def palette_map(config: TerminalConfig) -> dict[str, str]:
+    """调色板覆盖项转成渲染层要的映射。"""
+    return {entry.name: entry.color for entry in config.palette}
+
+
+def resolve_workdir(config: TerminalConfig) -> Path:
+    """解析工作目录（相对路径按项目根）。"""
+    from blue.runtime import WorkspaceConfig, resolve_workspace
+
+    return resolve_workspace(WorkspaceConfig(workdir=config.workdir))
+
+
+def resolve_shell(config: TerminalConfig) -> str:
+    """选一个**带行编辑**的 shell。
+
+    显式配置的 ``shell`` 原样返回（哪怕它没有 readline——那是你的选择）。
+    否则依次试 ``$SHELL``、``bash``、系统 profile 的 bash、zsh、fish、sh，
+    跳过 ``bind -v`` 失败的 bash（NixOS 的 ``bash`` 常常就是这种）。
+
+    为什么放在模块级而不是 ``TerminalConfig`` 的方法里：它探测的是**这台机器**的
+    现状——环境变量、文件系统里有什么、``bind -v`` 能不能过。这跟「配置是什么」
+    是两件事，配置模型只该描述数据；把运行时决策挂在数据对象上，换台机器就失真，
+    也没法用声明式模板表达。
+    """
+    text = config.shell.strip()
+    if text:
+        return text
+    from blue_service_terminal.session import supports_line_editing
+
+    candidates = [
+        os.environ.get("SHELL", "").strip(),
+        "bash",
+        "/run/current-system/sw/bin/bash",
+        "/usr/bin/bash",
+        "zsh",
+        "fish",
+        "sh",
+    ]
+    fallback = ""
+    for candidate in candidates:
+        if not candidate:
+            continue
+        path = candidate if "/" in candidate else shutil.which(candidate) or ""
+        if not path or ("/" in candidate and not Path(path).is_file()):
+            continue
+        if not fallback:
+            fallback = candidate
+        if supports_line_editing(path) is not False:
+            return candidate
+    return fallback or "bash"
 
 
 def _fonts() -> FontSet:
@@ -204,10 +261,10 @@ def terminal_open(
 ) -> TerminalView:
     """新开一个交互式终端会话（PTY），返回初始屏幕。"""
     manager = _require_manager()
-    workdir = Path(cwd).expanduser() if cwd.strip() else _config.resolve_workdir()
+    workdir = Path(cwd).expanduser() if cwd.strip() else resolve_workdir(_config)
     if not workdir.is_dir():
         raise ValueError(f"工作目录不存在：{workdir}")
-    chosen = shell.strip() or _config.resolve_shell()
+    chosen = shell.strip() or resolve_shell(_config)
     session = manager.open(
         shell=chosen,
         cwd=workdir,
@@ -292,7 +349,7 @@ def terminal_snapshot(
         fonts=fonts,
         background=_config.background,
         foreground=_config.foreground,
-        palette=_config.palette_map(),
+        palette=palette_map(_config),
     )
     png, width, height = _shrink(png, max_edge)
     view = _view(session)

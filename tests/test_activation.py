@@ -15,10 +15,13 @@ from blue.control.artifacts import ArtifactStore
 from blue.control.generations import GenerationStore
 from blue.control.logs import LogManager
 from blue.control.model import (
+    ActivationSettings,
     ActivationState,
     ActualState,
     DesiredService,
     DesiredState,
+    GenerationSettings,
+    RestartSettings,
     ServiceMeta,
     ServiceStatus,
     SupervisorSettings,
@@ -70,12 +73,14 @@ def _desired(
         supervisor=SupervisorSettings(
             state_dir=tmp_path / ".blue",
             reconcile_interval=0.05,
-            restart_backoff=0.02,
-            restart_backoff_max=0.1,
-            restart_max_attempts=3,
-            stable_after=1.0,
-            activation_timeout=activation_timeout,
-            generation_auto_rollback=auto_rollback,
+            restart=RestartSettings(
+                backoff=0.02,
+                backoff_max=0.1,
+                max_attempts=3,
+                stable_after=1.0,
+            ),
+            activation=ActivationSettings(timeout=activation_timeout),
+            generation=GenerationSettings(auto_rollback=auto_rollback),
         ),
         services={"demo": service},
         bus_url="amqp://guest:guest@127.0.0.1:5672/",

@@ -149,7 +149,7 @@ base 是**开发用 `.venv` 的硬链接克隆**，所以 `.venv` 里装成 `edi
   "created_at": 1793881426.8,
   "created_by": "git 2184bc0 (dirty)",
   "reason": "apply",
-  "supervisor": {"activation_timeout": 120.0, "generation_keep": 5, …},
+  "supervisor": {"activation": {"timeout": 120.0}, "generation": {"keep": 5}, …},
   "sdk": {"package_version": "0.1.0", "source_hash": "…"},
   "contracts": {"tool": "…", "session": "…"},
   "deps_hash": "…",                    // uv.lock 指纹
@@ -173,10 +173,10 @@ base 是**开发用 `.venv` 的硬链接克隆**，所以 `.venv` 里装成 `edi
 - `blue.infd` 改坏了不影响正在运行的世代（只是下一次 apply 无法构建）；
 - 世代与 Git 历史解耦，但 `created_by` 记下当时的 commit，便于人肉追溯。
 
-`supervisor` 段是**刻意冻结**的：`activation_timeout`、`generation_auto_rollback`
+`supervisor` 段是**刻意冻结**的：`activation.timeout`、`generation.auto_rollback`
 这些参数决定"这一代怎么激活、怎么回滚"，属于期望状态的一部分。只放在工作区的
 `blue.infd` 里会出事——`apply --config other.infd` 改了它们，调谐器却仍在用自己那个
-`config_path` 编译出来的旧值（实测：把 `activation_timeout` 从 120s 改成 12s，
+`config_path` 编译出来的旧值（实测：把 `activation.timeout` 从 120s 改成 12s，
 日志里仍旧是 120s）。唯一例外是 `state_dir`：它是运行期常量，改了只能重启 supervisor。
 
 ### 5.2 状态机
@@ -185,7 +185,7 @@ base 是**开发用 `.venv` 的硬链接克隆**，所以 `.venv` 里装成 `edi
         create            activate           全部 Ready
   (无) ────────► pending ──────────► pending ──────────────► stable
                     │                   │
-                    │ 进程崩/超时        │ activation_timeout
+                    │ 进程崩/超时        │ activation.timeout
                     └───────────────────┴──► failed ──► 自动回滚到上一个 stable
 ```
 
@@ -211,7 +211,7 @@ blue apply [--wait] [--timeout S] [--staged] [--no-build] [--no-auto-rollback]
             然后 os.replace 原子翻转 .blue/current → generations/<N>/
             ── 这是唯一的状态变更点
 
-  ③verify   通知 supervisor 重载 → 等全部服务 Ready（activation_timeout）
+  ③verify   通知 supervisor 重载 → 等全部服务 Ready（activation.timeout）
             失败 → 自动翻回上一个 stable 世代并重载，返回非 0
 ```
 
@@ -285,7 +285,7 @@ service {
 | `smoke_command` | 检查命令，退出码 0 通过；首元素 `python` 换成**该服务产物的解释器**，cwd 是项目根，环境带本世代的 `BLUE_CONFIG_FILE` |
 | `smoke_timeout` | 该命令的超时（默认 20s） |
 
-没声明的服务直接跳过（显式优于默认拦截）。`supervisor.smoke_enabled = false` 整体关闭，
+没声明的服务直接跳过（显式优于默认拦截）。`supervisor.activation.smoke.enabled = false` 整体关闭，
 `apply --no-smoke` 单次跳过。
 
 为什么不在控制面里硬编码探针（比如"数工具个数""给 session 写读一条"）：那等于把业务
@@ -297,7 +297,7 @@ service {
 smoke_tools×11，13 个服务）`；把 `weather` 的 `smoke_tools` 改成不存在的名字后
 `12/13` 失败 → 自动回滚到上一世代、该世代标 `failed`、命令退出码 1。
 
-1. 重载到新世代 → `state.activation = {phase: "pending", generation_id: N, deadline: now + activation_timeout}`
+1. 重载到新世代 → `state.activation = {phase: "pending", generation_id: N, deadline: now + activation.timeout}`
 2. 每轮 `_tick` 检查：所有服务 `READY` → 落 `.stable`，`phase = "stable"`
 3. 超过 deadline 仍未全绿 → 若 `auto_rollback` 开且存在上一个 stable：
    翻转 `current` 回该世代 → 重载 → `phase = "rolled_back"`（附失败服务与原因）
@@ -331,7 +331,7 @@ blue generations              # 列出全部世代与当前指针
 ## 9. 垃圾回收
 
 ```bash
-blue gc                 # 保留 generation_keep（默认 5）个最新世代 + 回滚目标
+blue gc                 # 保留 generation.keep（默认 5）个最新世代 + 回滚目标
 blue gc --keep 3
 blue gc --keep 1 --dry-run   # 先看要删什么
 ```
@@ -360,19 +360,29 @@ wheel 目录还没被任何产物引用（manifest 要等构建末尾才写）�
 实测（本项目真机）：`blue gc --keep 1` 删掉 6 个世代 + 108 个产物 + 2 个基座，
 `.blue/artifacts` 从 231 MB 降到 148 MB，系统仍在跑、无服务重启。
 
-## 10. 配置项（`blue.infd` 的 `supervisor` 块）
+## 10. 配置项（`supervisor.inft` 模板）
+
+`supervisor` 块的字段、约束与说明集中在项目根的 `supervisor.inft` 里，按职责分七组。
+`blue.infd` 只写要覆盖的项，其余取模板默认；结构与 `SupervisorSettings` 模型**同构**
+（配置里叫什么、模型上就叫什么，中间没有映射层）。
 
 ```infd
-supervisor {
-  # 世代
-  activation_timeout: <float, positive> = 120.0   # 激活后等全部 Ready 的上限
-  generation_keep: <int, range(1, 1000)> = 5      # gc 保留多少个世代
-  generation_auto_rollback: bool = true           # 健康验证失败是否自动回滚
-  artifact_python: str = "3.14"                   # 建 artifact venv 用的解释器（uv 解析）
-  artifact_link_mode: str = "hardlink"            # uv 的 link mode
-  artifact_warn_cross_device: bool = true          # 硬链接跨分区时告警
-}
+!from p"supervisor.inft" import Supervisor, Activation, Generation
+
+supervisor Supervisor(
+  activation = Activation(
+    timeout = 120.0,          # 激活后等全部 Ready 的上限
+  ),
+  generation = Generation(
+    keep = 5,                 # gc 保留多少个世代
+    auto_rollback = true,     # 健康验证失败是否自动回滚
+  ),
+)
 ```
+
+> 世代里冻结的是这份配置的**分组快照**，所以 `apply --config other.infd` 改到的
+> `activation.timeout`、`generation.auto_rollback` 会随世代一起生效，不会出现
+> 「配置改了、调谐器还用旧值」。
 
 ## 11. 与既有机制的关系
 

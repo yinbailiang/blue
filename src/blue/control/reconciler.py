@@ -168,9 +168,9 @@ class Supervisor:
         self._artifacts = ArtifactStore(
             settings.state_dir,
             project_root=desired.base_dir,
-            python=settings.artifact_python,
-            link_mode=settings.artifact_link_mode,
-            warn_cross_device=settings.artifact_warn_cross_device,
+            python=settings.generation.artifact.python,
+            link_mode=settings.generation.artifact.link_mode,
+            warn_cross_device=settings.generation.artifact.warn_cross_device,
         )
         self._config_error: str | None = None
         self._activation: ActivationState | None = None
@@ -194,8 +194,8 @@ class Supervisor:
                 logger.error(self._config_error)
         self._desired = desired
         self._backoff = Backoff(
-            base=desired.supervisor.restart_backoff,
-            maximum=desired.supervisor.restart_backoff_max,
+            base=desired.supervisor.restart.backoff,
+            maximum=desired.supervisor.restart.backoff_max,
         )
         self._runtimes: dict[str, _Runtime] = {
             name: _Runtime(desired=service)
@@ -370,7 +370,7 @@ class Supervisor:
                 continue
             await self._start(runtime, now)
 
-        stable_after = self._desired.supervisor.stable_after
+        stable_after = self._desired.supervisor.restart.stable_after
         # 这里必须用 time.time()：``runtime.ready_at`` 存的是墙钟（写进 state.json
         # 供展示），而 ``now`` 是 monotonic。两者相减恒为负，这段「稳定够了就清零
         # 失败计数」的逻辑此前从不生效。
@@ -473,7 +473,7 @@ class Supervisor:
             self._activation = None
             self._activation_deadline = 0.0
             return
-        timeout = self._desired.supervisor.activation_timeout
+        timeout = self._desired.supervisor.activation.timeout
         now = time.time()
         self._activation = ActivationState(
             phase="pending",
@@ -504,7 +504,7 @@ class Supervisor:
         取 ``activation_timeout`` 的 0.4 倍、封顶 1 秒：既远大于崩溃窗口
         （毫秒级），又给超时判定留下 2.5 倍余量。
         """
-        return min(1.0, max(0.05, self._desired.supervisor.activation_timeout * 0.4))
+        return min(1.0, max(0.05, self._desired.supervisor.activation.timeout * 0.4))
 
     async def _check_activation(self, now: float) -> None:
         """健康闸门：全部服务就绪**并连续保持一段宽限**才算激活成功，超时就回滚。"""
@@ -528,7 +528,7 @@ class Supervisor:
             self._dirty = True
             await self._fail_activation(
                 generation,
-                f"未在 {self._desired.supervisor.activation_timeout:.0f}s 内就绪："
+                f"未在 {self._desired.supervisor.activation.timeout:.0f}s 内就绪："
                 + "、".join(pending),
             )
             return
@@ -562,7 +562,7 @@ class Supervisor:
         self._generations.mark_failed(generation, message)
         fallback = self._generations.latest_stable(exclude=generation.id)
         logger.error("世代 %s 激活失败：%s", generation.id, message)
-        if not self._desired.supervisor.generation_auto_rollback or fallback is None:
+        if not self._desired.supervisor.generation.auto_rollback or fallback is None:
             self._activation = ActivationState(
                 phase="failed",
                 generation_id=generation.id,
@@ -725,8 +725,8 @@ class Supervisor:
 
         self._desired = desired
         self._backoff = Backoff(
-            base=desired.supervisor.restart_backoff,
-            maximum=desired.supervisor.restart_backoff_max,
+            base=desired.supervisor.restart.backoff,
+            maximum=desired.supervisor.restart.backoff_max,
         )
         if compiled is not None:
             self._config_error = None
@@ -854,7 +854,7 @@ class Supervisor:
         runtime.next_start_at = now + self._backoff.delay(runtime.consecutive_failures)
         if (
             runtime.consecutive_failures
-            >= self._desired.supervisor.restart_max_attempts
+            >= self._desired.supervisor.restart.max_attempts
         ):
             runtime.status = ServiceStatus.CRASH_LOOP
         else:
