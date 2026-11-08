@@ -392,6 +392,66 @@ def test_corrupt_generation_is_skipped(tmp_path: Path) -> None:
     assert store.list() == []
 
 
+def test_legacy_generation_file_stays_readable(tmp_path: Path) -> None:
+    """旧世代记录里的**布尔** supervisor 开关仍然读得懂（回归用例）。
+
+    配置分组化把 ``idempotency`` / ``journal`` 从布尔改成了对象，而
+    ``generation.json`` 是**跟过去签的合同**：老记录里存的是
+    ``"journal": true``。少了这层兼容，校验会失败、``list()`` 对坏目录是静默
+    跳过的——实测 11-07 那批世代（含当时正在跑的 0046）整体从历史里消失，
+    回滚目标一下退化到好几天前，而且没有任何一条日志说"你的历史没了"。
+    """
+    store = _store(tmp_path)
+    generation = store.create(
+        _desired(tmp_path, generation="gen-1"), _artifacts(tmp_path), reason="apply"
+    )
+    path = generation.path / GENERATION_FILE
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    payload["supervisor"] = {
+        "state_dir": str(tmp_path / ".blue"),
+        "uv_frozen": True,
+        "log_max_bytes": 1048576,
+        "log_backups": 1,
+        "restart_backoff": 0.5,
+        "restart_backoff_max": 30.0,
+        "restart_max_attempts": 10,
+        "stable_after": 60.0,
+        "registry_ttl": 15.0,
+        "registry_sweep_interval": 2.0,
+        "idempotency": True,
+        "idempotency_retention": 86400.0,
+        "idempotency_sweep_interval": 600.0,
+        "journal": True,
+        "journal_retention": 86400.0,
+        "journal_max_rows": None,
+        "journal_max_bytes": 67108864,
+        "journal_payload_mode": "digest",
+        "journal_payload_allowlist": [],
+        "journal_payload_max_bytes": 8192,
+        "journal_sweep_interval": 600.0,
+        "activation_timeout": 120.0,
+        "generation_keep": 5,
+        "generation_auto_rollback": True,
+        "artifact_python": "3.14",
+        "artifact_link_mode": "hardlink",
+        "artifact_warn_cross_device": True,
+        "await_control_change": True,
+        "smoke_enabled": True,
+        "smoke_timeout": 20.0,
+    }
+    path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+
+    reloaded = store.load(generation.id)
+
+    assert [item.id for item in store.list()] == [generation.id]
+    assert reloaded.data.supervisor is not None
+    # 布尔被升级成分组对象，取值不变
+    assert reloaded.data.supervisor.journal.enabled is True
+    assert reloaded.data.supervisor.idempotency.enabled is True
+    # 旧记录里没有的字段取默认，不会因为缺组就整条记录作废
+    assert reloaded.data.supervisor.activation.timeout > 0
+
+
 def test_gc_dry_run_touches_nothing(tmp_path: Path) -> None:
     """--dry-run 只报告，不删除。"""
     store = _store(tmp_path)

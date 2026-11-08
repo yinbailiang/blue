@@ -24,7 +24,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal, cast
 
-from pydantic import BaseModel, ConfigDict, Field, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 
 from blue.control.artifacts import ArtifactStore
 from blue.control.desired import render_state, write_runtime_configs
@@ -95,10 +95,41 @@ class _ServiceEntry(BaseModel):
     source_hash: str = ""
 
 
+_LEGACY_SWITCH_FIELDS = {"idempotency": "enabled", "journal": "enabled"}
+"""旧世代记录里的**布尔**开关 → 现在的分组字段名。
+
+``supervisor`` 配置分组化之前，``generation.json`` 里存的是
+``"idempotency": true`` / ``"journal": true``；模型改成 ``IdempotencySettings`` /
+``JournalSettings`` 之后，这两条老记录会**校验失败**，而 ``list()`` 对损坏目录是
+静默跳过的——实测 11-07 那批世代（含正在跑的 0046）整体从历史里消失，回滚目标
+一下退化到好几天前。状态文件是**跟过去签的合同**，不能像配置输入那样一改就硬拒。
+"""
+
+
+def _upgrade_legacy_supervisor(raw: object) -> object:
+    """把旧世代记录里的布尔开关改写成等价的 ``{"enabled": bool}``。"""
+    if not isinstance(raw, dict):
+        return raw
+    payload: dict[str, object] = dict(cast("dict[str, object]", raw))
+    changed = False
+    for name, field in _LEGACY_SWITCH_FIELDS.items():
+        value = payload.get(name)
+        if isinstance(value, bool):
+            payload[name] = {field: value}
+            changed = True
+    return payload if changed else cast("object", raw)
+
+
 class _GenerationFile(BaseModel):
     """``generation.json`` 的结构。"""
 
     model_config = ConfigDict(extra="forbid")
+
+    @field_validator("supervisor", mode="before")
+    @classmethod
+    def _compat_supervisor(cls, value: object) -> object:
+        """读取历史记录时容忍旧形状；写入永远是新的分组形状。"""
+        return _upgrade_legacy_supervisor(value)
 
     version: int = 2
     id: int
