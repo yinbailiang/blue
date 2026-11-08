@@ -66,6 +66,40 @@ jobs:
       - name: Install dependencies
         run: uv sync --all-packages
 
+      # browser / browser_ops / terminal 里有一批用例自带 skipif：缺 firefox、
+      # geckodriver、nvim 就静默跳过。本地这样很合理（不是人人装了浏览器），
+      # 但 CI 上「全绿」里会有一大块其实是「什么都没测」。所以这里装上，
+      # 并且下面用一步「缺件即失败」把静默跳过堵死。
+      - name: 安装 Firefox（browser / browser_ops）
+        if: matrix.os == 'ubuntu-latest'
+        uses: browser-actions/setup-firefox@v1
+
+      - name: 安装 geckodriver（browser_ops）
+        if: matrix.os == 'ubuntu-latest'
+        uses: browser-actions/setup-geckodriver@latest
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: 安装 neovim（terminal 的 E1568 端到端用例）
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends neovim
+
+      - name: 确认集成依赖已就位
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          missing=0
+          for bin in firefox geckodriver nvim; do
+            if path=$(command -v "$bin"); then
+              echo "OK   $bin -> $path"
+            else
+              echo "MISS $bin"
+              missing=1
+            fi
+          done
+          exit "$missing"
+
       # 覆盖率门槛只在 Linux 上强制：macOS 有若干仅在 POSIX/Linux 才走到的分支
       # （control/process.py 的信号路径、control/state.py 的锁等待），实测 82% vs 83%。
       # 两边都出报告，只有 Linux 用 --cov-fail-under 卡门。
@@ -77,17 +111,13 @@ jobs:
       - name: Run tests with coverage (gate)
         if: matrix.os == 'ubuntu-latest'
         run: |
-          uv run pytest -n 2 -m "" \
+          uv run pytest -n 2 -m "not integration" \
             --cov=blue --cov-report=term-missing --cov-fail-under=83 -v
 
       - name: Run tests with coverage (report only)
         if: matrix.os != 'ubuntu-latest'
         run: |
-          uv run pytest -n 2 -m "" --cov=blue --cov-report=term-missing -v
-
-      # 需要 broker 的用例自带 skipif，这里不启 RabbitMQ；真跑总线的是 integration。
-      - name: Integration（无 broker 时自动 skip）
-        run: uv run pytest -n 0 services/agent/tests/test_integration_rabbit.py -q
+          uv run pytest -n 2 -m "not integration" --cov=blue --cov-report=term-missing -v
 
   integration:
     name: integration (RabbitMQ)
@@ -123,4 +153,4 @@ jobs:
         run: uv sync --all-packages
 
       - name: 跨进程 fanout 往返
-        run: uv run pytest -n 0 services/agent/tests/test_integration_rabbit.py -q
+        run: uv run pytest -n 0 -m integration -q

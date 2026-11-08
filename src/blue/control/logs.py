@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import os
-from collections.abc import AsyncIterator
+from collections.abc import AsyncGenerator
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -102,8 +102,13 @@ class LogManager:
         text = data.decode("utf-8", errors="replace")
         return text.splitlines()[-lines:]
 
-    async def follow(self, service: str) -> AsyncIterator[str]:
-        """从文件末尾持续读取新行。"""
+    async def follow(self, service: str) -> AsyncGenerator[str]:
+        """从文件末尾持续读取新行。
+
+        注解写成 ``AsyncGenerator``（而不是更宽的 ``AsyncIterator``）：它确实是
+        异步生成器，调用方靠 ``aclosing`` / ``athrow`` 收尾时需要看到 ``aclose``。
+        写成 ``AsyncIterator`` 会让调用方在 strict 模式下拿不到这些成员。
+        """
         path = self.path_for(service)
         path.parent.mkdir(parents=True, exist_ok=True)
         path.touch(exist_ok=True)

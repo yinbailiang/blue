@@ -50,9 +50,12 @@ def _broker_reachable(url: str) -> bool:
         return False
 
 
-pytestmark = pytest.mark.skipif(
-    not _broker_reachable(RABBIT_URL), reason=f"RabbitMQ 不可达：{RABBIT_URL}"
-)
+pytestmark = [
+    pytest.mark.integration,
+    pytest.mark.skipif(
+        not _broker_reachable(RABBIT_URL), reason=f"RabbitMQ 不可达：{RABBIT_URL}"
+    ),
+]
 
 
 def test_tool_registry_and_call_over_rabbitmq() -> None:

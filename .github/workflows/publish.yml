@@ -58,10 +58,13 @@ jobs:
 
       # 覆盖率门槛由 test.yml 在每次推送时把守；发布只要求测试全过。
       # （macOS 的覆盖率天然比 Linux 低 1%——POSIX-only 分支不执行——所以这里不卡门。）
-      # -n 2 -m ""：覆盖 pyproject 默认的「-n 8 + 跳过 slow」。发布前要全量，
-      # 且 runner 核数少，高并行反而会让墙钟敏感用例抖。
+      # -n 2 而非默认 -n 8：覆盖 pyproject 默认的「-n 8 + 跳过 slow」，发布前要全量；
+      # runner 核数少，高并行反而会让墙钟敏感用例抖。
+      # -m "not integration" 而非 -m ""：那类用例要连真 RabbitMQ，默认 URL 指向
+      # 本机 `/blue` vhost（即生产），CI 里既没有隔离 broker 也不该碰它——交给
+      # 专门的 integration job（一次性容器）。其余（含 slow）照旧全量跑。
       - name: Run tests
-        run: uv run pytest -n 2 -m "" -q
+        run: uv run pytest -n 2 -m "not integration" -q
 
   release:
     name: build & release

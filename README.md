@@ -889,35 +889,53 @@ uv run pytest -q          # 默认并行 + 跳过 slow：约 15 秒
 - `services/*/tests/`：各服务单元测试；
 - `services/webui/tests/`：FastAPI REST 与 WebSocket 协议测试；
 - `tests/test_service_manifests.py`：服务目录、manifest、配置契约；
-- RabbitMQ 集成测试在 broker 不可达时自动跳过，可用 `BLUE_RABBIT_URL` 覆盖；
-  默认使用项目的 `blue` vhost（也可通过 `BLUE_BUS_URL` 指定）。
+- RabbitMQ 集成测试打 `integration` 标记，**默认不跑**（见下）；需要时显式
+  `-m integration`，并用 `BLUE_RABBIT_URL` 指向一个**可随意丢弃**的 broker。
 
 ### 跑法：默认并行，重活按需
 
-`pyproject.toml` 里 `addopts = "-n 8 -m 'not slow'"`，所以不带参数的 `uv run pytest`
-就是**日常该用的那条命令**：896 个用例并行跑完约 15 秒（此前串行 116 秒）。
+`pyproject.toml` 里 `addopts = "-n 8 -m 'not slow and not integration'"`，所以不带
+参数的 `uv run pytest` 就是**日常该用的那条命令**：909 个用例并行跑完约 16 秒
+（此前串行 116 秒）。
 
 ```bash
-uv run pytest                      # 日常：并行 + 跳过 slow
-uv run pytest -m ""                # 全量：把 slow 也算上（真起 firefox / geckodriver）
-uv run pytest -m slow              # 只跑依赖真实外部环境的集成用例
-uv run pytest services/agent       # 只跑改动涉及的模块，约 2 秒
-uv run pytest -n 0 -k 某个用例     # 调试：-n 0 关掉并行，断点/print 才看得见
-uv run pytest -n 2                 # 低并发的确定性模式（CI 与排查 flaky 用）
+uv run pytest                          # 日常：并行 + 跳过 slow 与 integration
+uv run pytest -m "not integration"     # 全量：把 slow 也算上（真起 firefox / geckodriver）
+uv run pytest -m slow                  # 只跑依赖真实外部环境的用例
+uv run pytest -m integration           # 只跑要连真 RabbitMQ 的用例（会建成员队列）
+uv run pytest services/agent           # 只跑改动涉及的模块，约 2 秒
+uv run pytest -n 0 -k 某个用例         # 调试：-n 0 关掉并行，断点/print 才看得见
+uv run pytest -n 2                     # 低并发的确定性模式（CI 与排查 flaky 用）
 ```
 
 几条经验值：
 
-| 并行度 | 耗时（899 个） | 说明 |
+| 并行度 | 耗时（909 个） | 说明 |
 |---|---|---|
 | `-n 0` | ~70s | 串行，仅用于调试 |
 | `-n 2` | ~36s | **CI 用这个**：GitHub runner 只有 2–4 核，再多会过载 |
-| `-n 8` | **~15.5s** | 本地默认。22 核机器上的甜点，连跑 6 次稳定 |
+| `-n 8` | **~16s** | 本地默认。22 核机器上的甜点，连跑 6 次稳定 |
 | `-n auto` | 12–69s 抖动 | **不要用**：22 worker 会互相抢，偶发超时 |
 
 `slow` 标记只留给**依赖真实外部环境**的用例：`browser` / `browser_ops` 里真起
 firefox、geckodriver 的那 6 条（并行时互相抢 GPU/进程资源，单个从 2.5s 涨到 11s，
 是唯一拖住关键路径的瓶颈）。纯时序敏感的用例不再需要它，见下。
+
+`integration` 标记留给**要连真 RabbitMQ** 的用例（目前一条：跨进程 fanout 往返）。
+它必须默认排除，原因不是慢，而是**默认 URL 指向本地 `/blue` vhost ——也就是正在跑的
+生产环境**：成员队列是 durable + 非 auto-delete（为了承载 restart 的补投积压），
+跑一次就留下三个队列并持续接收全量 fanout 事件，实测一分钟各堆约 2700 条，
+直到队列守卫的 `expires`（30 分钟）才消失。本地连着跑几十次测试，共享 vhost 上
+会积出几十万个孤儿消息。
+
+所以它只在隔离环境跑：CI 的 `integration` job 起一次性 RabbitMQ 容器，
+`-m integration` 显式启用，队列随容器销毁。本地想跑请自己起个可丢弃的 broker：
+`BLUE_RABBIT_URL=amqp://guest:guest@127.0.0.1:5673/ uv run pytest -m integration`。
+
+
+这些用例都带 `skipif`：本地没装就跳过，不拦人。**CI 上不跳过**——`test.yml` 会装
+firefox / geckodriver / neovim，并跑一步「缺件即失败」的检查，避免「绿在跳过上」。
+`tests/test_state.py` 里读 `/proc` 的那条是真正平台相关，macOS 上跳过属预期。
 
 > **曾经 flaky 的两条回滚用例已根治**（`test_activation_timeout_rolls_back` 等）。
 > 症状：`-n 8` 下约一半概率等不到 `rolled_back`，日志里连 ERROR 都没有。

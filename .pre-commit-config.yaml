@@ -55,15 +55,21 @@ repos:
   # 家族标准是 --cov-fail-under=90，本仓库实测 83%（health / logs / lifecycle /
   # journal 偏低）。这里先按**只升不降**的棘轮落 83：回归立刻失败，等补上测试再往上抬。
   #
-  # -m "" 覆盖 pyproject 默认的「跳过 slow」：覆盖率门槛必须按**全量**算。
+  # `-m "not integration"` 覆盖 pyproject 默认的「跳过 slow」：覆盖率门槛必须按**全量**算。
   # 排除 slow 会让覆盖率从 83% 掉到 82.29%——掉的正是在 test_activation 里
   # 验证回滚路径的那两条（它们覆盖 reconciler.py 的 _fail_activation/_reload_locked）。
   # -n 2 而非默认的 -n 8：那两条对负载敏感，低并发才稳（见 README「跑法」）。
+  #
+  # 为什么不能写 `-m ""`：那会连 `integration` 标记的用例一起跑，而它们的默认 URL
+  # 指向本机 `/blue` vhost ——也就是**正在跑的生产总线**。成员队列 durable + 非
+  # auto-delete，跑一次就留三个队列持续吃全量 fanout（实测一分钟各约 2700 条，
+  # 直到 30 分钟 expires）。本地提交时静默污染生产，是这套门最不该有的副作用。
+  # 要跑它们请显式 `-m integration` 并把 BLUE_RABBIT_URL 指向可丢弃的 broker。
   - repo: local
     hooks:
       - id: pytest-cov
         name: pytest coverage
-        entry: uv run pytest -n 2 -m "" --cov=blue --cov-fail-under=83 -q
+        entry: uv run pytest -n 2 -m "not integration" --cov=blue --cov-fail-under=83 -q
         language: system
         pass_filenames: false
         always_run: true

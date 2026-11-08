@@ -107,12 +107,17 @@ filterwarnings = ["ignore::starlette.exceptions.StarletteDeprecationWarning"]
 # 默认并行：882 个用例里绝大多数是进程内总线 + 临时目录，天然可并行，
 # 串行跑纯属浪费（实测 116s → 19s）。调试单个用例时用 `-n 0` 覆盖，
 # 免得 pdb 断在 worker 子进程里看不到。
-# 同时默认排除 slow：那 6 个用例真起 firefox / geckodriver，并行时会互相抢
-# 资源（单个从 2.5s 涨到 11s），是唯一拖住整条关键路径的瓶颈。全量跑用
-# `-m ""` 覆盖（CI 就是这么干的）。
-addopts = "-n 8 -m 'not slow'"
+# 同时默认排除两类：
+# - `slow`：6 个用例真起 firefox / geckodriver，并行时互相抢资源（单个从 2.5s
+#   涨到 11s），是唯一拖住关键路径的瓶颈。
+# - `integration`：要连**真实** RabbitMQ。默认 URL 指向本地 `/blue` vhost，也就是
+#   正在跑的生产环境——跑一次就建三个成员队列（durable + 非 auto-delete），
+#   一分钟各堆约 2700 条，直到 expires(30min) 才消失。本地默认永不触碰。
+# 全量跑用 `-m ""` 覆盖（CI 矩阵就是这么干的），真连 broker 的留给 `-m integration`。
+addopts = "-n 8 -m 'not slow and not integration'"
 markers = [
     "slow: 依赖真实外部环境（浏览器 / geckodriver / PTY / 真实子进程）的集成测试；日常用 -m 'not slow' 跳过",
+    "integration: 需要可达的 RabbitMQ（会在 broker 上建成员队列）；只在隔离环境用 -m integration 显式启用",
 ]
 
 [tool.interrogate]
